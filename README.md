@@ -1,69 +1,62 @@
 # Gestão GSO
 
-Sistema de gestão para GSO Soluções — Painel, Financeiro Empresa, Financeiro Pessoal, Fretes & Linhas, Veículos, Combustível, Manutenção, Motoristas, Contratos e Relatórios.
+Sistema de gestão para GSO Soluções — Painel, Financeiro Empresa, Financeiro Pessoal, Fretes & Linhas, Veículos, Combustível, Manutenção, Motoristas, Contratos, Documentos, Relatórios e Configurações.
 
-Stack: React 18 + Vite + Tailwind v3 + recharts + lucide-react. Dados em `localStorage` (chave `gso_data_v28`).
+Stack: **React 18 + Vite + Tailwind v3 + recharts + lucide-react + Firebase (Auth + Firestore)**.
+
+Dados na nuvem com **sincronização em tempo real** via `onSnapshot`. Multiusuário por empresa.
 
 ---
 
-## 1. Rodar local
+## ⚙️ Primeiro setup — leia o `FIREBASE_SETUP.md`
 
-Pré-requisito: Node.js 18+ instalado ([baixar aqui](https://nodejs.org/)).
+Esse projeto precisa de um projeto Firebase configurado para rodar. Siga o passo a passo em **`FIREBASE_SETUP.md`** (na raiz) — leva ~10 minutos.
+
+Resumo do que você vai fazer:
+1. Criar projeto no Firebase Console.
+2. Ativar Authentication (e-mail/senha).
+3. Criar Firestore Database.
+4. Publicar as regras de `firestore.rules`.
+5. Copiar `.env.example` → `.env` e preencher com as chaves do seu projeto.
+
+---
+
+## Rodar local
+
+Pré-requisito: Node.js 18+ ([baixar](https://nodejs.org/)).
 
 ```bash
 npm install
 npm run dev
 ```
 
-Abra http://localhost:5173
+Abra http://localhost:5173 e crie sua conta.
 
 ---
 
-## 2. Build de produção
+## Build de produção
 
 ```bash
-npm run build
-```
-
-Gera a pasta `dist/` com o site estático pronto.
-
-Para testar o build localmente:
-
-```bash
-npm run preview
+npm run build      # gera /dist
+npm run preview    # testa o build localmente
 ```
 
 ---
 
-## 3. Subir para o GitHub
+## Publicar no Vercel
 
 ```bash
-git init
-git add .
-git commit -m "Gestão GSO inicial"
-git branch -M main
+git init && git add . && git commit -m "Gestão GSO" && git branch -M main
 git remote add origin https://github.com/SEU-USUARIO/gestao-gso.git
 git push -u origin main
 ```
 
-(Crie o repositório vazio antes em https://github.com/new)
+Depois em https://vercel.com → **Add New → Project** → selecione o repositório → adicione as 6 variáveis `VITE_FIREBASE_*` em **Environment Variables** → **Deploy**.
+
+Detalhes em `FIREBASE_SETUP.md` (passo 10).
 
 ---
 
-## 4. Publicar no Vercel (grátis)
+## Convidar sócio
 
-1. Entre em https://vercel.com com sua conta GitHub.
-2. Clique em **Add New → Project**.
-3. Selecione o repositório `gestao-gso`.
-4. O Vercel detecta Vite automaticamente. Deixe tudo padrão.
-5. Clique em **Deploy**.
-
-Em ~1 minuto o app fica online em `https://gestao-gso.vercel.app` (ou nome similar).
-
-Cada `git push` futuro atualiza o site automaticamente.
-
----
-
-## Migrar para Firestore depois
-
-O app já tem uma camada `db` abstraída (`src/App.jsx`, próximo ao topo). Para trocar de `localStorage` para Firestore, basta substituir as duas funções `db.get` e `db.set` pelas chamadas do Firestore. Nenhum outro código precisa mudar.
+Dentro do app → **Configurações** → copie o **Código da empresa** → envie para o sócio → ele cria conta colando o código no campo "Código da empresa". Pronto, multiusuário em tempo real.
