@@ -6,12 +6,16 @@ import {
   AlertTriangle, MapPin, Route, ArrowUpRight, ArrowDownRight,
   Activity, Clock, Coins, Receipt, ChevronRight, ChevronDown, CircleAlert, Sun, Phone,
   Trophy, Flame, Lightbulb, Percent, Calendar,
-  Home, ShoppingCart, CreditCard, Heart, GraduationCap, Target, PiggyBank, Gauge, Sparkles
+  Home, ShoppingCart, CreditCard, Heart, GraduationCap, Target, PiggyBank, Gauge, Sparkles,
+  LogOut, Copy, Check, Building2,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Area, AreaChart, LineChart, Line, PieChart, Pie, Cell
 } from 'recharts';
+import { AuthProvider, useAuth } from './auth/AuthContext';
+import { AuthGate } from './auth/AuthGate';
+import { useFirestoreSync } from './data/useFirestoreSync';
 
 /* ============================================================
    GESTÃO GSO — v2.1
@@ -303,18 +307,21 @@ function Sidebar({ current, onNav, open, onClose, nomeEmpresa }) {
 // ============================================================
 // TOP BAR
 // ============================================================
-function TopBar({ title, subtitle, onMenu }) {
+function TopBar({ title, subtitle, onMenu, empresa, userName, onLogout }) {
   return (
     <div className="topbar">
       <div className="flex items-center gap-3 px-4 sm:px-7 py-3">
         <button onClick={onMenu} className="menu-btn lg:hidden"><MenuIcon size={20} /></button>
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <h1 className="display h-page t-ink truncate">{title}</h1>
           {subtitle && <p className="text-xs t-soft mt-0.5 truncate">{subtitle}</p>}
         </div>
-        <div className="brand-chip">
-          <div className="brand-mark">GSO</div>
-          <span className="brand-name hide-sm">GSO Soluções</span>
+        <div className="user-chip" title={userName}>
+          <div className="user-chip-info">
+            <span className="user-chip-emp">{empresa || 'Empresa'}</span>
+            <span className="user-chip-name">{userName || '—'}</span>
+          </div>
+          <button className="user-chip-out" onClick={onLogout} title="Sair"><LogOut size={14} /></button>
         </div>
       </div>
     </div>
@@ -2512,8 +2519,9 @@ function ComingSoon({ titulo, descricao }) {
 // ============================================================
 // MAIN APP
 // ============================================================
-export default function App() {
-  const [data, setData, loaded] = usePersistedState('gso_data_v28', seed());
+function AppInner() {
+  const { user, company, logout } = useAuth();
+  const [data, setData, loaded] = useFirestoreSync(company?.id);
   const [route, setRoute] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -2641,6 +2649,13 @@ export default function App() {
         .brand-chip{ margin-left:auto; display:inline-flex; align-items:center; gap:8px; flex-shrink:0; }
         .brand-mark{ width:30px; height:30px; border-radius:8px; background:#0B1533; color:#fff; display:flex; align-items:center; justify-content:center; font-family:'Fraunces',Georgia,serif; font-weight:600; font-size:12px; letter-spacing:.02em; }
         .brand-name{ font-size:13px; font-weight:600; color:#0B1324; }
+        .user-chip{ margin-left:auto; display:inline-flex; align-items:center; gap:10px; flex-shrink:0; background:#F4F6F8; border:1px solid #E5E7EB; border-radius:999px; padding:5px 5px 5px 12px; }
+        .user-chip-info{ display:flex; flex-direction:column; line-height:1.1; min-width:0; }
+        .user-chip-emp{ font-size:10.5px; color:#6B7280; text-transform:uppercase; letter-spacing:.04em; font-weight:500; }
+        .user-chip-name{ font-size:12.5px; color:#0B1324; font-weight:600; max-width:140px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .user-chip-out{ width:28px; height:28px; border-radius:999px; background:#fff; border:1px solid #E5E7EB; color:#6B7280; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; transition:color .15s, background .15s, border-color .15s; }
+        .user-chip-out:hover{ color:#B4234B; border-color:#FBC8D2; background:#FFF5F7; }
+        @media(max-width:520px){ .user-chip-info{ display:none; } .user-chip{ padding:5px; } }
 
         /* financeiro premium */
         .period-bar{ display:inline-flex; gap:5px; background:#fff; border:1px solid #E5E7EB; border-radius:12px; padding:5px; box-shadow:0 1px 2px rgba(11,19,36,.04); overflow-x:auto; -ms-overflow-style:none; scrollbar-width:none; }
@@ -2812,11 +2827,18 @@ export default function App() {
         .modal-head{ position:sticky; top:0; z-index:10; background:#F4F6F8; border-bottom:1px solid #E5E7EB; }
       `}</style>
 
-      <Sidebar current={route} onNav={setRoute} open={sidebarOpen} onClose={() => setSidebarOpen(false)} nomeEmpresa={data.config?.nomeEmpresa || 'Empresa'} />
+      <Sidebar current={route} onNav={setRoute} open={sidebarOpen} onClose={() => setSidebarOpen(false)} nomeEmpresa={data.config?.nomeEmpresa || company?.nome || 'Empresa'} />
 
       <main className="flex-1 min-w-0">
-        <TopBar title={cur.t} subtitle={cur.s} onMenu={() => setSidebarOpen(true)} />
-        {!loaded ? <div className="p-10 t-soft text-sm">Carregando…</div> : <>
+        <TopBar
+          title={cur.t}
+          subtitle={cur.s}
+          onMenu={() => setSidebarOpen(true)}
+          empresa={data.config?.nomeEmpresa || company?.nome}
+          userName={user?.displayName || user?.email}
+          onLogout={logout}
+        />
+        {!loaded ? <div className="p-10 t-soft text-sm">Carregando dados…</div> : <>
           {route === 'dashboard' && <Dashboard data={data} />}
           {route === 'finEmpresa' && <FinanceiroEmpresa data={data} setData={setData} />}
           {route === 'linhas' && <Linhas data={data} setData={setData} />}
@@ -2828,9 +2850,95 @@ export default function App() {
           {route === 'contratos' && <Contratos data={data} setData={setData} />}
           {route === 'documentos' && <ComingSoon titulo="Documentos" descricao="Upload e organização de CRLV, seguros, NFs e recibos com alertas de vencimento." />}
           {route === 'relatorios' && <Relatorios data={data} />}
-          {route === 'config' && <ComingSoon titulo="Configurações" descricao="Nome da empresa, preço médio do combustível, categorias e backup." />}
+          {route === 'config' && <Configuracoes data={data} setData={setData} />}
         </>}
       </main>
     </div>
+  );
+}
+
+function Configuracoes({ data, setData }) {
+  const { user, profile, company, logout } = useAuth();
+  const [nomeEmp, setNomeEmp] = useState(data.config?.nomeEmpresa || '');
+  const [preco, setPreco] = useState(data.config?.precoCombustivel ?? 5.89);
+  const [consumo, setConsumo] = useState(data.config?.consumoPadrao ?? 10);
+  const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  function salvar() {
+    setData((d) => ({
+      ...d,
+      config: { ...d.config, nomeEmpresa: nomeEmp, precoCombustivel: Number(preco) || 0, consumoPadrao: Number(consumo) || 0 },
+    }));
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  }
+
+  function copiarCodigo() {
+    if (!company?.id) return;
+    navigator.clipboard?.writeText(company.id).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  return (
+    <div className="p-4 sm:p-6 space-y-4">
+      <div className="card p-5">
+        <h3 className="display h-card t-ink mb-3">Empresa</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="block">
+            <span className="label">Nome da empresa</span>
+            <input className="inp" value={nomeEmp} onChange={(e) => setNomeEmp(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="label">Preço médio combustível (R$/L)</span>
+            <input type="number" step="0.01" className="inp" value={preco} onChange={(e) => setPreco(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="label">Consumo padrão (km/L)</span>
+            <input type="number" step="0.1" className="inp" value={consumo} onChange={(e) => setConsumo(e.target.value)} />
+          </label>
+        </div>
+        <div className="mt-4 flex items-center gap-3">
+          <button className="btn btn-primary" onClick={salvar}>Salvar</button>
+          {saved && <span className="t-green text-sm">✓ Salvo</span>}
+        </div>
+      </div>
+
+      <div className="card p-5">
+        <h3 className="display h-card t-ink mb-1">Convidar sócio ou colaborador</h3>
+        <p className="text-sm t-soft mb-3">Compartilhe o código abaixo. Quem criar conta usando esse código entra na mesma empresa e enxerga os mesmos dados em tempo real.</p>
+        <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
+          <code style={{ background: '#F4F6F8', border: '1px solid #E5E7EB', borderRadius: 8, padding: '8px 12px', fontSize: 12.5, fontFamily: 'Geist Mono, monospace', wordBreak: 'break-all', flex: '1 1 auto', minWidth: 0 }}>{company?.id || '—'}</code>
+          <button className="btn btn-ghost" onClick={copiarCodigo} style={{ flexShrink: 0 }}>
+            {copied ? <><Check size={14} /> Copiado</> : <><Copy size={14} /> Copiar</>}
+          </button>
+        </div>
+      </div>
+
+      <div className="card p-5">
+        <h3 className="display h-card t-ink mb-3">Conta</h3>
+        <div className="text-sm space-y-1.5">
+          <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>Nome:</span><span className="t-ink font-medium">{user?.displayName || profile?.nome || '—'}</span></div>
+          <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>E-mail:</span><span className="t-ink">{user?.email || '—'}</span></div>
+          <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>Empresa:</span><span className="t-ink">{company?.nome || '—'}</span></div>
+          <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>Função:</span><span className="t-ink capitalize">{profile?.role || '—'}</span></div>
+        </div>
+        <div className="mt-4">
+          <button className="btn btn-danger" onClick={logout}><LogOut size={14} /> Sair da conta</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AuthGate>
+        <AppInner />
+      </AuthGate>
+    </AuthProvider>
   );
 }
