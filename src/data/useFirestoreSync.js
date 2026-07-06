@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  collection, doc, onSnapshot, setDoc, deleteDoc, writeBatch,
+  collection, doc, onSnapshot, setDoc, deleteDoc,
 } from 'firebase/firestore';
 import { fdb } from '../firebase';
 
@@ -97,42 +97,9 @@ export function useFirestoreSync(companyId) {
     }
   }, [companyId]);
 
-  // ----- localStorage one-time migration -----
-  useEffect(() => {
-    if (!companyId || !ready) return;
-    const flagKey = `gso_migrated_${companyId}`;
-    if (localStorage.getItem(flagKey)) return;
-    const raw = localStorage.getItem('gso_data_v28');
-    if (!raw) { localStorage.setItem(flagKey, '1'); return; }
-    const cur = dataRef.current;
-    const isEmpty = COLS.every((k) => (cur[k] || []).length === 0);
-    if (!isEmpty) { localStorage.setItem(flagKey, '1'); return; }
-    try {
-      const parsed = JSON.parse(raw);
-      const batch = writeBatch(fdb);
-      let count = 0;
-      COLS.forEach((name) => {
-        (parsed[name] || []).forEach((item) => {
-          if (!item || !item.id) return;
-          const { id, ...rest } = item;
-          batch.set(doc(fdb, 'companies', companyId, name, id), rest);
-          count++;
-        });
-      });
-      if (parsed.config) batch.set(doc(fdb, 'companies', companyId, 'settings', 'main'), parsed.config);
-      batch.commit()
-        .then(() => {
-          console.log(`[migration] ${count} itens migrados do localStorage para Firestore`);
-          localStorage.setItem(flagKey, '1');
-          localStorage.setItem('gso_data_v28_backup', raw);
-          localStorage.removeItem('gso_data_v28');
-        })
-        .catch((e) => console.error('[migration]', e));
-    } catch (e) {
-      console.error('[migration parse]', e);
-      localStorage.setItem(flagKey, '1');
-    }
-  }, [companyId, ready]);
+  // Automatic localStorage migration was removed.
+  // New companies always start empty. If we ever need to import local data
+  // for a specific user, we can add an explicit button in Configurações.
 
   return [data, setData, ready];
 }
