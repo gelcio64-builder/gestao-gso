@@ -124,16 +124,22 @@ Pronto: o app fica online em `https://gestao-gso.vercel.app` (ou o nome que esco
 ```
 users/{uid}                   { nome, email, companyId, role, createdAt }
 companies/{cid}               { nome, ownerUid, members[], createdAt }
-  └── settings/main           { nomeEmpresa, precoCombustivel, consumoPadrao }
-  └── veiculos/{id}           { ... }
-  └── motoristas/{id}         { ... }
-  └── linhas/{id}             { ... }
-  └── combustivel/{id}        { ... }
-  └── manutencao/{id}         { ... }
-  └── finEmpresa/{id}         { ... }
-  └── finPessoal/{id}         { ... }
-  └── contratos/{id}          { ... }
-  └── metasPessoais/{id}      { ... }
+  └── settings/main           { nomeEmpresa, logoUrl, cnpj, telefone,
+                                emailContato, endereco, cidade, uf,
+                                precoCombustivel, consumoPadrao }
+  └── members/{uid}           { nome, email, role, modulosPermitidos,
+                                joinedAt }   ← controle de acesso por módulo
+  └── veiculos/{id}
+  └── motoristas/{id}
+  └── linhas/{id}
+  └── combustivel/{id}
+  └── manutencao/{id}
+  └── finEmpresa/{id}         (com statusConc: manual/pendente/conciliado)
+  └── finPessoal/{id}
+  └── contratos/{id}
+  └── metasPessoais/{id}
+  └── crmLeads/{id}           (CRM Comercial)
+  └── wms/{id}                (Armazém)
 ```
 
 Cada subcoleção é sincronizada em tempo real via `onSnapshot`. Quando um usuário cria/edita/exclui, o outro vê instantaneamente.

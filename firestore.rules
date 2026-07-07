@@ -2,35 +2,135 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Cada usuário lê/escreve apenas seu próprio doc /users/{uid}.
+    // ==============================================================
+    //   users/{uid} — cada usuário lê/escreve apenas seu próprio doc
+    // ==============================================================
     match /users/{uid} {
       allow read, create, update: if request.auth != null && request.auth.uid == uid;
       allow delete: if false;
     }
 
-    // Empresas: leitura/escrita somente para membros da empresa.
-    // O cadastro permite criar uma nova empresa colocando o próprio uid no array `members`.
+    // ==============================================================
+    //   companies/{cid} — leitura/escrita para membros da empresa
+    // ==============================================================
     match /companies/{cid} {
+
+      function isAuthed() { return request.auth != null; }
       function isMember() {
-        return request.auth != null && request.auth.uid in resource.data.members;
+        return isAuthed() && request.auth.uid in resource.data.members;
       }
       function joiningOrCreating() {
-        return request.auth != null && request.auth.uid in request.resource.data.members;
+        return isAuthed() && request.auth.uid in request.resource.data.members;
       }
 
-      allow read: if isMember();
+      allow read:   if isMember();
       allow create: if joiningOrCreating();
-      // Permite update se já é membro OU se está entrando no array members agora (join via código).
       allow update: if isMember() || joiningOrCreating();
       allow delete: if isMember() && request.auth.uid == resource.data.ownerUid;
 
-      // Subcoleções (veiculos, motoristas, linhas, combustivel, manutencao,
-      // finEmpresa, finPessoal, contratos, metasPessoais, settings, ...)
-      // Acesso somente para membros da empresa-pai.
-      match /{subcollection}/{docId} {
-        allow read, write: if request.auth != null
-          && request.auth.uid in get(/databases/$(database)/documents/companies/$(cid)).data.members;
+      // -------- helpers (usados pelas subcoleções abaixo) --------
+      function companyData() {
+        return get(/databases/$(database)/documents/companies/$(cid)).data;
       }
+      function isCompanyMember() {
+        return isAuthed() && request.auth.uid in companyData().members;
+      }
+      function isOwner() {
+        return isAuthed() && companyData().ownerUid == request.auth.uid;
+      }
+      function memberModulos() {
+        return get(/databases/$(database)/documents/companies/$(cid)/members/$(request.auth.uid)).data.modulosPermitidos;
+      }
+      // Regra: owner pode tudo; membro pode se modulosPermitidos for null (sem restrição)
+      // ou se o módulo estiver na lista de permissões.
+      function hasModuleAccess(mod) {
+        return isOwner() || memberModulos() == null || mod in memberModulos();
+      }
+
+      // ==============================================================
+      //   settings/main — nome, logo, CNPJ, preço combustível, etc.
+      //   Leitura: qualquer membro (topbar/dashboard leem daqui)
+      //   Escrita: só o dono da empresa
+      // ==============================================================
+      match /settings/{docId} {
+        allow read:  if isCompanyMember();
+        allow write: if isOwner();
+      }
+
+      // ==============================================================
+      //   members/{uid} — permissões por módulo de cada colaborador
+      //   Leitura: qualquer membro (Configurações lista todos)
+      //   Criação: o próprio usuário pode criar seu doc no primeiro login,
+      //            mas somente com modulosPermitidos == null (não pode se
+      //            auto-conceder permissões).
+      //   Update/Delete: só o dono da empresa
+      // ==============================================================
+      match /members/{memberUid} {
+        allow read: if isCompanyMember();
+        allow create: if isAuthed()
+                      && memberUid == request.auth.uid
+                      && request.resource.data.modulosPermitidos == null;
+        allow update, delete: if isOwner();
+      }
+
+      // ==============================================================
+      //   Subcoleções de dados operacionais
+      //   Leitura: qualquer membro da empresa (para Painel/Relatórios agregarem)
+      //   Escrita: apenas se o usuário tem o módulo correspondente liberado
+      //            (owner sempre libera)
+      // ==============================================================
+
+      match /veiculos/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('veiculos');
+      }
+      match /motoristas/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('motoristas');
+      }
+      match /linhas/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('linhas');
+      }
+      match /combustivel/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('combustivel');
+      }
+      match /manutencao/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('manutencao');
+      }
+      // finEmpresa: escrita autorizada por Financeiro Empresa OU por Importação
+      // (a Central de Importação grava lançamentos aqui)
+      match /finEmpresa/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember()
+                     && (hasModuleAccess('finEmpresa') || hasModuleAccess('importacao'));
+      }
+      match /finPessoal/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('finPessoal');
+      }
+      match /contratos/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('contratos');
+      }
+      // metasPessoais faz parte do Financeiro Pessoal
+      match /metasPessoais/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('finPessoal');
+      }
+      match /crmLeads/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('crm');
+      }
+      match /wms/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('wms');
+      }
+
+      // Qualquer subcoleção nova não listada acima ficará BLOQUEADA por padrão.
+      // Ao adicionar um módulo novo no futuro, criar match aqui para ele.
     }
   }
 }

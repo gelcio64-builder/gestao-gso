@@ -1,10 +1,19 @@
 # Gestão GSO
 
-Sistema de gestão para GSO Soluções — Painel, Financeiro Empresa, Financeiro Pessoal, Fretes & Linhas, Veículos, Combustível, Manutenção, Motoristas, Contratos, Documentos, Relatórios e Configurações.
+Sistema de gestão para transportadoras — Painel, Financeiro Empresa, Financeiro Pessoal, Fretes & Linhas, Veículos, Combustível, Manutenção, Motoristas, Contratos, **CRM Comercial**, **Armazém (WMS)**, Documentos, Relatórios, **Importação (OFX/CSV/Boleto)** e Configurações.
 
 Stack: **React 18 + Vite + Tailwind v3 + recharts + lucide-react + Firebase (Auth + Firestore)**.
 
 Dados na nuvem com **sincronização em tempo real** via `onSnapshot`. Multiusuário por empresa.
+
+## Destaques da versão atual
+
+- **CRM Comercial** — pipeline Kanban com 6 etapas (Prospecção → Contato → Proposta → Negociação → Ganho/Perdido), filtros por tipo de cliente, KPIs de pipeline/conversão/ticket médio.
+- **Central de Importação** — 5 formatos: **OFX** de extrato bancário, **Excel** (.xlsx/.xls) via SheetJS, **CSV** genérico, **XML NF-e/CT-e** (detecção automática de direção pelo CNPJ da empresa), e **boleto por linha digitável** (47/48 dígitos).
+- **Conciliação bancária** — status por lançamento (manual/pendente/conciliado) + barra de % no Painel.
+- **WMS básico** — cadastro de estoque com endereçamento, lote/validade, classificação ABC e alertas de vencimento.
+- **Acessos por Módulo** — dono da empresa controla em Configurações quais módulos cada colaborador enxerga no menu.
+- **Multi-empresa** — cada empresa tem seus dados totalmente isolados no Firestore.
 
 ---
 
