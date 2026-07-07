@@ -16,6 +16,13 @@ import {
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { AuthGate } from './auth/AuthGate';
 import { useFirestoreSync } from './data/useFirestoreSync';
+import { fdb } from './firebase';
+import { collection, doc as fsDoc, onSnapshot, updateDoc } from 'firebase/firestore';
+import { parseOFX } from './importers/ofx';
+import { parseBoleto } from './importers/boleto';
+import { parseCSV } from './importers/csv';
+import { parseXLSX } from './importers/xlsx';
+import { parseXML } from './importers/xml';
 
 /* ============================================================
    GESTÃO GSO — v2.1
@@ -267,19 +274,34 @@ const NAV = [
   { key: 'manutencao', label: 'Manutenção', icon: Wrench },
   { key: 'motoristas', label: 'Motoristas', icon: Users },
   { key: 'contratos', label: 'Contratos', icon: FileSignature },
+  { key: 'crm', label: 'CRM Comercial', icon: Target },
+  { key: 'wms', label: 'Armazém (WMS)', icon: Home },
   { key: 'documentos', label: 'Documentos', icon: FolderOpen },
   { key: 'relatorios', label: 'Relatórios', icon: BarChart3 },
+  { key: 'importacao', label: 'Importação', icon: ArrowDownRight },
   { key: 'config', label: 'Configurações', icon: Settings },
 ];
 
-function Sidebar({ current, onNav, open, onClose, nomeEmpresa }) {
+function Sidebar({ current, onNav, open, onClose, nomeEmpresa, logoUrl, permitidos }) {
+  const [imgErr, setImgErr] = useState(false);
+  const iniciais = (nomeEmpresa || 'E').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+  const items = useMemo(() => {
+    if (!permitidos) return NAV; // null = tudo liberado
+    const allowed = new Set([...permitidos, 'dashboard', 'config']); // sempre visíveis
+    return NAV.filter(n => allowed.has(n.key));
+  }, [permitidos]);
   return (
     <>
       {open && <div className="sb-overlay" onClick={onClose} />}
       <aside className={`sidebar ${open ? 'open' : ''}`}>
         <div className="sb-header">
-          <div className="flex items-center gap-3">
-            <div className="sb-logo"><Truck size={19} /></div>
+          <div className="sb-platform">Gestão GSO</div>
+          <div className="flex items-center gap-3 mt-2">
+            <div className="sb-logo sb-logo-emp">
+              {logoUrl && !imgErr
+                ? <img src={logoUrl} alt="" onError={() => setImgErr(true)} />
+                : <span className="sb-logo-txt">{iniciais}</span>}
+            </div>
             <div className="min-w-0">
               <div className="sb-name display">{nomeEmpresa}</div>
               <div className="sb-sub">Gestão &amp; Logística</div>
@@ -287,7 +309,7 @@ function Sidebar({ current, onNav, open, onClose, nomeEmpresa }) {
           </div>
         </div>
         <nav className="sb-nav">
-          {NAV.map((item) => {
+          {items.map((item) => {
             const Icon = item.icon; const active = current === item.key;
             return (
               <button key={item.key} onClick={() => { onNav(item.key); onClose(); }} className={`sb-item ${active ? 'on' : ''}`}>
@@ -307,7 +329,9 @@ function Sidebar({ current, onNav, open, onClose, nomeEmpresa }) {
 // ============================================================
 // TOP BAR
 // ============================================================
-function TopBar({ title, subtitle, onMenu, empresa, userName, onLogout }) {
+function TopBar({ title, subtitle, onMenu, empresa, logoUrl, userName, onLogout }) {
+  const [imgErr, setImgErr] = useState(false);
+  const iniciais = (empresa || 'E').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
   return (
     <div className="topbar">
       <div className="flex items-center gap-3 px-4 sm:px-7 py-3">
@@ -317,6 +341,11 @@ function TopBar({ title, subtitle, onMenu, empresa, userName, onLogout }) {
           {subtitle && <p className="text-xs t-soft mt-0.5 truncate">{subtitle}</p>}
         </div>
         <div className="user-chip" title={userName}>
+          <div className="user-chip-avatar">
+            {logoUrl && !imgErr
+              ? <img src={logoUrl} alt="" onError={() => setImgErr(true)} />
+              : <span>{iniciais}</span>}
+          </div>
           <div className="user-chip-info">
             <span className="user-chip-emp">{empresa || 'Empresa'}</span>
             <span className="user-chip-name">{userName || '—'}</span>
@@ -340,11 +369,16 @@ function Dashboard({ data }) {
     const mesSaid = finEmpresa.filter(x => x.tipo === 'saida' && monthKey(x.data) === mes).reduce((a, b) => a + b.valor, 0);
     const mesComb = combustivel.filter(x => monthKey(x.data) === mes).reduce((a, b) => a + b.valor, 0);
     const kmMes = linhas.filter(l => l.status === 'ativo').reduce((a, b) => a + (b.kmMensal || 0), 0);
+    const mesLanc = finEmpresa.filter(x => monthKey(x.data) === mes);
+    const concCount = mesLanc.filter(x => x.statusConc === 'conciliado').length;
+    const concTotal = mesLanc.length;
     return {
       faturamento: mesEntr, lucro: mesEntr - mesSaid,
       margem: mesEntr ? ((mesEntr - mesSaid) / mesEntr * 100).toFixed(1) : 0,
       combustivel: mesComb, kmMes, linhasAtivas: linhas.filter(l => l.status === 'ativo').length,
       veiculos: veiculos.length, manutPend: manutencao.filter(m => m.status !== 'realizada').length,
+      concPct: concTotal > 0 ? Math.round(concCount / concTotal * 100) : 0,
+      concCount, concTotal,
     };
   }, [finEmpresa, combustivel, veiculos, linhas, manutencao, mes]);
 
@@ -409,6 +443,20 @@ function Dashboard({ data }) {
             <div className={`display stat-lg mt-1 ${m.c}`}>{m.v}</div>
           </div>
         ))}
+      </div>
+
+      {/* Conciliação bancária */}
+      <div className="card p-4 sm:p-5">
+        <div className="flex items-center justify-between gap-3 mb-2">
+          <div>
+            <div className="label">Conciliação bancária do mês</div>
+            <div className="text-xs t-soft mt-0.5">{stats.concCount} de {stats.concTotal} lançamentos conciliados</div>
+          </div>
+          <div className="display stat-md mono t-ink" style={{ letterSpacing: '-.01em' }}>{stats.concPct}%</div>
+        </div>
+        <div className="bar-track" style={{ height: 8 }}>
+          <div className="bar-fill" style={{ width: `${stats.concPct}%`, background: stats.concPct >= 75 ? 'linear-gradient(90deg,#10A37F,#5EEAD4)' : stats.concPct >= 40 ? 'linear-gradient(90deg,#D97706,#F59E0B)' : 'linear-gradient(90deg,#B4234B,#EF4444)' }} />
+        </div>
       </div>
 
       {/* Charts */}
@@ -746,6 +794,8 @@ function FinanceiroEmpresa({ data, setData }) {
                     <div className="text-xs t-soft mt-0.5 flex flex-wrap items-center gap-1.5">
                       <Badge tone={sb.tone}>{sb.label}</Badge>
                       <Badge tone="slate">{x.categoria}</Badge>
+                      {x.statusConc === 'conciliado' && <Badge tone="green">✓ Conciliado</Badge>}
+                      {x.statusConc === 'pendente' && <Badge tone="orange">Pendente conciliação</Badge>}
                       <span>{fmtDate(x.data)}</span>
                       {(eff === 'pendente' || ov) && x.vencimento && <span className="hide-sm">· vence {fmtDate(x.vencimento)}</span>}
                       {linha && <span className="lnk-linha"><Route size={11} /> {linha.nome}</span>}
@@ -754,6 +804,9 @@ function FinanceiroEmpresa({ data, setData }) {
                   </div>
                   <div className={`mono text-sm font-semibold text-right ${canc ? 't-mute' : isE ? 't-green' : 't-red'}`} style={{ flexShrink: 0, textDecoration: canc ? 'line-through' : 'none' }}>{isE ? '+ ' : '− '}{fmtBRL(x.valor)}</div>
                   <div className="row-actions flex">
+                    {x.statusConc === 'pendente' && (
+                      <button onClick={() => setData(d => ({ ...d, finEmpresa: d.finEmpresa.map(y => y.id === x.id ? { ...y, statusConc: 'conciliado' } : y) }))} className="ibtn" title="Marcar como conciliado"><Check size={14} /></button>
+                    )}
                     <button onClick={() => { setEditing(x); setOpenForm(true); }} className="ibtn"><Pencil size={14} /></button>
                     <button onClick={() => handleDelete(x.id)} className="ibtn ibtn-del"><Trash2 size={14} /></button>
                   </div>
@@ -805,6 +858,7 @@ function LancamentoForm({ item, veiculos, linhas, contratos, onSave, onCancel })
     valor: item?.valor || '', cliente: item?.cliente || '', forma: item?.forma || 'PIX',
     veiculoId: item?.veiculoId || '', linhaId: item?.linhaId || '', contratoId: item?.contratoId || '', obs: item?.obs || '',
     status: item?.status || 'pago', vencimento: item?.vencimento || '', dataPagamento: item?.dataPagamento || '', recorrente: item?.recorrente || false,
+    statusConc: item?.statusConc || 'manual',
   });
   const cats = CAT_FIN_EMPRESA[f.tipo];
   const submitForm = () => { onSave({ ...f, valor: parseFloat(f.valor) || 0 }); };
@@ -2517,13 +2571,251 @@ function ComingSoon({ titulo, descricao }) {
 }
 
 // ============================================================
+// CRM COMERCIAL
+// ============================================================
+const CRM_STAGES = [
+  { key: 'prospeccao', label: 'Prospecção', color: '#64748B' },
+  { key: 'contato',    label: 'Contato',    color: '#3B82F6' },
+  { key: 'proposta',   label: 'Proposta',   color: '#8B5CF6' },
+  { key: 'negociacao', label: 'Negociação', color: '#F59E0B' },
+  { key: 'ganho',      label: 'Ganho',      color: '#10B981' },
+  { key: 'perdido',    label: 'Perdido',    color: '#EF4444' },
+];
+const CRM_TIPOS = ['Prefeitura', 'Licitação', 'Cliente privado', 'Carreto avulso'];
+const CRM_TIPO_COR = {
+  'Prefeitura':      { bg: '#EEF2FF', fg: '#4338CA' },
+  'Licitação':       { bg: '#FDF4FF', fg: '#86198F' },
+  'Cliente privado': { bg: '#ECFDF5', fg: '#065F46' },
+  'Carreto avulso':  { bg: '#FEF3C7', fg: '#92400E' },
+};
+const CRM_ORIGENS = ['Indicação', 'Ligação', 'Site', 'WhatsApp', 'Instagram', 'Cliente antigo', 'Outro'];
+
+function daysUntilISO(iso) {
+  if (!iso) return null;
+  const t = new Date(iso + 'T00:00:00').getTime();
+  const now = new Date(); now.setHours(0, 0, 0, 0);
+  return Math.round((t - now.getTime()) / 86400000);
+}
+
+function CrmComercial({ data, setData }) {
+  const { crmLeads = [] } = data;
+  const [openForm, setOpenForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [delTarget, setDelTarget] = useState(null);
+  const [toast, setToast] = useToast();
+  const [filter, setFilter] = useState('all');
+
+  const kpis = useMemo(() => {
+    const abertas = ['prospeccao', 'contato', 'proposta', 'negociacao'];
+    const emPipe = crmLeads.filter(l => abertas.includes(l.etapa));
+    const mesAtual = currentMonth();
+    const ganhosMes = crmLeads.filter(l => l.etapa === 'ganho' && monthKey(l.data) === mesAtual);
+    const fechados = crmLeads.filter(l => l.etapa === 'ganho' || l.etapa === 'perdido');
+    const ganhos = fechados.filter(l => l.etapa === 'ganho');
+    const conv = fechados.length > 0 ? (ganhos.length / fechados.length * 100) : 0;
+    const ticket = ganhos.length > 0 ? ganhos.reduce((a, b) => a + (+b.valor || 0), 0) / ganhos.length : 0;
+    return {
+      pipeSum: emPipe.reduce((a, b) => a + (+b.valor || 0), 0),
+      pipeCount: emPipe.length,
+      ganhoMesSum: ganhosMes.reduce((a, b) => a + (+b.valor || 0), 0),
+      ganhoMesCount: ganhosMes.length,
+      conv, ticket,
+    };
+  }, [crmLeads]);
+
+  const filtered = filter === 'all' ? crmLeads : crmLeads.filter(l => l.tipo === filter);
+
+  const handleSave = (item) => {
+    const msg = editing ? 'Lead atualizado' : 'Lead criado';
+    setData(d => ({
+      ...d,
+      crmLeads: editing
+        ? (d.crmLeads || []).map(x => x.id === editing.id ? { ...item, id: editing.id } : x)
+        : [...(d.crmLeads || []), { ...item, id: uid() }],
+    }));
+    setOpenForm(false); setEditing(null); setToast(msg);
+  };
+  const confirmDelete = () => {
+    if (delTarget) {
+      setData(d => ({ ...d, crmLeads: (d.crmLeads || []).filter(x => x.id !== delTarget.id) }));
+      setToast('Lead excluído'); setDelTarget(null);
+    }
+  };
+  const moveStage = (lead, dir) => {
+    const idx = CRM_STAGES.findIndex(s => s.key === lead.etapa);
+    const next = CRM_STAGES[idx + dir];
+    if (!next) return;
+    setData(d => ({
+      ...d,
+      crmLeads: (d.crmLeads || []).map(x => x.id === lead.id ? { ...x, etapa: next.key } : x),
+    }));
+    setToast(`Movido para ${next.label}`);
+  };
+
+  return (
+    <div className="p-4 sm:p-6 space-y-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <p className="text-sm t-soft" style={{ maxWidth: 520 }}>Acompanhe cada oportunidade da prospecção ao fechamento.</p>
+        </div>
+        <NewButton onClick={() => { setEditing(null); setOpenForm(true); }}>Novo lead</NewButton>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+        <div className="card kpi p-4">
+          <div className="label">Em pipeline</div>
+          <div className="mono stat-md t-ink" style={{ marginTop: 4 }}>{fmtBRL(kpis.pipeSum)}</div>
+          <div className="text-xs t-mute mt-1">{kpis.pipeCount} {kpis.pipeCount === 1 ? 'lead aberto' : 'leads abertos'}</div>
+        </div>
+        <div className="card kpi p-4">
+          <div className="label">Ganhos no mês</div>
+          <div className="mono stat-md t-green" style={{ marginTop: 4 }}>{fmtBRL(kpis.ganhoMesSum)}</div>
+          <div className="text-xs t-mute mt-1">{kpis.ganhoMesCount} {kpis.ganhoMesCount === 1 ? 'fechamento' : 'fechamentos'}</div>
+        </div>
+        <div className="card kpi p-4">
+          <div className="label">Conversão</div>
+          <div className="mono stat-md t-ink" style={{ marginTop: 4 }}>{kpis.conv.toFixed(0)}%</div>
+          <div className="text-xs t-mute mt-1">Ganhos ÷ total fechado</div>
+        </div>
+        <div className="card kpi p-4">
+          <div className="label">Ticket médio</div>
+          <div className="mono stat-md t-ink" style={{ marginTop: 4 }}>{fmtBRL(kpis.ticket)}</div>
+          <div className="text-xs t-mute mt-1">Média dos ganhos</div>
+        </div>
+      </div>
+
+      <div className="crm-filters">
+        {[{ k: 'all', l: 'Todos' }, ...CRM_TIPOS.map(t => ({ k: t, l: t }))].map(f => (
+          <button key={f.k} onClick={() => setFilter(f.k)} className={`chip ${filter === f.k ? 'chip-ink' : ''}`}>{f.l}</button>
+        ))}
+      </div>
+
+      <div className="crm-board-wrap">
+        <div className="crm-board">
+          {CRM_STAGES.map(s => {
+            const items = filtered.filter(l => l.etapa === s.key);
+            const sum = items.reduce((a, b) => a + (+b.valor || 0), 0);
+            return (
+              <div key={s.key} className="crm-col">
+                <div className="crm-col-head">
+                  <span className="crm-col-dot" style={{ background: s.color }} />
+                  <span className="crm-col-name">{s.label}</span>
+                  <span className="crm-col-count">{items.length}</span>
+                </div>
+                <div className="crm-col-sum mono">{fmtBRL(sum)}</div>
+                <div className="crm-col-body">
+                  {items.length === 0
+                    ? <div className="crm-empty">Sem leads {s.label.toLowerCase()}</div>
+                    : items.map(l => <LeadCard key={l.id} lead={l} stage={s} onEdit={() => { setEditing(l); setOpenForm(true); }} onDelete={() => setDelTarget(l)} onMove={(dir) => moveStage(l, dir)} />)}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <Modal open={openForm} onClose={() => { setOpenForm(false); setEditing(null); }} title={editing ? 'Editar lead' : 'Novo lead'} wide>
+        <LeadForm item={editing} onSave={handleSave} onCancel={() => { setOpenForm(false); setEditing(null); }} />
+      </Modal>
+      <ConfirmModal item={delTarget} title="Excluir lead" message={delTarget ? `Excluir "${delTarget.nome}"? Esta ação não pode ser desfeita.` : ''} onCancel={() => setDelTarget(null)} onConfirm={confirmDelete} />
+      <Toast msg={toast} />
+    </div>
+  );
+}
+
+function LeadCard({ lead, stage, onEdit, onDelete, onMove }) {
+  const tCor = CRM_TIPO_COR[lead.tipo] || { bg: '#F3F4F6', fg: '#374151' };
+  const d = daysUntilISO(lead.data);
+  const dataTxt = lead.data
+    ? (d === 0 ? 'Hoje' : d === 1 ? 'Amanhã' : d === -1 ? 'Ontem' : d < 0 ? `${-d}d atrasado` : `em ${d}d`)
+    : '';
+  const openStage = ['prospeccao', 'contato', 'proposta', 'negociacao'].includes(stage.key);
+  const overdue = d !== null && d < 0 && openStage;
+  const idx = CRM_STAGES.findIndex(s => s.key === stage.key);
+  return (
+    <div className="lead-card" style={{ borderLeftColor: stage.color }} onClick={onEdit}>
+      <div className="lead-nome">{lead.nome}</div>
+      <div className="lead-meta">
+        <span className="lead-badge" style={{ background: tCor.bg, color: tCor.fg }}>{lead.tipo}</span>
+        {lead.valor > 0 && <span className="lead-valor mono">{fmtBRL(lead.valor)}</span>}
+      </div>
+      {lead.acao && <div className="lead-acao">{lead.acao}</div>}
+      {lead.data && <div className={`lead-data ${overdue ? 'overdue' : ''}`}>{dataTxt} · {fmtDate(lead.data)}</div>}
+      <div className="lead-actions" onClick={(e) => e.stopPropagation()}>
+        <button className="lead-btn" onClick={() => onMove(-1)} disabled={idx === 0} title="Etapa anterior"><ChevronRight size={13} style={{ transform: 'rotate(180deg)' }} /></button>
+        <button className="lead-btn" onClick={onEdit} title="Editar"><Pencil size={12} /></button>
+        <button className="lead-btn lead-btn-del" onClick={onDelete} title="Excluir"><Trash2 size={12} /></button>
+        <button className="lead-btn" onClick={() => onMove(1)} disabled={idx === CRM_STAGES.length - 1} title="Próxima etapa"><ChevronRight size={13} /></button>
+      </div>
+    </div>
+  );
+}
+
+function LeadForm({ item, onSave, onCancel }) {
+  const [nome, setNome] = useState(item?.nome || '');
+  const [tipo, setTipo] = useState(item?.tipo || 'Cliente privado');
+  const [etapa, setEtapa] = useState(item?.etapa || 'prospeccao');
+  const [tel, setTel] = useState(item?.tel || '');
+  const [email, setEmail] = useState(item?.email || '');
+  const [cidade, setCidade] = useState(item?.cidade || '');
+  const [uf, setUf] = useState(item?.uf || '');
+  const [valor, setValor] = useState(item?.valor || '');
+  const [origem, setOrigem] = useState(item?.origem || 'Indicação');
+  const [acao, setAcao] = useState(item?.acao || '');
+  const [dataPrev, setDataPrev] = useState(item?.data || '');
+  const [obs, setObs] = useState(item?.obs || '');
+  const [err, setErr] = useState('');
+
+  const submit = () => {
+    if (!nome.trim()) { setErr('Informe o nome do cliente.'); return; }
+    onSave({
+      nome: nome.trim(), tipo, etapa, tel, email, cidade, uf: uf.toUpperCase().slice(0, 2),
+      valor: Number(valor) || 0, origem, acao, data: dataPrev, obs,
+    });
+  };
+
+  return (
+    <div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Nome do cliente *" span={2}>
+          <input className="inp" value={nome} onChange={(e) => { setNome(e.target.value); setErr(''); }} placeholder="Ex.: Prefeitura de Osasco" />
+        </Field>
+        <Field label="Tipo"><select className="inp" value={tipo} onChange={(e) => setTipo(e.target.value)}>{CRM_TIPOS.map(t => <option key={t}>{t}</option>)}</select></Field>
+        <Field label="Etapa"><select className="inp" value={etapa} onChange={(e) => setEtapa(e.target.value)}>{CRM_STAGES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</select></Field>
+        <Field label="Telefone / WhatsApp"><input className="inp" value={tel} onChange={(e) => setTel(e.target.value)} placeholder="(11) 99999-9999" /></Field>
+        <Field label="E-mail"><input className="inp" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="contato@cliente.com" /></Field>
+        <Field label="Cidade"><input className="inp" value={cidade} onChange={(e) => setCidade(e.target.value)} /></Field>
+        <Field label="UF"><input className="inp" value={uf} maxLength={2} onChange={(e) => setUf(e.target.value)} /></Field>
+        <Field label="Valor estimado (R$)"><input className="inp mono" type="number" step="0.01" value={valor} onChange={(e) => setValor(e.target.value)} placeholder="0,00" /></Field>
+        <Field label="Origem"><select className="inp" value={origem} onChange={(e) => setOrigem(e.target.value)}>{CRM_ORIGENS.map(o => <option key={o}>{o}</option>)}</select></Field>
+        <Field label="Próxima ação" span={2}><input className="inp" value={acao} onChange={(e) => setAcao(e.target.value)} placeholder="Ex.: Enviar proposta comercial" /></Field>
+        <Field label="Data prevista de fechamento"><input className="inp" type="date" value={dataPrev} onChange={(e) => setDataPrev(e.target.value)} /></Field>
+        <Field label="Observações" span={2}><textarea className="inp" rows={3} value={obs} onChange={(e) => setObs(e.target.value)} placeholder="Anotações internas, contexto do lead..." /></Field>
+      </div>
+      {err && <div className="t-red text-sm mt-3">{err}</div>}
+      <div className="flex gap-2 mt-4 justify-end">
+        <button className="btn btn-ghost" onClick={onCancel}>Cancelar</button>
+        <button className="btn btn-primary" onClick={submit}>Salvar</button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // MAIN APP
 // ============================================================
 function AppInner() {
-  const { user, company, logout } = useAuth();
+  const { user, company, logout, modulosPermitidos, isOwner } = useAuth();
   const [data, setData, loaded] = useFirestoreSync(company?.id);
   const [route, setRoute] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Guard: if user hit a route they can't see (via memory of last route or direct URL), send to dashboard
+  useEffect(() => {
+    if (isOwner || !modulosPermitidos) return;
+    const allowed = new Set([...modulosPermitidos, 'dashboard', 'config']);
+    if (!allowed.has(route)) setRoute('dashboard');
+  }, [route, modulosPermitidos, isOwner]);
 
   useEffect(() => {
     const link = document.createElement('link');
@@ -2543,8 +2835,11 @@ function AppInner() {
     manutencao: { t: 'Manutenção', s: 'Preventiva, corretiva e agendamentos' },
     motoristas: { t: 'Motoristas', s: 'Cadastro e documentação' },
     contratos: { t: 'Contratos & Licitações', s: 'Acompanhamento de contratos' },
+    crm: { t: 'CRM Comercial', s: 'Pipeline de leads e oportunidades' },
+    wms: { t: 'Armazém (WMS)', s: 'Estoque, endereçamento e giro' },
     documentos: { t: 'Documentos', s: 'Organização e vencimentos' },
     relatorios: { t: 'Relatórios', s: 'Análises detalhadas com filtros' },
+    importacao: { t: 'Importação', s: 'OFX, boleto e CSV com conciliação' },
     config: { t: 'Configurações', s: 'Empresa, preços médios, categorias' },
   };
   const cur = titles[route];
@@ -2631,7 +2926,11 @@ function AppInner() {
         .sidebar.open{ transform:translateX(0); }
         .sb-overlay{ position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.35); -webkit-backdrop-filter:blur(2px); backdrop-filter:blur(2px); }
         .sb-header{ padding:20px; border-bottom:1px solid rgba(255,255,255,.08); }
-        .sb-logo{ width:38px; height:38px; border-radius:11px; background:rgba(255,255,255,.1); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; }
+        .sb-platform{ color:#7C89A3; font-size:10.5px; text-transform:uppercase; letter-spacing:.14em; font-weight:600; font-family:'Fraunces',Georgia,serif; }
+        .sb-logo{ width:38px; height:38px; border-radius:11px; background:rgba(255,255,255,.1); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; overflow:hidden; }
+        .sb-logo-emp{ background:#fff; padding:0; }
+        .sb-logo-emp img{ width:100%; height:100%; object-fit:cover; }
+        .sb-logo-txt{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:14px; letter-spacing:-.01em; }
         .sb-name{ color:#fff; font-size:1.05rem; font-weight:600; line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         .sb-sub{ color:#7C89A3; font-size:11px; letter-spacing:.03em; margin-top:2px; }
         .sb-nav{ flex:1; overflow-y:auto; padding:16px 12px; display:flex; flex-direction:column; gap:4px; }
@@ -2649,13 +2948,19 @@ function AppInner() {
         .brand-chip{ margin-left:auto; display:inline-flex; align-items:center; gap:8px; flex-shrink:0; }
         .brand-mark{ width:30px; height:30px; border-radius:8px; background:#0B1533; color:#fff; display:flex; align-items:center; justify-content:center; font-family:'Fraunces',Georgia,serif; font-weight:600; font-size:12px; letter-spacing:.02em; }
         .brand-name{ font-size:13px; font-weight:600; color:#0B1324; }
-        .user-chip{ margin-left:auto; display:inline-flex; align-items:center; gap:10px; flex-shrink:0; background:#F4F6F8; border:1px solid #E5E7EB; border-radius:999px; padding:5px 5px 5px 12px; }
-        .user-chip-info{ display:flex; flex-direction:column; line-height:1.1; min-width:0; }
+        .user-chip{ margin-left:auto; display:inline-flex; align-items:center; gap:10px; flex-shrink:0; background:#F4F6F8; border:1px solid #E5E7EB; border-radius:999px; padding:4px 5px 4px 5px; }
+        .user-chip-avatar{ width:32px; height:32px; border-radius:999px; overflow:hidden; flex-shrink:0; background:#fff; border:1px solid #E5E7EB; display:flex; align-items:center; justify-content:center; }
+        .user-chip-avatar img{ width:100%; height:100%; object-fit:cover; }
+        .user-chip-avatar span{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:12px; letter-spacing:-.01em; }
+        .user-chip-info{ display:flex; flex-direction:column; line-height:1.1; min-width:0; margin-left:2px; }
         .user-chip-emp{ font-size:10.5px; color:#6B7280; text-transform:uppercase; letter-spacing:.04em; font-weight:500; }
         .user-chip-name{ font-size:12.5px; color:#0B1324; font-weight:600; max-width:140px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         .user-chip-out{ width:28px; height:28px; border-radius:999px; background:#fff; border:1px solid #E5E7EB; color:#6B7280; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; transition:color .15s, background .15s, border-color .15s; }
         .user-chip-out:hover{ color:#B4234B; border-color:#FBC8D2; background:#FFF5F7; }
-        @media(max-width:520px){ .user-chip-info{ display:none; } .user-chip{ padding:5px; } }
+        @media(max-width:520px){ .user-chip-info{ display:none; } .user-chip{ padding:4px; } }
+        .cfg-logo-preview{ width:64px; height:64px; border-radius:14px; overflow:hidden; background:#fff; border:1px solid #E5E7EB; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
+        .cfg-logo-preview img{ width:100%; height:100%; object-fit:cover; }
+        .cfg-logo-fallback{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:22px; letter-spacing:-.02em; }
 
         /* financeiro premium */
         .period-bar{ display:inline-flex; gap:5px; background:#fff; border:1px solid #E5E7EB; border-radius:12px; padding:5px; box-shadow:0 1px 2px rgba(11,19,36,.04); overflow-x:auto; -ms-overflow-style:none; scrollbar-width:none; }
@@ -2825,9 +3130,70 @@ function AppInner() {
         @media(min-width:640px){ .modal{ border-radius:16px; box-shadow:0 20px 60px rgba(0,0,0,.25); } }
         .modal-md{ max-width:460px; } .modal-wide{ max-width:640px; }
         .modal-head{ position:sticky; top:0; z-index:10; background:#F4F6F8; border-bottom:1px solid #E5E7EB; }
+
+        /* CRM Comercial */
+        .crm-filters{ display:flex; gap:6px; overflow-x:auto; padding-bottom:6px; -webkit-overflow-scrolling:touch; }
+        .crm-filters::-webkit-scrollbar{ height:3px; }
+        .crm-filters::-webkit-scrollbar-thumb{ background:#D1D5DB; border-radius:99px; }
+        .crm-filters .chip{ padding:6px 13px; border-radius:999px; background:#fff; color:#4B5563; border:1px solid #E5E7EB; font-size:12.5px; font-weight:500; white-space:nowrap; cursor:pointer; transition:all .15s; flex-shrink:0; display:inline-flex; align-items:center; }
+        .crm-filters .chip:hover{ border-color:#9CA3AF; color:#0B1324; }
+        .crm-filters .chip-ink{ background:#0B1324; color:#fff; border-color:#0B1324; }
+        .crm-board-wrap{ background:#EDEEF1; border-radius:16px; padding:12px; margin:0 -4px; }
+        .crm-board{ display:flex; gap:12px; overflow-x:auto; scroll-snap-type:x mandatory; -webkit-overflow-scrolling:touch; padding:4px; }
+        .crm-board::-webkit-scrollbar{ height:6px; }
+        .crm-board::-webkit-scrollbar-thumb{ background:#C9CDD3; border-radius:99px; }
+        .crm-col{ flex:0 0 280px; scroll-snap-align:start; display:flex; flex-direction:column; min-height:360px; }
+        @media(min-width:768px){ .crm-col{ flex:0 0 296px; } }
+        .crm-col-head{ display:flex; align-items:center; gap:8px; padding:6px 12px 10px; }
+        .crm-col-dot{ width:8px; height:8px; border-radius:99px; flex-shrink:0; }
+        .crm-col-name{ font-weight:600; font-size:12.5px; color:#0B1324; text-transform:uppercase; letter-spacing:.04em; }
+        .crm-col-count{ margin-left:auto; font-size:11px; color:#4B5563; background:#fff; border:1px solid #E5E7EB; border-radius:99px; padding:2px 8px; font-weight:500; }
+        .crm-col-sum{ padding:0 12px 10px; font-size:11.5px; color:#9CA3AF; font-weight:500; }
+        .crm-col-body{ display:flex; flex-direction:column; gap:8px; padding:0 4px 4px; min-height:80px; }
+        .crm-empty{ border:2px dashed #D1D5DB; border-radius:12px; padding:24px 12px; text-align:center; color:#9CA3AF; font-size:12px; }
+        .lead-card{ background:#fff; border-radius:12px; padding:12px 12px 10px; border:1px solid #E5E7EB; border-left:3px solid; cursor:pointer; transition:transform .18s, box-shadow .18s; }
+        .lead-card:hover{ transform:translateY(-2px); box-shadow:0 8px 18px rgba(11,19,36,.08); }
+        .lead-card:active{ transform:scale(.995); }
+        .lead-nome{ font-weight:600; font-size:13.5px; color:#0B1324; line-height:1.25; margin-bottom:6px; word-break:break-word; }
+        .lead-meta{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+        .lead-badge{ font-size:10.5px; font-weight:500; padding:2px 8px; border-radius:99px; letter-spacing:.02em; }
+        .lead-valor{ font-weight:600; font-size:13px; color:#0B1324; margin-left:auto; }
+        .lead-acao{ font-size:11.5px; color:#4B5563; line-height:1.35; margin-bottom:2px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+        .lead-data{ font-size:10.5px; color:#9CA3AF; font-weight:500; }
+        .lead-data.overdue{ color:#B4234B; font-weight:600; }
+        .lead-actions{ display:flex; gap:4px; margin-top:8px; padding-top:8px; border-top:1px solid #F3F4F6; }
+        .lead-btn{ flex:1; background:#F9FAFB; border:1px solid #E5E7EB; border-radius:7px; padding:5px; color:#4B5563; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:all .12s; }
+        .lead-btn:hover:not(:disabled){ background:#F3F4F6; color:#0B1324; }
+        .lead-btn-del:hover:not(:disabled){ background:#FBEAEF; color:#B4234B; border-color:#FBC8D2; }
+        .lead-btn:disabled{ opacity:.3; cursor:not-allowed; }
+
+        /* Importação */
+        .imp-drop{ border:2px dashed #D1D5DB; border-radius:14px; padding:20px 16px; background:#F9FAFB; transition:border-color .15s, background .15s; }
+        .imp-drop:hover{ border-color:#9CA3AF; background:#F3F4F6; }
+        .imp-preview{ display:flex; flex-direction:column; gap:6px; max-height:420px; overflow-y:auto; padding:4px; }
+        .imp-preview::-webkit-scrollbar{ width:6px; }
+        .imp-preview::-webkit-scrollbar-thumb{ background:#D1D5DB; border-radius:99px; }
+        .imp-row{ display:flex; align-items:center; gap:10px; padding:9px 11px; background:#fff; border:1px solid #EFF0F2; border-radius:11px; transition:border-color .15s, box-shadow .15s; }
+        .imp-row:hover{ border-color:#E5E7EB; box-shadow:0 3px 12px rgba(11,19,36,.05); }
+
+        /* WMS */
+        .wms-list{ display:flex; flex-direction:column; gap:6px; }
+        .wms-row{ display:flex; align-items:center; gap:11px; padding:11px; background:#fff; border:1px solid #EFF0F2; border-radius:11px; transition:transform .15s, box-shadow .15s, border-color .15s; }
+        .wms-row:hover{ border-color:#E5E7EB; box-shadow:0 4px 14px rgba(11,19,36,.06); transform:translateY(-1px); }
+        .wms-sku{ min-width:110px; flex-shrink:0; padding-right:11px; border-right:1px solid #F1F2F4; }
+        @media(max-width:640px){ .wms-sku{ min-width:90px; padding-right:8px; } }
+
+        /* Membros da empresa */
+        .mb-row{ padding:14px; background:#F9FAFB; border:1px solid #EFF0F2; border-radius:12px; }
+        .mb-mods{ display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+        .mb-chip{ display:inline-flex; align-items:center; gap:5px; padding:6px 10px; border-radius:99px; font-size:12px; font-weight:500; font-family:inherit; background:#fff; color:#4B5563; border:1px solid #E5E7EB; cursor:pointer; transition:all .12s; }
+        .mb-chip:hover:not(:disabled){ border-color:#9CA3AF; }
+        .mb-chip.on{ background:#0B1324; color:#fff; border-color:#0B1324; }
+        .mb-chip:disabled{ opacity:.5; cursor:wait; }
+        .btn-sm{ padding:5px 11px; font-size:12.5px; }
       `}</style>
 
-      <Sidebar current={route} onNav={setRoute} open={sidebarOpen} onClose={() => setSidebarOpen(false)} nomeEmpresa={data.config?.nomeEmpresa || company?.nome || 'Empresa'} />
+      <Sidebar current={route} onNav={setRoute} open={sidebarOpen} onClose={() => setSidebarOpen(false)} nomeEmpresa={data.config?.nomeEmpresa || company?.nome || 'Empresa'} logoUrl={data.config?.logoUrl} permitidos={isOwner ? null : modulosPermitidos} />
 
       <main className="flex-1 min-w-0">
         <TopBar
@@ -2835,6 +3201,7 @@ function AppInner() {
           subtitle={cur.s}
           onMenu={() => setSidebarOpen(true)}
           empresa={data.config?.nomeEmpresa || company?.nome}
+          logoUrl={data.config?.logoUrl}
           userName={user?.displayName || user?.email}
           onLogout={logout}
         />
@@ -2848,8 +3215,11 @@ function AppInner() {
           {route === 'finPessoal' && <FinanceiroPessoal data={data} setData={setData} />}
           {route === 'motoristas' && <Motoristas data={data} setData={setData} />}
           {route === 'contratos' && <Contratos data={data} setData={setData} />}
+          {route === 'crm' && <CrmComercial data={data} setData={setData} />}
+          {route === 'wms' && <ArmazemWMS data={data} setData={setData} />}
           {route === 'documentos' && <ComingSoon titulo="Documentos" descricao="Upload e organização de CRLV, seguros, NFs e recibos com alertas de vencimento." />}
           {route === 'relatorios' && <Relatorios data={data} />}
+          {route === 'importacao' && <Importacao data={data} setData={setData} />}
           {route === 'config' && <Configuracoes data={data} setData={setData} />}
         </>}
       </main>
@@ -2857,40 +3227,688 @@ function AppInner() {
   );
 }
 
-function Configuracoes({ data, setData }) {
-  const { user, profile, company, logout } = useAuth();
-  const [nomeEmp, setNomeEmp] = useState(data.config?.nomeEmpresa || '');
-  const [preco, setPreco] = useState(data.config?.precoCombustivel ?? 5.89);
-  const [consumo, setConsumo] = useState(data.config?.consumoPadrao ?? 10);
-  const [copied, setCopied] = useState(false);
-  const [saved, setSaved] = useState(false);
+// ============================================================
+// IMPORTAÇÃO (OFX + Boleto + CSV)
+// ============================================================
+const BANCOS_IMP = ['Itaú', 'Cora', 'BTG Pactual', 'Santander', 'Bradesco', 'Banco do Brasil', 'Caixa', 'Sicoob', 'Sicredi', 'Inter', 'Nubank', 'C6 Bank', 'Safra', 'Original', 'Outro'];
 
-  function salvar() {
-    setData((d) => ({
-      ...d,
-      config: { ...d.config, nomeEmpresa: nomeEmp, precoCombustivel: Number(preco) || 0, consumoPadrao: Number(consumo) || 0 },
+function Importacao({ data, setData }) {
+  const [banco, setBanco] = useState('Itaú');
+  const [competencia, setCompetencia] = useState(currentMonth());
+  const [preview, setPreview] = useState([]);
+  const [source, setSource] = useState(''); // 'ofx' | 'csv' | 'boleto'
+  const [linhaDig, setLinhaDig] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useToast();
+  const fileRef = React.useRef(null);
+
+  const totalPreview = preview.reduce((a, b) => a + (b.tipo === 'entrada' ? b.valor : -b.valor), 0);
+  const entradas = preview.filter(x => x.tipo === 'entrada').reduce((a, b) => a + b.valor, 0);
+  const saidas = preview.filter(x => x.tipo === 'saida').reduce((a, b) => a + b.valor, 0);
+
+  const processFiles = async (files) => {
+    if (!files || files.length === 0) return;
+    setBusy(true);
+    const all = [];
+    const empresaCnpj = data.config?.cnpj || '';
+    for (const f of files) {
+      try {
+        const ext = f.name.split('.').pop().toLowerCase();
+        if (ext === 'xlsx' || ext === 'xls') {
+          const buffer = await f.arrayBuffer();
+          const parsed = parseXLSX(buffer, banco);
+          setSource('xlsx');
+          all.push(...parsed);
+          continue;
+        }
+        const text = await f.text();
+        if (ext === 'xml' || /<(?:[\w-]+:)?(?:nfeProc|cteProc|NFe|CTe)\b/.test(text)) {
+          const parsed = parseXML(text, banco, empresaCnpj);
+          setSource('xml');
+          all.push(...parsed);
+        } else if (ext === 'ofx' || text.includes('<OFX') || text.includes('<STMTTRN>')) {
+          const parsed = parseOFX(text, banco);
+          setSource('ofx');
+          all.push(...parsed);
+        } else if (['csv', 'txt', 'tsv'].includes(ext)) {
+          const parsed = parseCSV(text, banco);
+          setSource('csv');
+          all.push(...parsed);
+        }
+      } catch (e) {
+        console.error('[import] erro processando', f.name, e);
+      }
+    }
+    setPreview(all);
+    setBusy(false);
+    setToast(`${all.length} lançamento(s) prontos para importar`);
+  };
+
+  const processBoleto = () => {
+    const b = parseBoleto(linhaDig);
+    if (!b) { setToast('Linha digitável inválida (esperado 47 ou 48 dígitos)'); return; }
+    const desc = b.tipo === 'bancario'
+      ? `Boleto ${b.bancoNome}`
+      : `Arrecadação · ${b.segmentoNome}`;
+    const item = {
+      data: b.vencimento || todayISO(),
+      descricao: desc,
+      valor: b.valor,
+      tipo: 'saida',
+      categoria: b.tipo === 'bancario' ? 'Boletos' : 'Arrecadação/Tributos',
+      banco: b.bancoNome || banco,
+      vencimento: b.vencimento || '',
+      linhaDigitavel: b.linhaDigitavel,
+    };
+    setPreview([item]);
+    setSource('boleto');
+    setToast('Boleto decodificado');
+  };
+
+  const confirmarImport = () => {
+    if (preview.length === 0) return;
+    const novos = preview.map(x => ({
+      id: uid(),
+      data: x.data || todayISO(),
+      tipo: x.tipo,
+      categoria: x.categoria || 'Outras',
+      descricao: x.descricao,
+      valor: x.valor,
+      cliente: x.cliente || '',
+      forma: source === 'boleto' ? 'Boleto' : source === 'xml' ? 'Boleto' : 'Transferência',
+      veiculoId: '',
+      linhaId: '',
+      contratoId: '',
+      obs: source === 'ofx' ? `Importado de OFX (${x.banco || banco})`
+         : source === 'csv' ? `Importado de CSV (${x.banco || banco})`
+         : source === 'xlsx' ? `Importado de Excel (${x.banco || banco})`
+         : source === 'xml' ? `${x.tipoDoc === 'cte' ? 'CT-e' : 'NF-e'} ${x.numero || ''}${x.emitNome ? ' · ' + x.emitNome : ''}`
+         : `Boleto · ${x.linhaDigitavel || ''}`,
+      status: source === 'boleto' || source === 'xml' ? 'pendente' : 'pago',
+      vencimento: x.vencimento || '',
+      dataPagamento: source === 'boleto' || source === 'xml' ? '' : x.data,
+      recorrente: false,
+      statusConc: source === 'boleto' || source === 'xml' ? 'manual' : 'pendente',
+      fitid: x.fitid || '',
     }));
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  }
-
-  function copiarCodigo() {
-    if (!company?.id) return;
-    navigator.clipboard?.writeText(company.id).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  }
+    setData(d => ({ ...d, finEmpresa: [...(d.finEmpresa || []), ...novos] }));
+    setPreview([]);
+    setLinhaDig('');
+    setSource('');
+    if (fileRef.current) fileRef.current.value = '';
+    setToast(`${novos.length} lançamento(s) importados para o Financeiro`);
+  };
 
   return (
     <div className="p-4 sm:p-6 space-y-4">
       <div className="card p-5">
-        <h3 className="display h-card t-ink mb-3">Empresa</h3>
+        <h3 className="display h-card t-ink mb-1">Central de Importação Inteligente</h3>
+        <p className="text-sm t-soft mb-4">Importe extratos OFX, planilhas CSV ou decodifique boletos por linha digitável. Cada lançamento vai para o Financeiro Empresa marcado como <b>Pendente de conciliação</b>, pronto pra você revisar.</p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+          <label className="block">
+            <span className="label">Banco de origem</span>
+            <select className="inp" value={banco} onChange={(e) => setBanco(e.target.value)}>
+              {BANCOS_IMP.map(b => <option key={b}>{b}</option>)}
+            </select>
+          </label>
+          <label className="block">
+            <span className="label">Competência</span>
+            <input type="month" className="inp" value={competencia} onChange={(e) => setCompetencia(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="label">Formato</span>
+            <div className="inp" style={{ display: 'flex', alignItems: 'center', color: '#6B7280' }}>Detecção automática</div>
+          </label>
+        </div>
+
+        <div className="imp-drop">
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            accept=".ofx,.csv,.txt,.tsv,.xlsx,.xls,.xml"
+            onChange={(e) => processFiles(e.target.files)}
+            style={{ display: 'block', width: '100%', marginBottom: 10 }}
+          />
+          <p className="text-sm t-soft" style={{ margin: 0 }}>
+            <b className="t-ink">Selecione um arquivo</b> — OFX de extrato bancário, Excel (.xlsx/.xls), CSV ou XML de NF-e/CT-e.<br/>
+            <span className="text-xs t-mute">Ex.: no Itaú, Bradesco ou Cora → "Baixar extrato" → OFX ou Excel. Para nota fiscal, use o XML baixado do e-mail ou da SEFAZ.</span>
+          </p>
+          {busy && <div className="text-xs t-soft mt-2">Processando…</div>}
+        </div>
+      </div>
+
+      <div className="card p-5">
+        <h3 className="display h-card t-ink mb-1">Boleto por linha digitável</h3>
+        <p className="text-sm t-soft mb-3">Cole os <b>47 dígitos</b> (título bancário) ou <b>48 dígitos</b> (concessionária/tributo). O sistema extrai valor e vencimento.</p>
+        <div className="flex gap-2 flex-wrap">
+          <input
+            className="inp mono"
+            style={{ flex: '1 1 320px', minWidth: 0 }}
+            value={linhaDig}
+            onChange={(e) => setLinhaDig(e.target.value)}
+            placeholder="34191.79001 01043.510047 91020.150008 8 84660000012345"
+          />
+          <button className="btn btn-primary" onClick={processBoleto} style={{ flexShrink: 0 }}>Decodificar</button>
+        </div>
+      </div>
+
+      {preview.length > 0 && (
+        <div className="card p-5">
+          <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+            <h3 className="display h-card t-ink">Prévia de importação</h3>
+            <span className="badge badge-slate">{preview.length} {preview.length === 1 ? 'lançamento' : 'lançamentos'}</span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3 mb-4">
+            <div className="metric-box">
+              <div className="text-xs t-soft">Entradas</div>
+              <div className="mono font-semibold t-green" style={{ fontSize: 15 }}>{fmtBRL(entradas)}</div>
+            </div>
+            <div className="metric-box">
+              <div className="text-xs t-soft">Saídas</div>
+              <div className="mono font-semibold t-red" style={{ fontSize: 15 }}>{fmtBRL(saidas)}</div>
+            </div>
+            <div className="metric-box">
+              <div className="text-xs t-soft">Saldo</div>
+              <div className={`mono font-semibold ${totalPreview >= 0 ? 't-green' : 't-red'}`} style={{ fontSize: 15 }}>{fmtBRL(totalPreview)}</div>
+            </div>
+          </div>
+
+          <div className="imp-preview">
+            {preview.map((x, i) => (
+              <div key={i} className="imp-row">
+                <div className={`pill ${x.tipo === 'entrada' ? 'pill-green' : 'pill-red'}`} style={{ flexShrink: 0 }}>
+                  {x.tipo === 'entrada' ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium t-ink truncate">{x.descricao}</div>
+                  <div className="text-xs t-soft mt-0.5 flex flex-wrap gap-1.5">
+                    <span>{fmtDate(x.data)}</span>
+                    <span>·</span>
+                    <span>{x.categoria}</span>
+                    {x.banco && <><span>·</span><span>{x.banco}</span></>}
+                  </div>
+                </div>
+                <div className={`mono text-sm font-semibold ${x.tipo === 'entrada' ? 't-green' : 't-red'}`} style={{ flexShrink: 0 }}>
+                  {x.tipo === 'entrada' ? '+ ' : '− '}{fmtBRL(x.valor)}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex gap-2 mt-4 justify-end flex-wrap">
+            <button className="btn btn-ghost" onClick={() => { setPreview([]); setSource(''); if (fileRef.current) fileRef.current.value = ''; }}>Descartar</button>
+            <button className="btn btn-primary" onClick={confirmarImport}>Importar {preview.length} {preview.length === 1 ? 'lançamento' : 'lançamentos'} → Financeiro</button>
+          </div>
+        </div>
+      )}
+
+      <div className="card p-5">
+        <h4 className="display h-card t-ink mb-2" style={{ fontSize: 15 }}>Como funciona a conciliação</h4>
+        <ol className="text-sm t-soft space-y-1.5" style={{ paddingLeft: 18 }}>
+          <li>Você importa OFX ou CSV do banco → cada lançamento entra no Financeiro como <b>Pendente</b>.</li>
+          <li>No módulo <b>Financeiro Empresa</b>, revise cada linha e clique no ✓ pra marcar como <b>Conciliado</b>.</li>
+          <li>O <b>Painel</b> mostra a % do mês conciliada — meta é chegar em 100%.</li>
+          <li>Boletos são úteis pra criar contas a pagar rapidamente: o app extrai valor e vencimento automaticamente.</li>
+        </ol>
+      </div>
+
+      <Toast msg={toast} />
+    </div>
+  );
+}
+
+// ============================================================
+// ARMAZÉM (WMS)
+// ============================================================
+const WMS_UNIDADES = ['un', 'cx', 'pl', 'kg', 'lt', 'mt', 'sc'];
+const WMS_STATUS = [
+  { k: 'armazenado', label: 'Armazenado', tone: 'green' },
+  { k: 'reservado', label: 'Reservado', tone: 'blue' },
+  { k: 'expedido', label: 'Expedido', tone: 'slate' },
+  { k: 'avariado', label: 'Avariado', tone: 'red' },
+];
+const WMS_ABC = [
+  { k: 'A', label: 'A · Alto giro', tone: 'green' },
+  { k: 'B', label: 'B · Médio giro', tone: 'orange' },
+  { k: 'C', label: 'C · Baixo giro', tone: 'slate' },
+];
+
+function ArmazemWMS({ data, setData }) {
+  const { wms = [] } = data;
+  const [openForm, setOpenForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [delTarget, setDelTarget] = useState(null);
+  const [toast, setToast] = useToast();
+  const [busca, setBusca] = useState('');
+  const [filtroCliente, setFiltroCliente] = useState('all');
+
+  const clientes = useMemo(() => {
+    const set = new Set(wms.map(x => x.cliente).filter(Boolean));
+    return ['all', ...Array.from(set).sort()];
+  }, [wms]);
+
+  const filtered = useMemo(() => {
+    let arr = wms;
+    if (filtroCliente !== 'all') arr = arr.filter(x => x.cliente === filtroCliente);
+    if (busca.trim()) {
+      const q = busca.toLowerCase();
+      arr = arr.filter(x =>
+        (x.sku || '').toLowerCase().includes(q) ||
+        (x.descricao || '').toLowerCase().includes(q) ||
+        (x.nf || '').toLowerCase().includes(q) ||
+        (x.endereco || '').toLowerCase().includes(q)
+      );
+    }
+    return [...arr].sort((a, b) => (b.dataEntrada || '').localeCompare(a.dataEntrada || ''));
+  }, [wms, filtroCliente, busca]);
+
+  const kpis = useMemo(() => {
+    const arm = wms.filter(x => x.status !== 'expedido');
+    const totalItens = arm.reduce((a, b) => a + (Number(b.qtd) || 0), 0);
+    const totalCub = arm.reduce((a, b) => a + (Number(b.cub) || 0), 0);
+    const totalPeso = arm.reduce((a, b) => a + (Number(b.peso) || 0), 0);
+    const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+    const em30 = new Date(hoje.getTime() + 30 * 86400000);
+    const vencendo = arm.filter(x => x.validade && new Date(x.validade + 'T00:00:00') <= em30 && new Date(x.validade + 'T00:00:00') >= hoje).length;
+    const vencidos = arm.filter(x => x.validade && new Date(x.validade + 'T00:00:00') < hoje).length;
+    return { totalItens, totalCub, totalPeso, vencendo, vencidos, skus: new Set(arm.map(x => x.sku).filter(Boolean)).size };
+  }, [wms]);
+
+  const handleSave = (item) => {
+    const msg = editing ? 'Item atualizado' : 'Item cadastrado';
+    setData(d => ({
+      ...d,
+      wms: editing
+        ? (d.wms || []).map(x => x.id === editing.id ? { ...item, id: editing.id } : x)
+        : [...(d.wms || []), { ...item, id: uid() }],
+    }));
+    setOpenForm(false); setEditing(null); setToast(msg);
+  };
+  const confirmDelete = () => {
+    if (delTarget) {
+      setData(d => ({ ...d, wms: (d.wms || []).filter(x => x.id !== delTarget.id) }));
+      setToast('Item excluído'); setDelTarget(null);
+    }
+  };
+
+  return (
+    <div className="p-4 sm:p-6 space-y-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <p className="text-sm t-soft" style={{ maxWidth: 520 }}>Cadastro de itens em estoque com endereçamento, lote/validade e classificação ABC de giro.</p>
+        <NewButton onClick={() => { setEditing(null); setOpenForm(true); }}>Novo item</NewButton>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+        <div className="card kpi p-4">
+          <div className="label">Itens armazenados</div>
+          <div className="mono stat-md t-ink" style={{ marginTop: 4 }}>{fmtNum(kpis.totalItens)}</div>
+          <div className="text-xs t-mute mt-1">{kpis.skus} SKU{kpis.skus !== 1 ? 's' : ''} distintos</div>
+        </div>
+        <div className="card kpi p-4">
+          <div className="label">Volume ocupado</div>
+          <div className="mono stat-md t-ink" style={{ marginTop: 4 }}>{kpis.totalCub.toFixed(1)} m³</div>
+          <div className="text-xs t-mute mt-1">Cubagem total</div>
+        </div>
+        <div className="card kpi p-4">
+          <div className="label">Peso total</div>
+          <div className="mono stat-md t-ink" style={{ marginTop: 4 }}>{fmtNum(kpis.totalPeso)} kg</div>
+          <div className="text-xs t-mute mt-1">Soma de todos itens</div>
+        </div>
+        <div className="card kpi p-4">
+          <div className="label">Alertas de validade</div>
+          <div className={`mono stat-md ${kpis.vencidos > 0 ? 't-red' : kpis.vencendo > 0 ? 't-orange' : 't-green'}`} style={{ marginTop: 4 }}>{kpis.vencidos + kpis.vencendo}</div>
+          <div className="text-xs t-mute mt-1">{kpis.vencidos} vencidos · {kpis.vencendo} vencendo em 30d</div>
+        </div>
+      </div>
+
+      <div className="card p-4 sm:p-5">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+          <label className="block sm:col-span-2">
+            <span className="label">Buscar</span>
+            <input className="inp" placeholder="SKU, descrição, NF ou endereço" value={busca} onChange={(e) => setBusca(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="label">Cliente</span>
+            <select className="inp" value={filtroCliente} onChange={(e) => setFiltroCliente(e.target.value)}>
+              {clientes.map(c => <option key={c} value={c}>{c === 'all' ? 'Todos os clientes' : c}</option>)}
+            </select>
+          </label>
+        </div>
+
+        {filtered.length === 0 ? <EmptyState icon={Home} title={wms.length === 0 ? 'Nenhum item cadastrado ainda.' : 'Nenhum item para os filtros atuais.'} /> : (
+          <div className="wms-list">
+            {filtered.map(x => {
+              const stat = WMS_STATUS.find(s => s.k === x.status) || WMS_STATUS[0];
+              const abc = WMS_ABC.find(a => a.k === x.abc);
+              const vencido = x.validade && new Date(x.validade + 'T00:00:00') < new Date(new Date().setHours(0, 0, 0, 0));
+              return (
+                <div key={x.id} className="wms-row">
+                  <div className="wms-sku">
+                    <div className="mono text-sm font-semibold t-ink">{x.sku || '—'}</div>
+                    <div className="text-xs t-mute">NF {x.nf || '—'}</div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium t-ink truncate">{x.descricao || 'Item sem descrição'}</div>
+                    <div className="text-xs t-soft mt-0.5 flex flex-wrap gap-1.5 items-center">
+                      <Badge tone={stat.tone}>{stat.label}</Badge>
+                      {abc && <Badge tone={abc.tone}>{abc.label}</Badge>}
+                      {x.cliente && <span>· {x.cliente}</span>}
+                      {x.lote && <span>· Lote {x.lote}</span>}
+                      {x.validade && <span className={vencido ? 't-red' : ''}>· Val {fmtDate(x.validade)}{vencido && ' (vencido)'}</span>}
+                    </div>
+                  </div>
+                  <div className="text-right" style={{ flexShrink: 0 }}>
+                    <div className="mono text-sm font-semibold t-ink">{fmtNum(x.qtd || 0)} {x.unidade || 'un'}</div>
+                    <div className="text-xs t-mute mono">{x.endereco || '—'}</div>
+                  </div>
+                  <div className="row-actions flex">
+                    <button onClick={() => { setEditing(x); setOpenForm(true); }} className="ibtn"><Pencil size={14} /></button>
+                    <button onClick={() => setDelTarget(x)} className="ibtn ibtn-del"><Trash2 size={14} /></button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      <Modal open={openForm} onClose={() => { setOpenForm(false); setEditing(null); }} title={editing ? 'Editar item' : 'Novo item de estoque'} wide>
+        <WmsForm item={editing} onSave={handleSave} onCancel={() => { setOpenForm(false); setEditing(null); }} />
+      </Modal>
+      <ConfirmModal item={delTarget} title="Excluir item" message={delTarget ? `Excluir "${delTarget.sku || delTarget.descricao}"?` : ''} onCancel={() => setDelTarget(null)} onConfirm={confirmDelete} />
+      <Toast msg={toast} />
+    </div>
+  );
+}
+
+function WmsForm({ item, onSave, onCancel }) {
+  const [sku, setSku] = useState(item?.sku || '');
+  const [descricao, setDescricao] = useState(item?.descricao || '');
+  const [nf, setNf] = useState(item?.nf || '');
+  const [cliente, setCliente] = useState(item?.cliente || '');
+  const [lote, setLote] = useState(item?.lote || '');
+  const [validade, setValidade] = useState(item?.validade || '');
+  const [qtd, setQtd] = useState(item?.qtd || '');
+  const [unidade, setUnidade] = useState(item?.unidade || 'un');
+  const [cub, setCub] = useState(item?.cub || '');
+  const [peso, setPeso] = useState(item?.peso || '');
+  const [endereco, setEndereco] = useState(item?.endereco || '');
+  const [abc, setAbc] = useState(item?.abc || 'B');
+  const [status, setStatus] = useState(item?.status || 'armazenado');
+  const [dataEntrada, setDataEntrada] = useState(item?.dataEntrada || todayISO());
+  const [obs, setObs] = useState(item?.obs || '');
+  const [err, setErr] = useState('');
+
+  const submit = () => {
+    if (!sku.trim() && !descricao.trim()) { setErr('Informe ao menos SKU ou descrição.'); return; }
+    onSave({
+      sku: sku.trim(), descricao: descricao.trim(), nf, cliente, lote,
+      validade, qtd: Number(qtd) || 0, unidade,
+      cub: Number(cub) || 0, peso: Number(peso) || 0,
+      endereco: endereco.toUpperCase(), abc, status, dataEntrada, obs,
+    });
+  };
+
+  return (
+    <div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="SKU"><input className="inp mono" value={sku} onChange={(e) => { setSku(e.target.value); setErr(''); }} placeholder="Ex.: RALLY-MOTO-001" /></Field>
+        <Field label="NF de entrada"><input className="inp mono" value={nf} onChange={(e) => setNf(e.target.value)} placeholder="10255" /></Field>
+        <Field label="Descrição" span={2}><input className="inp" value={descricao} onChange={(e) => { setDescricao(e.target.value); setErr(''); }} placeholder="Descrição do produto" /></Field>
+        <Field label="Cliente (dono da mercadoria)" span={2}><input className="inp" value={cliente} onChange={(e) => setCliente(e.target.value)} placeholder="Nome do cliente" /></Field>
+        <Field label="Lote"><input className="inp mono" value={lote} onChange={(e) => setLote(e.target.value)} placeholder="L2607" /></Field>
+        <Field label="Validade"><input type="date" className="inp" value={validade} onChange={(e) => setValidade(e.target.value)} /></Field>
+        <Field label="Quantidade"><input type="number" step="0.01" className="inp mono" value={qtd} onChange={(e) => setQtd(e.target.value)} /></Field>
+        <Field label="Unidade"><select className="inp" value={unidade} onChange={(e) => setUnidade(e.target.value)}>{WMS_UNIDADES.map(u => <option key={u}>{u}</option>)}</select></Field>
+        <Field label="Cubagem (m³)"><input type="number" step="0.001" className="inp mono" value={cub} onChange={(e) => setCub(e.target.value)} /></Field>
+        <Field label="Peso (kg)"><input type="number" step="0.01" className="inp mono" value={peso} onChange={(e) => setPeso(e.target.value)} /></Field>
+        <Field label="Endereçamento"><input className="inp mono" value={endereco} onChange={(e) => setEndereco(e.target.value)} placeholder="A-01-02" /></Field>
+        <Field label="Classificação ABC"><select className="inp" value={abc} onChange={(e) => setAbc(e.target.value)}>{WMS_ABC.map(a => <option key={a.k} value={a.k}>{a.label}</option>)}</select></Field>
+        <Field label="Status"><select className="inp" value={status} onChange={(e) => setStatus(e.target.value)}>{WMS_STATUS.map(s => <option key={s.k} value={s.k}>{s.label}</option>)}</select></Field>
+        <Field label="Data de entrada"><input type="date" className="inp" value={dataEntrada} onChange={(e) => setDataEntrada(e.target.value)} /></Field>
+        <Field label="Observações" span={2}><textarea className="inp" rows={2} value={obs} onChange={(e) => setObs(e.target.value)} /></Field>
+      </div>
+      {err && <div className="t-red text-sm mt-3">{err}</div>}
+      <div className="flex gap-2 mt-4 justify-end">
+        <button className="btn btn-ghost" onClick={onCancel}>Cancelar</button>
+        <button className="btn btn-primary" onClick={submit}>Salvar</button>
+      </div>
+    </div>
+  );
+}
+
+function MembrosSection({ company }) {
+  const { user } = useAuth();
+  const [membros, setMembros] = useState([]);
+  const [saving, setSaving] = useState('');
+
+  useEffect(() => {
+    if (!company?.id) return;
+    const ref = collection(fdb, 'companies', company.id, 'members');
+    const unsub = onSnapshot(ref, (snap) => {
+      const arr = snap.docs.map(d => ({ uid: d.id, ...d.data() }));
+      // Ordem: owner primeiro, depois membros por nome
+      arr.sort((a, b) => {
+        if (a.role === 'owner' && b.role !== 'owner') return -1;
+        if (b.role === 'owner' && a.role !== 'owner') return 1;
+        return (a.nome || '').localeCompare(b.nome || '');
+      });
+      setMembros(arr);
+    }, (err) => console.error('[members]', err));
+    return () => unsub();
+  }, [company?.id]);
+
+  async function toggleModulo(memberUid, moduloKey, currentSet) {
+    setSaving(memberUid);
+    try {
+      const next = new Set(currentSet || []);
+      if (next.has(moduloKey)) next.delete(moduloKey);
+      else next.add(moduloKey);
+      await updateDoc(
+        fsDoc(fdb, 'companies', company.id, 'members', memberUid),
+        { modulosPermitidos: Array.from(next) }
+      );
+    } catch (e) {
+      console.error('[toggle modulo]', e);
+    } finally {
+      setSaving('');
+    }
+  }
+
+  async function liberarTudo(memberUid) {
+    setSaving(memberUid);
+    try {
+      await updateDoc(
+        fsDoc(fdb, 'companies', company.id, 'members', memberUid),
+        { modulosPermitidos: null }
+      );
+    } catch (e) { console.error(e); }
+    finally { setSaving(''); }
+  }
+
+  // Módulos configuráveis: excluímos dashboard e config (sempre visíveis)
+  const MODULOS_EDITAVEIS = NAV.filter(n => n.key !== 'dashboard' && n.key !== 'config');
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+        <div>
+          <h3 className="display h-card t-ink mb-1">Membros da empresa</h3>
+          <p className="text-sm t-soft" style={{ maxWidth: 520 }}>
+            Controle quais módulos cada colaborador vê no menu. <b>Painel</b> e <b>Configurações</b> ficam sempre visíveis. O dono da empresa sempre vê tudo.
+          </p>
+        </div>
+        <span className="badge badge-slate" style={{ flexShrink: 0 }}>{membros.length} {membros.length === 1 ? 'pessoa' : 'pessoas'}</span>
+      </div>
+
+      {membros.length === 0 ? (
+        <p className="text-sm t-mute">Carregando membros...</p>
+      ) : (
+        <div className="space-y-3">
+          {membros.map(m => {
+            const isOwnerRow = m.role === 'owner';
+            const isSelf = m.uid === user?.uid;
+            const isSaving = saving === m.uid;
+            const modulos = m.modulosPermitidos;
+            const seesAll = modulos === null || modulos === undefined;
+            return (
+              <div key={m.uid} className="mb-row">
+                <div className="flex items-start justify-between gap-3 flex-wrap mb-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold t-ink">{m.nome || m.email}{isSelf && <span className="t-mute" style={{ fontWeight: 400 }}> · você</span>}</div>
+                    <div className="text-xs t-soft">{m.email}</div>
+                    <div className="text-xs t-mute mt-0.5">
+                      {isOwnerRow ? '👑 Dono da empresa · acesso total' : seesAll ? 'Vê todos os módulos' : `Vê ${modulos.length + 2} de ${MODULOS_EDITAVEIS.length + 2} módulos`}
+                    </div>
+                  </div>
+                  {!isOwnerRow && !seesAll && (
+                    <button className="btn btn-ghost btn-sm" onClick={() => liberarTudo(m.uid)} disabled={isSaving} style={{ flexShrink: 0 }}>
+                      Liberar tudo
+                    </button>
+                  )}
+                </div>
+
+                {!isOwnerRow && (
+                  <div className="mb-mods">
+                    {MODULOS_EDITAVEIS.map(mod => {
+                      const active = seesAll || (modulos || []).includes(mod.key);
+                      const Icon = mod.icon;
+                      return (
+                        <button
+                          key={mod.key}
+                          onClick={() => toggleModulo(m.uid, mod.key, seesAll ? MODULOS_EDITAVEIS.map(x => x.key) : modulos)}
+                          disabled={isSaving}
+                          className={`mb-chip ${active ? 'on' : ''}`}
+                        >
+                          <Icon size={13} />
+                          <span>{mod.label}</span>
+                          {active && <Check size={12} />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Configuracoes({ data, setData }) {
+  const { user, profile, company, logout, isOwner } = useAuth();
+  const c = data.config || {};
+  const [nomeEmp, setNomeEmp] = useState(c.nomeEmpresa || '');
+  const [logoUrl, setLogoUrl] = useState(c.logoUrl || '');
+  const [cnpj, setCnpj] = useState(c.cnpj || '');
+  const [telefone, setTelefone] = useState(c.telefone || '');
+  const [emailContato, setEmailContato] = useState(c.emailContato || '');
+  const [endereco, setEndereco] = useState(c.endereco || '');
+  const [cidade, setCidade] = useState(c.cidade || '');
+  const [uf, setUf] = useState(c.uf || '');
+  const [preco, setPreco] = useState(c.precoCombustivel ?? 5.89);
+  const [consumo, setConsumo] = useState(c.consumoPadrao ?? 10);
+  const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState('');
+  const [logoErr, setLogoErr] = useState(false);
+
+  function salvarIdentidade() {
+    setData((d) => ({
+      ...d,
+      config: { ...d.config,
+        nomeEmpresa: nomeEmp, logoUrl: logoUrl.trim(),
+        cnpj, telefone, emailContato, endereco, cidade, uf,
+      },
+    }));
+    setSaved('id'); setTimeout(() => setSaved(''), 2000);
+  }
+  function salvarPref() {
+    setData((d) => ({
+      ...d,
+      config: { ...d.config, precoCombustivel: Number(preco) || 0, consumoPadrao: Number(consumo) || 0 },
+    }));
+    setSaved('pref'); setTimeout(() => setSaved(''), 2000);
+  }
+  function copiarCodigo() {
+    if (!company?.id) return;
+    navigator.clipboard?.writeText(company.id).then(() => {
+      setCopied(true); setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  const iniciais = (nomeEmp || 'E').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+
+  return (
+    <div className="p-4 sm:p-6 space-y-4">
+      <div className="card p-5">
+        <h3 className="display h-card t-ink mb-1">Identidade da empresa</h3>
+        <p className="text-sm t-soft mb-4">Personalize a cara da sua empresa dentro do sistema.</p>
+
+        <div className="flex items-center gap-4 mb-5" style={{ padding: 14, background: '#F4F6F8', borderRadius: 12 }}>
+          <div className="cfg-logo-preview">
+            {logoUrl && !logoErr
+              ? <img src={logoUrl} alt="logo" onError={() => setLogoErr(true)} onLoad={() => setLogoErr(false)} />
+              : <span className="cfg-logo-fallback">{iniciais}</span>}
+          </div>
+          <div className="min-w-0">
+            <div className="t-ink font-semibold" style={{ fontSize: 15 }}>{nomeEmp || 'Sua empresa'}</div>
+            <div className="text-xs t-soft">{cnpj ? `CNPJ ${cnpj}` : 'Adicione um CNPJ (opcional)'}</div>
+            <div className="text-xs t-mute mt-0.5">Prévia do topo do app</div>
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="block">
             <span className="label">Nome da empresa</span>
-            <input className="inp" value={nomeEmp} onChange={(e) => setNomeEmp(e.target.value)} />
+            <input className="inp" value={nomeEmp} onChange={(e) => setNomeEmp(e.target.value)} placeholder="D&G Açaí Berry" />
           </label>
+          <label className="block">
+            <span className="label">CNPJ</span>
+            <input className="inp" value={cnpj} onChange={(e) => setCnpj(e.target.value)} placeholder="00.000.000/0000-00" />
+          </label>
+          <label className="block sm:col-span-2">
+            <span className="label">URL do logo</span>
+            <input className="inp" value={logoUrl} onChange={(e) => { setLogoUrl(e.target.value); setLogoErr(false); }} placeholder="https://... (link de uma imagem PNG/JPG)" />
+            <span className="text-xs t-mute" style={{ marginTop: 4, display: 'block' }}>
+              Cole o link de uma imagem já hospedada (ex.: seu site, Google Drive público, Imgur). Ideal: 200×200px, PNG com fundo transparente.
+              {logoUrl && logoErr && <span className="t-red"> · Não consegui carregar essa imagem.</span>}
+            </span>
+          </label>
+          <label className="block">
+            <span className="label">Telefone / WhatsApp</span>
+            <input className="inp" value={telefone} onChange={(e) => setTelefone(e.target.value)} placeholder="(11) 99999-9999" />
+          </label>
+          <label className="block">
+            <span className="label">E-mail de contato</span>
+            <input className="inp" type="email" value={emailContato} onChange={(e) => setEmailContato(e.target.value)} placeholder="contato@suaempresa.com" />
+          </label>
+          <label className="block sm:col-span-2">
+            <span className="label">Endereço</span>
+            <input className="inp" value={endereco} onChange={(e) => setEndereco(e.target.value)} placeholder="Rua, número, bairro" />
+          </label>
+          <label className="block">
+            <span className="label">Cidade</span>
+            <input className="inp" value={cidade} onChange={(e) => setCidade(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="label">UF</span>
+            <input className="inp" value={uf} onChange={(e) => setUf(e.target.value.toUpperCase().slice(0, 2))} placeholder="SP" maxLength={2} />
+          </label>
+        </div>
+        <div className="mt-4 flex items-center gap-3">
+          <button className="btn btn-primary" onClick={salvarIdentidade}>Salvar identidade</button>
+          {saved === 'id' && <span className="t-green text-sm">✓ Salvo</span>}
+        </div>
+      </div>
+
+      <div className="card p-5">
+        <h3 className="display h-card t-ink mb-3">Preferências operacionais</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="block">
             <span className="label">Preço médio combustível (R$/L)</span>
             <input type="number" step="0.01" className="inp" value={preco} onChange={(e) => setPreco(e.target.value)} />
@@ -2901,8 +3919,8 @@ function Configuracoes({ data, setData }) {
           </label>
         </div>
         <div className="mt-4 flex items-center gap-3">
-          <button className="btn btn-primary" onClick={salvar}>Salvar</button>
-          {saved && <span className="t-green text-sm">✓ Salvo</span>}
+          <button className="btn btn-primary" onClick={salvarPref}>Salvar preferências</button>
+          {saved === 'pref' && <span className="t-green text-sm">✓ Salvo</span>}
         </div>
       </div>
 
@@ -2916,6 +3934,8 @@ function Configuracoes({ data, setData }) {
           </button>
         </div>
       </div>
+
+      {isOwner && <MembrosSection company={company} />}
 
       <div className="card p-5">
         <h3 className="display h-card t-ink mb-3">Conta</h3>

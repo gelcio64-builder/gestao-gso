@@ -26,12 +26,13 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
   const [company, setCompany] = useState(null);
+  const [modulosPermitidos, setModulosPermitidos] = useState(null); // null = sem restrição
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     return onAuthStateChanged(auth, async (u) => {
       try {
-        if (!u) { setUser(null); setProfile(null); setCompany(null); setLoading(false); return; }
+        if (!u) { setUser(null); setProfile(null); setCompany(null); setModulosPermitidos(null); setLoading(false); return; }
         setUser({ uid: u.uid, email: u.email, displayName: u.displayName });
         const profSnap = await getDoc(doc(fdb, 'users', u.uid));
         if (profSnap.exists()) {
@@ -39,12 +40,36 @@ export function AuthProvider({ children }) {
           setProfile(prof);
           if (prof.companyId) {
             const compSnap = await getDoc(doc(fdb, 'companies', prof.companyId));
-            setCompany(compSnap.exists() ? { id: compSnap.id, ...compSnap.data() } : null);
+            const comp = compSnap.exists() ? { id: compSnap.id, ...compSnap.data() } : null;
+            setCompany(comp);
+
+            // Load or create own member doc (permissions)
+            if (comp) {
+              const memRef = doc(fdb, 'companies', prof.companyId, 'members', u.uid);
+              const memSnap = await getDoc(memRef);
+              if (memSnap.exists()) {
+                const modulos = memSnap.data().modulosPermitidos;
+                setModulosPermitidos(modulos === undefined ? null : modulos);
+              } else {
+                // Backwards compat: create the member doc from profile
+                const isOwner = comp.ownerUid === u.uid;
+                await setDoc(memRef, {
+                  nome: prof.nome || u.displayName || '',
+                  email: u.email || '',
+                  role: isOwner ? 'owner' : (prof.role || 'member'),
+                  modulosPermitidos: null,
+                  joinedAt: serverTimestamp(),
+                });
+                setModulosPermitidos(null);
+              }
+            } else {
+              setModulosPermitidos(null);
+            }
           } else {
-            setCompany(null);
+            setCompany(null); setModulosPermitidos(null);
           }
         } else {
-          setProfile(null); setCompany(null);
+          setProfile(null); setCompany(null); setModulosPermitidos(null);
         }
       } catch (e) {
         console.error('[Auth] load error:', e);
@@ -53,6 +78,8 @@ export function AuthProvider({ children }) {
       }
     });
   }, []);
+
+  const isOwner = !!(user && company && user.uid === company.ownerUid);
 
   async function signup({ nome, email, senha, empresaNome, codigoEmpresa }) {
     try {
@@ -85,6 +112,12 @@ export function AuthProvider({ children }) {
         role: (codigoEmpresa || '').trim() ? 'member' : 'owner',
         createdAt: serverTimestamp(),
       });
+      await setDoc(doc(fdb, 'companies', companyId, 'members', cred.user.uid), {
+        nome, email,
+        role: (codigoEmpresa || '').trim() ? 'member' : 'owner',
+        modulosPermitidos: null,
+        joinedAt: serverTimestamp(),
+      });
     } catch (e) {
       throw new Error(friendly(e));
     }
@@ -101,7 +134,7 @@ export function AuthProvider({ children }) {
   const logout = () => signOut(auth);
 
   return (
-    <AuthContext.Provider value={{ user, profile, company, loading, signup, login, resetPassword, logout }}>
+    <AuthContext.Provider value={{ user, profile, company, modulosPermitidos, isOwner, loading, signup, login, resetPassword, logout }}>
       {children}
     </AuthContext.Provider>
   );
