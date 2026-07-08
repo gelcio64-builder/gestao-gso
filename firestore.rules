@@ -128,6 +128,10 @@ service cloud.firestore {
         allow read: if isCompanyMember();
         allow write: if isCompanyMember() && hasModuleAccess('wms');
       }
+      match /documentos/{docId} {
+        allow read: if isCompanyMember();
+        allow write: if isCompanyMember() && hasModuleAccess('documentos');
+      }
 
       // Qualquer subcoleção nova não listada acima ficará BLOQUEADA por padrão.
       // Ao adicionar um módulo novo no futuro, criar match aqui para ele.
