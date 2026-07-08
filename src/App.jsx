@@ -7,7 +7,7 @@ import {
   Activity, Clock, Coins, Receipt, ChevronRight, ChevronDown, CircleAlert, Sun, Phone,
   Trophy, Flame, Lightbulb, Percent, Calendar,
   Home, ShoppingCart, CreditCard, Heart, GraduationCap, Target, PiggyBank, Gauge, Sparkles,
-  LogOut, Copy, Check, Building2,
+  LogOut, Copy, Check, Building2, Camera,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -23,6 +23,7 @@ import { parseBoleto } from './importers/boleto';
 import { parseCSV } from './importers/csv';
 import { parseXLSX } from './importers/xlsx';
 import { parseXML } from './importers/xml';
+import { scanImage, extractBoletoLinha, extractVencimentoDate, extractValues, extractDates } from './ocr/scanner';
 
 /* ============================================================
    GESTÃO GSO — v2.1
@@ -154,6 +155,32 @@ const fmtDate = (s) => { if (!s) return '—'; const [y, m, d] = s.split('-'); r
 const uid = () => Math.random().toString(36).slice(2, 9);
 const monthKey = (s) => s ? s.slice(0, 7) : '';
 const currentMonth = () => new Date().toISOString().slice(0, 7);
+
+// Redimensiona uma imagem (File) no client-side e retorna um data URL base64.
+// Usado pra salvar logo da empresa sem precisar de Firebase Storage.
+async function imgFileToResizedDataURL(file, maxSize = 256, quality = 0.85) {
+  if (!file || !file.type.startsWith('image/')) throw new Error('Arquivo não é imagem');
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error('Falha ao carregar imagem'));
+      i.src = url;
+    });
+    const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+    const w = Math.max(1, Math.round(img.width * scale));
+    const h = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    const format = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+    return canvas.toDataURL(format, quality);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 const greeting = () => { const h = new Date().getHours(); return h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite'; };
 const monthName = () => { const d = new Date(); return `${['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][d.getMonth()]} de ${d.getFullYear()}`; };
 
@@ -218,6 +245,58 @@ function CountUp({ value, format }) {
 function HeroMoney({ value }) {
   const v = useCountUp(value || 0);
   return <span className="hero-money"><span className="hero-cur">R$</span><span>{v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></span>;
+}
+
+// Componente reutilizável de escaneamento OCR.
+// props:
+//   label — texto do botão ("Escanear boleto por foto")
+//   onExtracted(text, extras) — chamado quando o OCR termina com o texto bruto
+//   size — 'sm' (default) ou 'md'
+function ScanButton({ label = 'Escanear por foto', onExtracted, size = 'sm', accept = 'image/*' }) {
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const inputId = useMemo(() => 'scan-' + Math.random().toString(36).slice(2, 8), []);
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setBusy(true); setProgress(0);
+    try {
+      const text = await scanImage(file, setProgress);
+      onExtracted?.(text, { file });
+    } catch (err) {
+      console.error('[OCR]', err);
+      alert('Não consegui processar a imagem. Tenta tirar a foto de novo com boa iluminação e sem tremer.');
+    } finally {
+      setBusy(false); setProgress(0);
+    }
+  }
+
+  return (
+    <label htmlFor={inputId} className={`scan-btn scan-btn-${size} ${busy ? 'busy' : ''}`}>
+      {busy ? (
+        <>
+          <span className="scan-spin" />
+          <span>{progress > 0 ? `Lendo… ${progress}%` : 'Carregando OCR…'}</span>
+        </>
+      ) : (
+        <>
+          <Camera size={size === 'md' ? 15 : 13} />
+          <span>{label}</span>
+        </>
+      )}
+      <input
+        id={inputId}
+        type="file"
+        accept={accept}
+        capture="environment"
+        onChange={handleFile}
+        style={{ display: 'none' }}
+        disabled={busy}
+      />
+    </label>
+  );
 }
 
 function Modal({ open, onClose, title, children, wide }) {
@@ -864,6 +943,22 @@ function LancamentoForm({ item, veiculos, linhas, contratos, onSave, onCancel })
   const submitForm = () => { onSave({ ...f, valor: parseFloat(f.valor) || 0 }); };
   return (
     <div className="space-y-4">
+      <div className="scan-strip">
+        <ScanButton
+          label="Escanear recibo por foto"
+          size="md"
+          onExtracted={(text) => {
+            const dates = extractDates(text);
+            const vals = extractValues(text);
+            const patch = {};
+            if (dates.length > 0) patch.data = dates[dates.length - 1];
+            if (vals.length > 0) patch.valor = String(vals[0]);
+            if (Object.keys(patch).length === 0) alert('Não achei data nem valor na foto. Tenta uma foto mais nítida.');
+            else setF(prev => ({ ...prev, ...patch }));
+          }}
+        />
+        <span className="text-xs t-mute">Preenche data e valor a partir de recibo</span>
+      </div>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Tipo"><select className="inp" value={f.tipo} onChange={(e) => setF({ ...f, tipo: e.target.value, categoria: CAT_FIN_EMPRESA[e.target.value][0] })}><option value="entrada">Entrada</option><option value="saida">Saída</option></select></Field>
         <Field label="Data"><input type="date" className="inp" value={f.data} onChange={(e) => setF({ ...f, data: e.target.value })} required /></Field>
@@ -3175,6 +3270,19 @@ function AppInner() {
         .imp-preview::-webkit-scrollbar-thumb{ background:#D1D5DB; border-radius:99px; }
         .imp-row{ display:flex; align-items:center; gap:10px; padding:9px 11px; background:#fff; border:1px solid #EFF0F2; border-radius:11px; transition:border-color .15s, box-shadow .15s; }
         .imp-row:hover{ border-color:#E5E7EB; box-shadow:0 3px 12px rgba(11,19,36,.05); }
+        .imp-log{ padding:9px 12px; border-radius:10px; border:1px solid; }
+        .imp-log.ok{ background:#ECFDF5; border-color:#A7F3D0; color:#065F46; }
+        .imp-log.err{ background:#FEF3F2; border-color:#FBC8D2; color:#9F1239; }
+
+        /* OCR Scan */
+        .scan-strip{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:11px 14px; background:linear-gradient(135deg,#EEF2FF,#F5F3FF); border:1px solid #E0E7FF; border-radius:12px; }
+        .scan-btn{ display:inline-flex; align-items:center; gap:6px; padding:7px 12px; border-radius:10px; font-size:12.5px; font-weight:600; color:#fff; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); cursor:pointer; border:0; font-family:inherit; transition:transform .15s, box-shadow .15s; }
+        .scan-btn:hover:not(.busy){ transform:translateY(-1px); box-shadow:0 8px 20px rgba(29,78,216,.32); }
+        .scan-btn:active:not(.busy){ transform:scale(.98); }
+        .scan-btn-md{ padding:9px 14px; font-size:13px; }
+        .scan-btn.busy{ opacity:.85; cursor:wait; background:linear-gradient(135deg,#6B7280,#9CA3AF); }
+        .scan-spin{ display:inline-block; width:12px; height:12px; border-radius:99px; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; animation:scan-rot .8s linear infinite; }
+        @keyframes scan-rot{ to{ transform:rotate(360deg); } }
 
         /* WMS */
         .wms-list{ display:flex; flex-direction:column; gap:6px; }
@@ -3246,42 +3354,67 @@ function Importacao({ data, setData }) {
   const entradas = preview.filter(x => x.tipo === 'entrada').reduce((a, b) => a + b.valor, 0);
   const saidas = preview.filter(x => x.tipo === 'saida').reduce((a, b) => a + b.valor, 0);
 
+  const [importLog, setImportLog] = useState([]);
+
   const processFiles = async (files) => {
     if (!files || files.length === 0) return;
     setBusy(true);
     const all = [];
     const empresaCnpj = data.config?.cnpj || '';
+    const log = [];
     for (const f of files) {
       try {
-        const ext = f.name.split('.').pop().toLowerCase();
+        const ext = (f.name.split('.').pop() || '').toLowerCase();
+        const mime = (f.type || '').toLowerCase();
+        // Rejeitar formatos que não sabemos ler
+        if (mime.startsWith('image/') || ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif'].includes(ext)) {
+          log.push({ nome: f.name, ok: false, msg: 'Foto/imagem — o app não lê texto de foto (OCR ainda não implementado). Envie o arquivo original (OFX/CSV/XLSX/XML).' });
+          continue;
+        }
+        if (mime === 'application/pdf' || ext === 'pdf') {
+          log.push({ nome: f.name, ok: false, msg: 'PDF ainda não suportado. Use o OFX/CSV/Excel do internet banking ou o XML da nota.' });
+          continue;
+        }
         if (ext === 'xlsx' || ext === 'xls') {
           const buffer = await f.arrayBuffer();
           const parsed = parseXLSX(buffer, banco);
           setSource('xlsx');
           all.push(...parsed);
+          log.push({ nome: f.name, ok: parsed.length > 0, msg: parsed.length > 0 ? `Excel · ${parsed.length} lançamento(s) extraídos` : 'Excel lido, mas não encontrei colunas de data/valor. Confira o cabeçalho.' });
           continue;
         }
         const text = await f.text();
-        if (ext === 'xml' || /<(?:[\w-]+:)?(?:nfeProc|cteProc|NFe|CTe)\b/.test(text)) {
-          const parsed = parseXML(text, banco, empresaCnpj);
-          setSource('xml');
-          all.push(...parsed);
-        } else if (ext === 'ofx' || text.includes('<OFX') || text.includes('<STMTTRN>')) {
+        const isOfx = ext === 'ofx' || /<OFX|<STMTTRN>/i.test(text);
+        const isXml = ext === 'xml' || /<(?:[\w-]+:)?(?:nfeProc|cteProc|NFe|CTe)\b/.test(text);
+        const isCsv = ['csv', 'txt', 'tsv'].includes(ext);
+        if (isOfx) {
           const parsed = parseOFX(text, banco);
           setSource('ofx');
           all.push(...parsed);
-        } else if (['csv', 'txt', 'tsv'].includes(ext)) {
+          log.push({ nome: f.name, ok: parsed.length > 0, msg: parsed.length > 0 ? `OFX · ${parsed.length} transação(ões) extraídas` : 'OFX lido, mas sem transações reconhecidas.' });
+        } else if (isXml) {
+          const parsed = parseXML(text, banco, empresaCnpj);
+          setSource('xml');
+          all.push(...parsed);
+          log.push({ nome: f.name, ok: parsed.length > 0, msg: parsed.length > 0 ? `${parsed[0].tipoDoc === 'cte' ? 'CT-e' : 'NF-e'} · valor R$ ${parsed[0].valor.toFixed(2)}` : 'XML reconhecido mas sem valor válido.' });
+        } else if (isCsv) {
           const parsed = parseCSV(text, banco);
           setSource('csv');
           all.push(...parsed);
+          log.push({ nome: f.name, ok: parsed.length > 0, msg: parsed.length > 0 ? `CSV · ${parsed.length} linha(s) processadas` : 'CSV lido, mas não encontrei colunas de data/valor. Confira o cabeçalho (deve ter "Data", "Descrição" e "Valor").' });
+        } else {
+          log.push({ nome: f.name, ok: false, msg: `Formato "${ext}" não reconhecido. Suportados: OFX, CSV, TSV, XLSX/XLS, XML de NF-e/CT-e.` });
         }
       } catch (e) {
         console.error('[import] erro processando', f.name, e);
+        log.push({ nome: f.name, ok: false, msg: `Erro ao processar: ${e.message || e}` });
       }
     }
+    setImportLog(log);
     setPreview(all);
     setBusy(false);
-    setToast(`${all.length} lançamento(s) prontos para importar`);
+    if (all.length > 0) setToast(`${all.length} lançamento(s) prontos para importar`);
+    else setToast('Nenhum lançamento reconhecido — veja detalhes na tela');
   };
 
   const processBoleto = () => {
@@ -3335,6 +3468,7 @@ function Importacao({ data, setData }) {
     setPreview([]);
     setLinhaDig('');
     setSource('');
+    setImportLog([]);
     if (fileRef.current) fileRef.current.value = '';
     setToast(`${novos.length} lançamento(s) importados para o Financeiro`);
   };
@@ -3377,11 +3511,37 @@ function Importacao({ data, setData }) {
           </p>
           {busy && <div className="text-xs t-soft mt-2">Processando…</div>}
         </div>
+
+        {importLog.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {importLog.map((r, i) => (
+              <div key={i} className={`imp-log ${r.ok ? 'ok' : 'err'}`}>
+                <div className="mono text-xs" style={{ fontWeight: 600 }}>{r.ok ? '✓' : '✕'} {r.nome}</div>
+                <div className="text-xs" style={{ marginTop: 2 }}>{r.msg}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card p-5">
         <h3 className="display h-card t-ink mb-1">Boleto por linha digitável</h3>
-        <p className="text-sm t-soft mb-3">Cole os <b>47 dígitos</b> (título bancário) ou <b>48 dígitos</b> (concessionária/tributo). O sistema extrai valor e vencimento.</p>
+        <p className="text-sm t-soft mb-3">Cole os <b>47 dígitos</b> (título bancário) ou <b>48 dígitos</b> (concessionária/tributo), <b>ou tire uma foto</b> do boleto que o app lê. O sistema extrai valor e vencimento.</p>
+        <div className="flex gap-2 flex-wrap mb-3">
+          <ScanButton
+            label="Escanear boleto por foto"
+            size="md"
+            onExtracted={(text) => {
+              const linha = extractBoletoLinha(text);
+              if (linha) {
+                setLinhaDig(linha);
+                setToast('Linha digitável extraída da foto — confira e clique em Decodificar');
+              } else {
+                setToast('Não consegui achar os 47/48 dígitos na foto. Tenta com mais luz e sem tremer.');
+              }
+            }}
+          />
+        </div>
         <div className="flex gap-2 flex-wrap">
           <input
             className="inp mono"
@@ -3439,7 +3599,7 @@ function Importacao({ data, setData }) {
           </div>
 
           <div className="flex gap-2 mt-4 justify-end flex-wrap">
-            <button className="btn btn-ghost" onClick={() => { setPreview([]); setSource(''); if (fileRef.current) fileRef.current.value = ''; }}>Descartar</button>
+            <button className="btn btn-ghost" onClick={() => { setPreview([]); setSource(''); setImportLog([]); if (fileRef.current) fileRef.current.value = ''; }}>Descartar</button>
             <button className="btn btn-primary" onClick={confirmarImport}>Importar {preview.length} {preview.length === 1 ? 'lançamento' : 'lançamentos'} → Financeiro</button>
           </div>
         </div>
@@ -3717,6 +3877,20 @@ function DocumentoForm({ item, veiculos, motoristas, contratos, linhas, onSave, 
 
   return (
     <div>
+      <div className="scan-strip mb-3">
+        <ScanButton
+          label="Escanear documento por foto"
+          size="md"
+          onExtracted={(text) => {
+            const venc = extractVencimentoDate(text);
+            if (venc) setDataVencimento(venc);
+            const vals = extractValues(text);
+            if (vals.length > 0 && !valor) setValor(vals[0]);
+            if (!venc && vals.length === 0) alert('Não consegui extrair data nem valor da foto. Tenta com mais luz e sem tremer.');
+          }}
+        />
+        <span className="text-xs t-mute">Tenta preencher data de vencimento e valor</span>
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Tipo do documento">
           <select className="inp" value={tipo} onChange={(e) => setTipo(e.target.value)}>
@@ -4160,16 +4334,46 @@ function Configuracoes({ data, setData }) {
         <h3 className="display h-card t-ink mb-1">Identidade da empresa</h3>
         <p className="text-sm t-soft mb-4">Personalize a cara da sua empresa dentro do sistema.</p>
 
-        <div className="flex items-center gap-4 mb-5" style={{ padding: 14, background: '#F4F6F8', borderRadius: 12 }}>
+        <div className="flex items-center gap-4 mb-5" style={{ padding: 14, background: '#F4F6F8', borderRadius: 12, flexWrap: 'wrap' }}>
           <div className="cfg-logo-preview">
             {logoUrl && !logoErr
               ? <img src={logoUrl} alt="logo" onError={() => setLogoErr(true)} onLoad={() => setLogoErr(false)} />
               : <span className="cfg-logo-fallback">{iniciais}</span>}
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <div className="t-ink font-semibold" style={{ fontSize: 15 }}>{nomeEmp || 'Sua empresa'}</div>
             <div className="text-xs t-soft">{cnpj ? `CNPJ ${cnpj}` : 'Adicione um CNPJ (opcional)'}</div>
             <div className="text-xs t-mute mt-0.5">Prévia do topo do app</div>
+          </div>
+          <div className="flex gap-2" style={{ flexShrink: 0 }}>
+            <label className="btn btn-primary btn-sm" style={{ cursor: 'pointer', margin: 0 }}>
+              {logoUrl ? 'Trocar foto' : 'Enviar foto'}
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                style={{ display: 'none' }}
+                onChange={async (e) => {
+                  const f = e.target.files?.[0];
+                  if (!f) return;
+                  try {
+                    const dataUrl = await imgFileToResizedDataURL(f, 256, 0.85);
+                    setLogoUrl(dataUrl);
+                    setLogoErr(false);
+                  } catch (err) {
+                    console.error('[logo upload]', err);
+                    alert('Não consegui processar essa imagem. Tenta outra.');
+                  }
+                  e.target.value = '';
+                }}
+              />
+            </label>
+            {logoUrl && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={() => { setLogoUrl(''); setLogoErr(false); }}
+              >Remover</button>
+            )}
           </div>
         </div>
 
@@ -4183,11 +4387,11 @@ function Configuracoes({ data, setData }) {
             <input className="inp" value={cnpj} onChange={(e) => setCnpj(e.target.value)} placeholder="00.000.000/0000-00" />
           </label>
           <label className="block sm:col-span-2">
-            <span className="label">URL do logo</span>
-            <input className="inp" value={logoUrl} onChange={(e) => { setLogoUrl(e.target.value); setLogoErr(false); }} placeholder="https://... (link de uma imagem PNG/JPG)" />
+            <span className="label">URL do logo (opcional — alternativa ao upload)</span>
+            <input className="inp" value={logoUrl.startsWith('data:') ? '' : logoUrl} onChange={(e) => { setLogoUrl(e.target.value); setLogoErr(false); }} placeholder="https://... (link de uma imagem PNG/JPG)" />
             <span className="text-xs t-mute" style={{ marginTop: 4, display: 'block' }}>
-              Cole o link de uma imagem já hospedada (ex.: seu site, Google Drive público, Imgur). Ideal: 200×200px, PNG com fundo transparente.
-              {logoUrl && logoErr && <span className="t-red"> · Não consegui carregar essa imagem.</span>}
+              {logoUrl.startsWith('data:') ? 'Você enviou uma foto acima ✓ Este campo fica em branco enquanto a foto estiver ativa.' : 'Se preferir, cole o link de uma imagem já hospedada (Drive público, seu site, Imgur). Ideal: 200×200 PNG.'}
+              {logoUrl && !logoUrl.startsWith('data:') && logoErr && <span className="t-red"> · Não consegui carregar essa imagem.</span>}
             </span>
           </label>
           <label className="block">
