@@ -34,8 +34,8 @@ import { scanImage, extractBoletoLinha, extractVencimentoDate, extractValues, ex
 
 // ---------- Constants ----------
 const CAT_FIN_EMPRESA = {
-  entrada: ['Pagamento Prefeitura', 'Frete', 'Carreto', 'Serviço Avulso', 'Venda de Materiais', 'Contrato', 'Outros'],
-  saida: ['Combustível', 'Manutenção', 'Pneus', 'Seguro', 'IPVA/Documentação', 'Parcela', 'Salário/Motorista', 'Pedágio', 'Impostos', 'Compra de Materiais', 'Outros'],
+  entrada: ['Recebimento cliente', 'Pagamento Prefeitura', 'Frete', 'Carreto', 'Contrato', 'Serviço Avulso', 'Venda de Materiais', 'Pró-labore recebido', 'Reembolso', 'Devolução', 'Outros'],
+  saida: ['Combustível', 'Manutenção', 'Pedágio', 'Salário/Motorista', 'Ajudante avulso', 'Pró-labore', 'Pneus', 'Peças', 'Seguro', 'IPVA/Documentação', 'Parcela', 'Aluguel', 'Impostos', 'Utilidades', 'Contador', 'Alimentação', 'Compra de Materiais', 'Boletos', 'Tarifas bancárias', 'Outros'],
 };
 const FORMAS_PGTO = ['Dinheiro', 'PIX', 'Transferência', 'Cartão Débito', 'Cartão Crédito', 'Boleto'];
 const TIPOS_LINHA = ['Linha Fixa', 'Carreto', 'Frete Avulso', 'Licitação', 'Contrato'];
@@ -296,6 +296,146 @@ function ScanButton({ label = 'Escanear por foto', onExtracted, size = 'sm', acc
         disabled={busy}
       />
     </label>
+  );
+}
+
+// =========================================================
+//   CATEGORIA — memória automática + custom + dropdown inline
+// =========================================================
+
+// Palavras genéricas que devemos ignorar quando indexamos a descrição.
+const CAT_STOPWORDS = new Set([
+  'PIX', 'TED', 'DOC', 'ENVIADO', 'RECEBIDO', 'CREDITO', 'CRED', 'DEBITO', 'DEB',
+  'BOLETO', 'PAGAMENTO', 'RECEBIMENTO', 'TRANSFERENCIA', 'DEPOSITO', 'SAQUE',
+  'COMPRA', 'DIA', 'PARA', 'DE', 'DO', 'DA', 'EM', 'NA', 'NO', 'COM',
+  'ORIGEM', 'DESTINO', 'CONTA', 'AGENCIA', 'BANCO', 'PAG',
+]);
+
+// Constrói a chave de memória a partir de uma descrição.
+// Ex.: "PIX ENVIADO WILKER HENRIQUE LIMA 463.046.508-17" → "HENRIQUE-LIMA-WILKER"
+function categoryMemoryKey(descricao) {
+  if (!descricao) return '';
+  const tokens = String(descricao)
+    .toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Z\s]/g, ' ')
+    .split(/\s+/)
+    .filter(t => t.length >= 3 && !CAT_STOPWORDS.has(t));
+  if (tokens.length === 0) return '';
+  return [...tokens].sort().slice(0, 3).join('-');
+}
+
+// Sugere categoria a partir de memória (memoria[key] existe?) e de palavras-chave.
+function suggestCategoria(descricao, tipo, memoria = {}) {
+  const key = categoryMemoryKey(descricao);
+  if (key && memoria[key]) return { categoria: memoria[key], motivo: 'memoria' };
+  const m = String(descricao || '').toUpperCase();
+  if (tipo === 'saida') {
+    if (/\b(POSTO|SHELL|IPIRANGA|BR|PETROBRAS|COMBUSTIVEL|GASOLINA|DIESEL|ETANOL)\b/.test(m)) return { categoria: 'Combustível', motivo: 'palavra' };
+    if (/\b(PEDAGIO|SEM\s*PARAR|CONECTCAR|VELOE)\b/.test(m)) return { categoria: 'Pedágio', motivo: 'palavra' };
+    if (/\b(OFICINA|MECANIC|MANUT|PECA)\b/.test(m)) return { categoria: 'Manutenção', motivo: 'palavra' };
+    if (/\bIPVA|LICEN|DETRAN|DPVAT\b/.test(m)) return { categoria: 'IPVA/Documentação', motivo: 'palavra' };
+    if (/\bSEGURO/.test(m)) return { categoria: 'Seguro', motivo: 'palavra' };
+    if (/\bSALARIO|FOLHA|VALE/.test(m)) return { categoria: 'Salário/Motorista', motivo: 'palavra' };
+    if (/\bIMPOSTO|DARF|GPS|GNRE|SIMPLES\s*NACIONAL/.test(m)) return { categoria: 'Impostos', motivo: 'palavra' };
+    if (/\bENERGIA|LUZ|AGUA|INTERNET|TELEFONE|CELULAR/.test(m)) return { categoria: 'Utilidades', motivo: 'palavra' };
+    if (/\bALUGUEL|LOCACAO/.test(m)) return { categoria: 'Aluguel', motivo: 'palavra' };
+    if (/\bTARIFA|IOF|JUROS|MULTA\s*BANCO/.test(m)) return { categoria: 'Tarifas bancárias', motivo: 'palavra' };
+  } else {
+    if (/\b(FRETE|TRANSPORTE)\b/.test(m)) return { categoria: 'Frete', motivo: 'palavra' };
+    if (/\b(PREFEITURA|MUNICIPIO)\b/.test(m)) return { categoria: 'Pagamento Prefeitura', motivo: 'palavra' };
+    if (/\b(REEMBOLSO|ESTORNO)\b/.test(m)) return { categoria: 'Reembolso', motivo: 'palavra' };
+  }
+  return null;
+}
+
+// Merge das categorias padrão com as customizadas da empresa.
+function getCategoriasCompletas(tipo, categoriasCustom = {}) {
+  const padrao = CAT_FIN_EMPRESA[tipo] || [];
+  const custom = (categoriasCustom[tipo] || []).filter(c => !padrao.includes(c));
+  return [...padrao.filter(c => c !== 'Outros'), ...custom, 'Outros'];
+}
+
+function CategoryDropdown({ lancamento, config = {}, onChangeCategoria, onAddCustom }) {
+  const [open, setOpen] = useState(false);
+  const [addingNew, setAddingNew] = useState(false);
+  const [novaCategoria, setNovaCategoria] = useState('');
+  const ref = React.useRef(null);
+  const memoria = config.categoryMemory || {};
+  const custom = config.categoriasCustomEmpresa || {};
+  const categorias = getCategoriasCompletas(lancamento.tipo, custom);
+  const sugestao = suggestCategoria(lancamento.descricao, lancamento.tipo, memoria);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setAddingNew(false); } };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const selecionar = (cat) => {
+    onChangeCategoria?.(cat);
+    setOpen(false);
+    setAddingNew(false);
+  };
+  const salvarNova = () => {
+    const c = novaCategoria.trim();
+    if (!c) return;
+    onAddCustom?.(lancamento.tipo, c);
+    selecionar(c);
+    setNovaCategoria('');
+  };
+
+  return (
+    <span className="cat-drop-wrap" ref={ref}>
+      <button type="button" className="cat-drop-btn" onClick={(e) => { e.stopPropagation(); setOpen(v => !v); }}>
+        {lancamento.categoria || 'Categoria'}
+        <ChevronDown size={11} style={{ transition: 'transform .15s', transform: open ? 'rotate(180deg)' : 'none' }} />
+      </button>
+      {open && (
+        <div className="cat-drop-menu" onClick={(e) => e.stopPropagation()}>
+          {sugestao && sugestao.categoria !== lancamento.categoria && (
+            <>
+              <div className="cat-drop-header">Sugestão</div>
+              <button className="cat-drop-item cat-drop-suggested" onClick={() => selecionar(sugestao.categoria)}>
+                <Sparkles size={11} /> {sugestao.categoria}
+                <span className="cat-drop-hint">{sugestao.motivo === 'memoria' ? 'você já usou' : 'pela descrição'}</span>
+              </button>
+              <div className="cat-drop-sep" />
+            </>
+          )}
+          <div className="cat-drop-header">{lancamento.tipo === 'entrada' ? 'Entradas' : 'Saídas'}</div>
+          <div className="cat-drop-list">
+            {categorias.map(c => (
+              <button
+                key={c}
+                className={`cat-drop-item ${c === lancamento.categoria ? 'on' : ''}`}
+                onClick={() => selecionar(c)}
+              >{c}{c === lancamento.categoria && <Check size={12} />}</button>
+            ))}
+          </div>
+          <div className="cat-drop-sep" />
+          {addingNew ? (
+            <div className="cat-drop-new">
+              <input
+                autoFocus
+                className="inp"
+                style={{ padding: '6px 8px', fontSize: 12.5 }}
+                value={novaCategoria}
+                onChange={(e) => setNovaCategoria(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') salvarNova(); if (e.key === 'Escape') { setAddingNew(false); setNovaCategoria(''); } }}
+                placeholder="Nome da nova categoria"
+              />
+              <button className="btn btn-primary" style={{ padding: '5px 10px', fontSize: 12 }} onClick={salvarNova}>Adicionar</button>
+            </div>
+          ) : (
+            <button className="cat-drop-item cat-drop-add" onClick={() => setAddingNew(true)}>
+              <Plus size={12} /> Nova categoria
+            </button>
+          )}
+        </div>
+      )}
+    </span>
   );
 }
 
@@ -731,6 +871,152 @@ function ConfirmModal({ item, title, message, onCancel, onConfirm }) {
   );
 }
 
+function LogoutConfirm({ open, onCancel, onConfirm }) {
+  return (
+    <Modal open={open} onClose={onCancel} title="Sair da conta">
+      <div className="space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="chip" style={{ background: '#EEF2FF', color: '#1D4ED8', flexShrink: 0 }}><LogOut size={16} /></div>
+          <div className="min-w-0">
+            <p className="text-sm t-ink">Você realmente deseja sair da sua conta?</p>
+            <p className="text-xs t-mute mt-1">Seus dados continuam salvos na nuvem — basta entrar de novo pra continuar de onde parou.</p>
+          </div>
+        </div>
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-1">
+          <button onClick={onCancel} className="btn btn-ghost">Cancelar</button>
+          <button onClick={onConfirm} className="btn btn-danger"><LogOut size={14} /> Sair</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Editor de logo com preview circular, zoom e arrastar pra reenquadrar.
+// Recebe um File, retorna via onConfirm uma dataURL 256×256 pronta para usar.
+function LogoEditor({ file, onCancel, onConfirm }) {
+  const [imgSrc, setImgSrc] = useState('');
+  const [imgW, setImgW] = useState(0);
+  const [imgH, setImgH] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = React.useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
+  const CONTAINER = 240;
+
+  useEffect(() => {
+    if (!file) { setImgSrc(''); setImgW(0); setImgH(0); setZoom(1); setOffset({ x: 0, y: 0 }); return; }
+    const url = URL.createObjectURL(file);
+    setImgSrc(url);
+    setZoom(1); setOffset({ x: 0, y: 0 });
+    const img = new Image();
+    img.onload = () => { setImgW(img.width); setImgH(img.height); };
+    img.src = url;
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  useEffect(() => {
+    const move = (cx, cy) => {
+      if (!dragRef.current.dragging) return;
+      const dx = cx - dragRef.current.startX;
+      const dy = cy - dragRef.current.startY;
+      setOffset({ x: dragRef.current.origX + dx, y: dragRef.current.origY + dy });
+    };
+    const mmove = (e) => move(e.clientX, e.clientY);
+    const tmove = (e) => { const t = e.touches[0]; if (t) move(t.clientX, t.clientY); };
+    const end = () => { dragRef.current.dragging = false; };
+    window.addEventListener('mousemove', mmove);
+    window.addEventListener('mouseup', end);
+    window.addEventListener('touchmove', tmove, { passive: true });
+    window.addEventListener('touchend', end);
+    return () => {
+      window.removeEventListener('mousemove', mmove);
+      window.removeEventListener('mouseup', end);
+      window.removeEventListener('touchmove', tmove);
+      window.removeEventListener('touchend', end);
+    };
+  }, []);
+
+  const startDrag = (cx, cy) => {
+    dragRef.current = { dragging: true, startX: cx, startY: cy, origX: offset.x, origY: offset.y };
+  };
+  const onMouseDown = (e) => { e.preventDefault(); startDrag(e.clientX, e.clientY); };
+  const onTouchStart = (e) => { const t = e.touches[0]; if (t) startDrag(t.clientX, t.clientY); };
+
+  const confirm = () => {
+    if (!imgSrc || !imgW || !imgH) return;
+    const CANVAS_SIZE = 256;
+    const ratio = CANVAS_SIZE / CONTAINER;
+    const coverScale = Math.max(CONTAINER / imgW, CONTAINER / imgH);
+    const drawW = imgW * coverScale * zoom * ratio;
+    const drawH = imgH * coverScale * zoom * ratio;
+    const drawX = (CANVAS_SIZE - drawW) / 2 + offset.x * ratio;
+    const drawY = (CANVAS_SIZE - drawH) / 2 + offset.y * ratio;
+    const canvas = document.createElement('canvas');
+    canvas.width = CANVAS_SIZE; canvas.height = CANVAS_SIZE;
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    img.onload = () => {
+      // fundo branco caso a imagem tenha transparência
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+      ctx.drawImage(img, drawX, drawY, drawW, drawH);
+      onConfirm(canvas.toDataURL('image/jpeg', 0.9));
+    };
+    img.src = imgSrc;
+  };
+
+  const coverScale = imgW && imgH ? Math.max(CONTAINER / imgW, CONTAINER / imgH) : 1;
+  const displayW = imgW * coverScale * zoom;
+  const displayH = imgH * coverScale * zoom;
+
+  return (
+    <Modal open={!!file} onClose={onCancel} title="Ajustar logo">
+      <div className="logo-editor space-y-3">
+        <div
+          className="logo-editor-preview"
+          onMouseDown={onMouseDown}
+          onTouchStart={onTouchStart}
+        >
+          {imgSrc && imgW > 0 && (
+            <img
+              src={imgSrc}
+              alt=""
+              draggable={false}
+              style={{
+                position: 'absolute',
+                left: '50%', top: '50%',
+                width: `${displayW}px`,
+                height: `${displayH}px`,
+                transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px))`,
+                userSelect: 'none',
+                pointerEvents: 'none',
+              }}
+            />
+          )}
+          {(!imgSrc || !imgW) && <span className="t-mute text-sm">Carregando…</span>}
+        </div>
+        <div>
+          <div className="flex items-center gap-3">
+            <span className="label" style={{ minWidth: 40 }}>Zoom</span>
+            <button type="button" className="zoom-btn" onClick={() => setZoom(z => Math.max(1, +(z - 0.1).toFixed(2)))}>−</button>
+            <input
+              className="zoom-slider"
+              type="range" min="1" max="3" step="0.05"
+              value={zoom}
+              onChange={(e) => setZoom(parseFloat(e.target.value))}
+            />
+            <button type="button" className="zoom-btn" onClick={() => setZoom(z => Math.min(3, +(z + 0.1).toFixed(2)))}>+</button>
+          </div>
+          <p className="text-xs t-mute mt-2">Arraste a foto pra reposicionar. Ajuste o zoom acima.</p>
+        </div>
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-1">
+          <button className="btn btn-ghost" onClick={onCancel}>Cancelar</button>
+          <button className="btn btn-primary" onClick={confirm} disabled={!imgW}>Aplicar logo</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function FinanceiroEmpresa({ data, setData }) {
   const { finEmpresa, veiculos, linhas, contratos } = data;
   const [openForm, setOpenForm] = useState(false);
@@ -872,7 +1158,34 @@ function FinanceiroEmpresa({ data, setData }) {
                     <div className={`text-sm font-medium truncate ${canc ? 'tx-canc' : 't-ink'}`}>{x.descricao}</div>
                     <div className="text-xs t-soft mt-0.5 flex flex-wrap items-center gap-1.5">
                       <Badge tone={sb.tone}>{sb.label}</Badge>
-                      <Badge tone="slate">{x.categoria}</Badge>
+                      <CategoryDropdown
+                        lancamento={x}
+                        config={data.config}
+                        onChangeCategoria={(nova) => {
+                          const key = categoryMemoryKey(x.descricao);
+                          setData(d => {
+                            const config = { ...(d.config || {}) };
+                            if (key) config.categoryMemory = { ...(config.categoryMemory || {}), [key]: nova };
+                            return {
+                              ...d,
+                              config,
+                              finEmpresa: d.finEmpresa.map(y => y.id === x.id ? { ...y, categoria: nova } : y),
+                            };
+                          });
+                          setToast(`Categoria alterada para "${nova}"`);
+                        }}
+                        onAddCustom={(tipo, cat) => {
+                          setData(d => {
+                            const cfg = { ...(d.config || {}) };
+                            const custom = { ...(cfg.categoriasCustomEmpresa || {}) };
+                            const arr = [...(custom[tipo] || [])];
+                            if (!arr.includes(cat)) arr.push(cat);
+                            custom[tipo] = arr;
+                            cfg.categoriasCustomEmpresa = custom;
+                            return { ...d, config: cfg };
+                          });
+                        }}
+                      />
                       {x.statusConc === 'conciliado' && <Badge tone="green">✓ Conciliado</Badge>}
                       {x.statusConc === 'pendente' && <Badge tone="orange">Pendente conciliação</Badge>}
                       <span>{fmtDate(x.data)}</span>
@@ -2904,6 +3217,8 @@ function AppInner() {
   const [data, setData, loaded] = useFirestoreSync(company?.id);
   const [route, setRoute] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [logoutOpen, setLogoutOpen] = useState(false);
+  const openLogout = () => setLogoutOpen(true);
 
   // Guard: if user hit a route they can't see (via memory of last route or direct URL), send to dashboard
   useEffect(() => {
@@ -3284,6 +3599,45 @@ function AppInner() {
         .scan-spin{ display:inline-block; width:12px; height:12px; border-radius:99px; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; animation:scan-rot .8s linear infinite; }
         @keyframes scan-rot{ to{ transform:rotate(360deg); } }
 
+        /* Conciliação */
+        .conc-banner{ display:flex; align-items:flex-start; gap:14px; padding:14px 16px; background:linear-gradient(135deg,#FFF7ED,#FEF3C7); border:1px solid #FCD34D; border-radius:14px; flex-wrap:wrap; }
+        .conc-banner-ico{ width:38px; height:38px; border-radius:10px; background:#F59E0B; color:#fff; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .conc-banner-title{ font-size:14px; font-weight:600; color:#0B1324; line-height:1.3; }
+        .conc-banner-sub{ font-size:12.5px; color:#78350F; margin-top:3px; line-height:1.4; }
+        .conc-btn{ display:inline-flex; align-items:center; gap:5px; padding:5px 11px; border-radius:8px; background:#087F5B; color:#fff; border:0; font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer; transition:transform .15s, box-shadow .15s; }
+        .conc-btn:hover{ transform:translateY(-1px); box-shadow:0 6px 14px rgba(8,127,91,.28); background:#0B815E; }
+        .conc-btn:active{ transform:scale(.98); }
+
+        /* Categoria dropdown */
+        .cat-drop-wrap{ position:relative; display:inline-flex; }
+        .cat-drop-btn{ display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:99px; background:#EEF0F3; color:#3F4756; border:1px solid transparent; font-family:inherit; font-size:11px; font-weight:500; letter-spacing:.02em; cursor:pointer; transition:background .12s, border-color .12s; }
+        .cat-drop-btn:hover{ background:#E1E4EA; border-color:#C9CDD3; }
+        .cat-drop-menu{ position:absolute; top:calc(100% + 6px); left:0; z-index:40; min-width:230px; max-width:280px; background:#fff; border:1px solid #E5E7EB; border-radius:12px; box-shadow:0 12px 32px rgba(11,19,36,.14); padding:6px; }
+        .cat-drop-header{ font-size:10.5px; font-weight:600; color:#6B7280; text-transform:uppercase; letter-spacing:.06em; padding:6px 8px 4px; }
+        .cat-drop-list{ max-height:220px; overflow-y:auto; }
+        .cat-drop-list::-webkit-scrollbar{ width:5px; }
+        .cat-drop-list::-webkit-scrollbar-thumb{ background:#D1D5DB; border-radius:99px; }
+        .cat-drop-item{ display:flex; align-items:center; gap:6px; width:100%; padding:7px 9px; border:0; background:transparent; color:#0B1324; font-family:inherit; font-size:12.5px; text-align:left; border-radius:7px; cursor:pointer; transition:background .1s; }
+        .cat-drop-item:hover{ background:#F4F6F8; }
+        .cat-drop-item.on{ background:#EEF2FF; color:#1D4ED8; font-weight:600; }
+        .cat-drop-item.on svg{ margin-left:auto; }
+        .cat-drop-suggested{ color:#1D4ED8; font-weight:500; }
+        .cat-drop-hint{ margin-left:auto; font-size:10px; color:#9CA3AF; font-weight:400; }
+        .cat-drop-sep{ height:1px; background:#F1F2F4; margin:5px 0; }
+        .cat-drop-add{ color:#087F5B; font-weight:600; }
+        .cat-drop-add:hover{ background:#ECFDF5; }
+        .cat-drop-new{ display:flex; gap:5px; padding:6px 8px; }
+        .cat-drop-new .inp{ flex:1; min-width:0; }
+
+        /* Logo editor */
+        .logo-editor-preview{ position:relative; width:240px; height:240px; margin:0 auto; border-radius:99px; overflow:hidden; background:#F4F6F8; border:2px solid #E5E7EB; cursor:grab; display:flex; align-items:center; justify-content:center; touch-action:none; }
+        .logo-editor-preview:active{ cursor:grabbing; }
+        .zoom-slider{ flex:1; min-width:0; -webkit-appearance:none; appearance:none; height:5px; background:#E5E7EB; border-radius:99px; outline:none; }
+        .zoom-slider::-webkit-slider-thumb{ -webkit-appearance:none; appearance:none; width:20px; height:20px; border-radius:99px; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); cursor:pointer; border:2px solid #fff; box-shadow:0 2px 6px rgba(11,19,36,.2); }
+        .zoom-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:99px; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); cursor:pointer; border:2px solid #fff; }
+        .zoom-btn{ width:32px; height:32px; border-radius:8px; background:#F4F6F8; color:#0B1324; border:1px solid #E5E7EB; font-family:inherit; font-size:16px; font-weight:600; cursor:pointer; flex-shrink:0; transition:background .12s; }
+        .zoom-btn:hover{ background:#E5E7EB; }
+
         /* WMS */
         .wms-list{ display:flex; flex-direction:column; gap:6px; }
         .wms-row{ display:flex; align-items:center; gap:11px; padding:11px; background:#fff; border:1px solid #EFF0F2; border-radius:11px; transition:transform .15s, box-shadow .15s, border-color .15s; }
@@ -3311,7 +3665,7 @@ function AppInner() {
           empresa={data.config?.nomeEmpresa || company?.nome}
           logoUrl={data.config?.logoUrl}
           userName={user?.displayName || user?.email}
-          onLogout={logout}
+          onLogout={openLogout}
         />
         {!loaded ? <div className="p-10 t-soft text-sm">Carregando dados…</div> : <>
           {route === 'dashboard' && <Dashboard data={data} />}
@@ -3328,9 +3682,10 @@ function AppInner() {
           {route === 'documentos' && <Documentos data={data} setData={setData} />}
           {route === 'relatorios' && <Relatorios data={data} />}
           {route === 'importacao' && <Importacao data={data} setData={setData} />}
-          {route === 'config' && <Configuracoes data={data} setData={setData} />}
+          {route === 'config' && <Configuracoes data={data} setData={setData} onRequestLogout={openLogout} />}
         </>}
       </main>
+      <LogoutConfirm open={logoutOpen} onCancel={() => setLogoutOpen(false)} onConfirm={() => { setLogoutOpen(false); logout(); }} />
     </div>
   );
 }
@@ -3440,30 +3795,38 @@ function Importacao({ data, setData }) {
 
   const confirmarImport = () => {
     if (preview.length === 0) return;
-    const novos = preview.map(x => ({
-      id: uid(),
-      data: x.data || todayISO(),
-      tipo: x.tipo,
-      categoria: x.categoria || 'Outras',
-      descricao: x.descricao,
-      valor: x.valor,
-      cliente: x.cliente || '',
-      forma: source === 'boleto' ? 'Boleto' : source === 'xml' ? 'Boleto' : 'Transferência',
-      veiculoId: '',
-      linhaId: '',
-      contratoId: '',
-      obs: source === 'ofx' ? `Importado de OFX (${x.banco || banco})`
-         : source === 'csv' ? `Importado de CSV (${x.banco || banco})`
-         : source === 'xlsx' ? `Importado de Excel (${x.banco || banco})`
-         : source === 'xml' ? `${x.tipoDoc === 'cte' ? 'CT-e' : 'NF-e'} ${x.numero || ''}${x.emitNome ? ' · ' + x.emitNome : ''}`
-         : `Boleto · ${x.linhaDigitavel || ''}`,
-      status: source === 'boleto' || source === 'xml' ? 'pendente' : 'pago',
-      vencimento: x.vencimento || '',
-      dataPagamento: source === 'boleto' || source === 'xml' ? '' : x.data,
-      recorrente: false,
-      statusConc: source === 'boleto' || source === 'xml' ? 'manual' : 'pendente',
-      fitid: x.fitid || '',
-    }));
+    const memoria = data.config?.categoryMemory || {};
+    const novos = preview.map(x => {
+      // Se houver memória para essa descrição, usa a categoria memorizada;
+      // caso contrário, tenta descobrir por palavras-chave; senão, mantém o
+      // que o parser retornou.
+      const sug = suggestCategoria(x.descricao, x.tipo, memoria);
+      const categoriaFinal = sug ? sug.categoria : (x.categoria || 'Outros');
+      return {
+        id: uid(),
+        data: x.data || todayISO(),
+        tipo: x.tipo,
+        categoria: categoriaFinal,
+        descricao: x.descricao,
+        valor: x.valor,
+        cliente: x.cliente || '',
+        forma: source === 'boleto' ? 'Boleto' : source === 'xml' ? 'Boleto' : 'Transferência',
+        veiculoId: '',
+        linhaId: '',
+        contratoId: '',
+        obs: source === 'ofx' ? `Importado de OFX (${x.banco || banco})`
+           : source === 'csv' ? `Importado de CSV (${x.banco || banco})`
+           : source === 'xlsx' ? `Importado de Excel (${x.banco || banco})`
+           : source === 'xml' ? `${x.tipoDoc === 'cte' ? 'CT-e' : 'NF-e'} ${x.numero || ''}${x.emitNome ? ' · ' + x.emitNome : ''}`
+           : `Boleto · ${x.linhaDigitavel || ''}`,
+        status: source === 'boleto' || source === 'xml' ? 'pendente' : 'pago',
+        vencimento: x.vencimento || '',
+        dataPagamento: source === 'boleto' || source === 'xml' ? '' : x.data,
+        recorrente: false,
+        statusConc: source === 'boleto' || source === 'xml' ? 'manual' : 'pendente',
+        fitid: x.fitid || '',
+      };
+    });
     setData(d => ({ ...d, finEmpresa: [...(d.finEmpresa || []), ...novos] }));
     setPreview([]);
     setLinhaDig('');
@@ -4285,7 +4648,7 @@ function MembrosSection({ company }) {
   );
 }
 
-function Configuracoes({ data, setData }) {
+function Configuracoes({ data, setData, onRequestLogout }) {
   const { user, profile, company, logout, isOwner } = useAuth();
   const c = data.config || {};
   const [nomeEmp, setNomeEmp] = useState(c.nomeEmpresa || '');
@@ -4301,6 +4664,7 @@ function Configuracoes({ data, setData }) {
   const [copied, setCopied] = useState(false);
   const [saved, setSaved] = useState('');
   const [logoErr, setLogoErr] = useState(false);
+  const [logoFileToEdit, setLogoFileToEdit] = useState(null);
 
   function salvarIdentidade() {
     setData((d) => ({
@@ -4352,17 +4716,9 @@ function Configuracoes({ data, setData }) {
                 type="file"
                 accept="image/png,image/jpeg,image/webp"
                 style={{ display: 'none' }}
-                onChange={async (e) => {
+                onChange={(e) => {
                   const f = e.target.files?.[0];
-                  if (!f) return;
-                  try {
-                    const dataUrl = await imgFileToResizedDataURL(f, 256, 0.85);
-                    setLogoUrl(dataUrl);
-                    setLogoErr(false);
-                  } catch (err) {
-                    console.error('[logo upload]', err);
-                    alert('Não consegui processar essa imagem. Tenta outra.');
-                  }
+                  if (f) setLogoFileToEdit(f);
                   e.target.value = '';
                 }}
               />
@@ -4376,6 +4732,12 @@ function Configuracoes({ data, setData }) {
             )}
           </div>
         </div>
+
+        <LogoEditor
+          file={logoFileToEdit}
+          onCancel={() => setLogoFileToEdit(null)}
+          onConfirm={(dataUrl) => { setLogoUrl(dataUrl); setLogoErr(false); setLogoFileToEdit(null); }}
+        />
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="block">
@@ -4461,7 +4823,7 @@ function Configuracoes({ data, setData }) {
           <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>Função:</span><span className="t-ink capitalize">{profile?.role || '—'}</span></div>
         </div>
         <div className="mt-4">
-          <button className="btn btn-danger" onClick={logout}><LogOut size={14} /> Sair da conta</button>
+          <button className="btn btn-danger" onClick={() => (onRequestLogout ? onRequestLogout() : logout())}><LogOut size={14} /> Sair da conta</button>
         </div>
       </div>
     </div>
