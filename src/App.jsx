@@ -7,7 +7,7 @@ import {
   Activity, Clock, Coins, Receipt, ChevronRight, ChevronDown, CircleAlert, Sun, Phone,
   Trophy, Flame, Lightbulb, Percent, Calendar,
   Home, ShoppingCart, CreditCard, Heart, GraduationCap, Target, PiggyBank, Gauge, Sparkles,
-  LogOut, Copy, Check, Building2, Camera,
+  LogOut, Copy, Check, Building2, Camera, Package, Eye,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -18,12 +18,13 @@ import { AuthGate } from './auth/AuthGate';
 import { useFirestoreSync } from './data/useFirestoreSync';
 import { fdb } from './firebase';
 import { collection, doc as fsDoc, onSnapshot, updateDoc } from 'firebase/firestore';
-import { parseOFX } from './importers/ofx';
+import { parseOFX, isLinhaSaldo } from './importers/ofx';
 import { parseBoleto } from './importers/boleto';
 import { parseCSV } from './importers/csv';
 import { parseXLSX } from './importers/xlsx';
 import { parseXML } from './importers/xml';
 import { scanImage, extractBoletoLinha, extractVencimentoDate, extractValues, extractDates } from './ocr/scanner';
+import { gerarOrcamentoPDF } from './pdf/orcamento';
 
 /* ============================================================
    GESTÃO GSO — v2.1
@@ -496,6 +497,7 @@ const NAV = [
   { key: 'crm', label: 'CRM Comercial', icon: Target },
   { key: 'wms', label: 'Armazém (WMS)', icon: Home },
   { key: 'documentos', label: 'Documentos', icon: FolderOpen },
+  { key: 'mudancas', label: 'Mudanças', icon: Package },
   { key: 'relatorios', label: 'Relatórios', icon: BarChart3 },
   { key: 'importacao', label: 'Importação', icon: ArrowDownRight },
   { key: 'config', label: 'Configurações', icon: Settings },
@@ -1091,8 +1093,29 @@ function FinanceiroEmpresa({ data, setData }) {
     setToast(`${pendentesConc.length} lançamento(s) marcados como conciliados`);
   };
 
+  // Detecta lançamentos que na verdade são linhas de saldo importadas por engano
+  const linhasSaldo = useMemo(() => finEmpresa.filter(x => isLinhaSaldo(x.descricao)), [finEmpresa]);
+  const removerLinhasSaldo = () => {
+    if (linhasSaldo.length === 0) return;
+    const ids = new Set(linhasSaldo.map(x => x.id));
+    setData(d => ({ ...d, finEmpresa: d.finEmpresa.filter(x => !ids.has(x.id)) }));
+    setToast(`${linhasSaldo.length} linha(s) de saldo removida(s)`);
+  };
+
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {linhasSaldo.length > 0 && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FEF2F2,#FEE2E2)', borderColor: '#FCA5A5' }}>
+          <div className="conc-banner-ico" style={{ background: '#B4234B' }}><AlertTriangle size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">Encontramos <b>{linhasSaldo.length}</b> {linhasSaldo.length === 1 ? 'linha de saldo' : 'linhas de saldo'} no seu financeiro</div>
+            <div className="conc-banner-sub" style={{ color: '#7F1D1D' }}>Linhas como "SALDO TOTAL DISPONÍVEL" não são entradas nem saídas — são só o saldo da conta. Elas distorcem seus totais. Recomendamos remover.</div>
+          </div>
+          <button className="btn btn-danger" onClick={removerLinhasSaldo} style={{ flexShrink: 0 }}>
+            <Trash2 size={14} /> Remover {linhasSaldo.length}
+          </button>
+        </div>
+      )}
       {pendentesConc.length > 0 && (
         <div className="conc-banner">
           <div className="conc-banner-ico"><CircleAlert size={20} /></div>
@@ -3271,6 +3294,7 @@ function AppInner() {
     crm: { t: 'CRM Comercial', s: 'Pipeline de leads e oportunidades' },
     wms: { t: 'Armazém (WMS)', s: 'Estoque, endereçamento e giro' },
     documentos: { t: 'Documentos', s: 'Organização e vencimentos' },
+    mudancas: { t: 'Mudanças', s: 'Cotações, orçamentos e serviços' },
     relatorios: { t: 'Relatórios', s: 'Análises detalhadas com filtros' },
     importacao: { t: 'Importação', s: 'OFX, boleto e CSV com conciliação' },
     config: { t: 'Configurações', s: 'Empresa, preços médios, categorias' },
@@ -3412,6 +3436,61 @@ function AppInner() {
           display:inline-block;
         }
         .cfg-logo-remove:hover{ color:#8B1834; }
+
+        /* Mudanças */
+        .mud-tabs{ display:flex; gap:6px; background:#F1F2F4; padding:4px; border-radius:12px; flex-wrap:wrap; }
+        .mud-tab{ flex:1; min-width:130px; padding:9px 14px; border-radius:9px; border:0; background:transparent; color:#4B5563; font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; transition:all .15s; }
+        .mud-tab:hover{ color:#0B1324; }
+        .mud-tab.on{ background:#fff; color:#7A1730; box-shadow:0 2px 8px rgba(11,19,36,.08); }
+        .mud-money{ position:relative; }
+        .mud-money-cur{ position:absolute; left:12px; top:50%; transform:translateY(-50%); font-size:12.5px; color:#9CA3AF; font-weight:600; pointer-events:none; z-index:1; }
+        .mud-escada-grid{ display:grid; grid-template-columns:1.4fr 1fr 1fr 1fr; gap:10px; align-items:center; }
+        .mud-escada-head{ font-size:11px; font-weight:600; color:#6B7280; text-transform:uppercase; letter-spacing:.04em; text-align:center; }
+        .mud-escada-lbl{ font-size:13px; font-weight:500; color:#0B1324; }
+        @media(max-width:640px){
+          .mud-escada-grid{ grid-template-columns:1fr 1fr; }
+          .mud-escada-head:first-child{ display:none; }
+          .mud-escada-lbl{ grid-column:1 / -1; margin-top:6px; font-weight:600; color:#7A1730; }
+        }
+        .mud-save-bar{ position:sticky; bottom:0; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; background:rgba(255,255,255,.92); backdrop-filter:blur(8px); border:1px solid #EFF0F2; border-radius:12px; box-shadow:0 -4px 16px rgba(11,19,36,.06); }
+        /* botão primário do módulo mudança usa bordô */
+        .mud-tab.on, .mud-save-bar .btn-primary{ }
+
+        /* Cotação wizard */
+        .cot-wrap{ display:grid; grid-template-columns:1fr 320px; gap:16px; align-items:start; }
+        @media(max-width:900px){ .cot-wrap{ grid-template-columns:1fr; } }
+        .cot-stepper{ display:flex; align-items:center; margin-bottom:20px; }
+        .cot-step{ width:32px; height:32px; border-radius:99px; border:2px solid #E5E7EB; background:#fff; color:#9CA3AF; font-family:inherit; font-weight:700; font-size:13px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; transition:all .15s; }
+        .cot-step.on{ border-color:#7A1730; background:#7A1730; color:#fff; }
+        .cot-step.done{ border-color:#7A1730; background:#fff; color:#7A1730; }
+        .cot-step-line{ flex:1; height:2px; background:#E5E7EB; margin:0 4px; transition:background .15s; }
+        .cot-step-line.done{ background:#7A1730; }
+        .cot-seg{ display:flex; gap:6px; background:#F1F2F4; padding:4px; border-radius:10px; }
+        .cot-seg-btn{ flex:1; padding:9px; border-radius:7px; border:0; background:transparent; color:#4B5563; font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; transition:all .15s; }
+        .cot-seg-btn.on{ background:#7A1730; color:#fff; }
+        .cot-andar-box{ background:#F9FAFB; border:1px solid #EFF0F2; border-radius:12px; padding:14px; }
+        .cot-check{ display:flex; align-items:center; gap:8px; font-size:13px; color:#0B1324; cursor:pointer; }
+        .cot-check input{ width:16px; height:16px; accent-color:#7A1730; }
+        .cot-item-list{ display:flex; flex-direction:column; gap:2px; }
+        .cot-item-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 11px; border-radius:9px; transition:background .1s; }
+        .cot-item-row:hover{ background:#F9FAFB; }
+        .cot-counter{ display:flex; align-items:center; gap:0; border:1px solid #E5E7EB; border-radius:9px; overflow:hidden; flex-shrink:0; }
+        .cot-counter-btn{ width:32px; height:32px; border:0; background:#F4F6F8; color:#0B1324; font-size:17px; font-weight:600; cursor:pointer; transition:background .1s; font-family:inherit; }
+        .cot-counter-btn:hover{ background:#E5E7EB; }
+        .cot-counter-val{ min-width:36px; text-align:center; font-size:14px; font-weight:600; }
+        .cot-svc-grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+        @media(max-width:640px){ .cot-svc-grid{ grid-template-columns:1fr; } }
+        .cot-svc-item{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; background:#F9FAFB; border:1px solid #EFF0F2; border-radius:10px; }
+        .cot-side{ position:sticky; top:16px; }
+        .cot-total-box{ background:linear-gradient(135deg,#7A1730,#A32744); border-radius:12px; padding:14px 16px; color:#fff; margin:12px 0; }
+        .cot-total{ font-size:26px; font-weight:700; letter-spacing:-.02em; line-height:1.1; margin:2px 0; }
+        .cot-total-box .t-green{ color:#86EFAC !important; }
+        .cot-resumo-list{ display:flex; flex-direction:column; gap:5px; max-height:280px; overflow-y:auto; padding:2px 0; }
+        .cot-resumo-list::-webkit-scrollbar{ width:5px; }
+        .cot-resumo-list::-webkit-scrollbar-thumb{ background:#D1D5DB; border-radius:99px; }
+        .cot-resumo-line{ display:flex; justify-content:space-between; gap:10px; align-items:baseline; }
+        .cot-resumo-sep{ font-size:10.5px; font-weight:600; color:#6B7280; text-transform:uppercase; letter-spacing:.05em; margin-top:8px; padding-top:6px; border-top:1px dashed #E5E7EB; }
+        .cot-resumo-total{ display:flex; justify-content:space-between; align-items:center; margin-top:12px; padding-top:12px; border-top:2px solid #F1F2F4; font-weight:700; font-size:16px; color:#0B1324; }
         .cfg-logo-fallback{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:22px; letter-spacing:-.02em; }
 
         /* financeiro premium */
@@ -3723,6 +3802,7 @@ function AppInner() {
           {route === 'crm' && <CrmComercial data={data} setData={setData} />}
           {route === 'wms' && <ArmazemWMS data={data} setData={setData} />}
           {route === 'documentos' && <Documentos data={data} setData={setData} />}
+          {route === 'mudancas' && <Mudancas data={data} setData={setData} />}
           {route === 'relatorios' && <Relatorios data={data} />}
           {route === 'importacao' && <Importacao data={data} setData={setData} />}
           {route === 'config' && <Configuracoes data={data} setData={setData} onRequestLogout={openLogout} />}
@@ -4022,6 +4102,868 @@ function Importacao({ data, setData }) {
       </div>
 
       <Toast msg={toast} />
+    </div>
+  );
+}
+
+// ============================================================
+// MUDANÇAS — Tabela de Preços + Cotações + Serviços
+// ============================================================
+
+// Estrutura padrão da tabela de preços (fica salva em config.tabelaMudancas).
+// Todos os valores são editáveis pelo dono da empresa.
+const TABELA_MUDANCAS_DEFAULT = {
+  precoKm: 4.5,
+  valorMinimo: 250,
+  ajudanteHora: 60,
+  ajudanteDiaria: 150,
+  // Faixas de andar (subida e descida): valor por andar em cada faixa
+  escadaSubida: { faixa1a2: 40, faixa3a4: 55, faixa5plus: 70 }, // por andar
+  escadaDescida: { faixa1a2: 30, faixa3a4: 40, faixa5plus: 55 },
+  icamento: 200,          // valor fixo por içamento
+  horaParada: 50,         // por hora de espera
+  desmontagemPeca: 40,    // por peça
+  montagemPeca: 40,       // por peça
+  embalagemMovelPeca: 30, // por peça
+  embalagemMiudezaCaixa: 15, // por caixa
+  // Materiais — preço unitário
+  materiais: {
+    fita: 8,
+    caixaP: 4,
+    caixaM: 6,
+    caixaG: 9,
+    plasticoBolha: 25,
+    filmeStretch: 30,
+    capaColchao: 12,
+    cobertor: 20,
+    cantoneira: 3,
+    papelao: 5,
+  },
+  margemLucro: 30, // % sobre o custo, sugestão de lucro
+};
+
+// Catálogo de itens de mudança (contadores) e materiais para os wizards.
+const ITENS_MUDANCA_CATALOGO = [
+  'Sofá', 'Cama', 'Guarda-roupa', 'Geladeira', 'Fogão', 'Mesa',
+  'Cadeiras', 'Máquina de lavar', 'TV', 'Armário', 'Estante', 'Caixas',
+];
+const MATERIAIS_LABEL = {
+  fita: 'Fita adesiva (rolo)',
+  caixaP: 'Caixa de papelão P (un.)',
+  caixaM: 'Caixa de papelão M (un.)',
+  caixaG: 'Caixa de papelão G (un.)',
+  plasticoBolha: 'Plástico bolha (rolo)',
+  filmeStretch: 'Filme stretch (rolo)',
+  capaColchao: 'Capa para colchão (un.)',
+  cobertor: 'Cobertor para móveis (un.)',
+  cantoneira: 'Cantoneira (un.)',
+  papelao: 'Papelão avulso (un.)',
+};
+
+function getTabelaMudancas(config = {}) {
+  const t = config.tabelaMudancas || {};
+  // merge profundo com defaults pra nunca quebrar se faltar campo novo
+  return {
+    ...TABELA_MUDANCAS_DEFAULT,
+    ...t,
+    escadaSubida: { ...TABELA_MUDANCAS_DEFAULT.escadaSubida, ...(t.escadaSubida || {}) },
+    escadaDescida: { ...TABELA_MUDANCAS_DEFAULT.escadaDescida, ...(t.escadaDescida || {}) },
+    materiais: { ...TABELA_MUDANCAS_DEFAULT.materiais, ...(t.materiais || {}) },
+  };
+}
+
+function Mudancas({ data, setData }) {
+  const [aba, setAba] = useState('tabela');
+  const [editItem, setEditItem] = useState(null);
+  const [toast, setToast] = useToast();
+
+  const irParaCotacao = (item = null) => { setEditItem(item); setAba('cotacao'); };
+
+  return (
+    <div className="p-4 sm:p-6 space-y-4">
+      <div className="mud-tabs">
+        <button className={`mud-tab ${aba === 'tabela' ? 'on' : ''}`} onClick={() => setAba('tabela')}>Tabela de Preços</button>
+        <button className={`mud-tab ${aba === 'cotacao' ? 'on' : ''}`} onClick={() => { setEditItem(null); setAba('cotacao'); }}>Nova Cotação</button>
+        <button className={`mud-tab ${aba === 'servicos' ? 'on' : ''}`} onClick={() => setAba('servicos')}>Orçamentos & Serviços</button>
+      </div>
+
+      {aba === 'tabela' && <TabelaPrecos data={data} setData={setData} setToast={setToast} />}
+      {aba === 'cotacao' && (
+        <NovaCotacao
+          key={editItem?.id || 'nova'}
+          data={data} setData={setData} setToast={setToast}
+          editItem={editItem}
+          onSalvou={() => { setEditItem(null); setAba('servicos'); }}
+        />
+      )}
+      {aba === 'servicos' && (
+        <ListaServicos data={data} setData={setData} setToast={setToast} onEditar={irParaCotacao} onNova={() => irParaCotacao(null)} />
+      )}
+      <Toast msg={toast} />
+    </div>
+  );
+}
+
+// Motor de cálculo: recebe a cotação (estado do wizard) + tabela de preços
+// e devolve o detalhamento de valores. Puro, sem efeitos colaterais.
+function calcularOrcamento(cot, tabela) {
+  const t = tabela;
+  const linhas = [];
+
+  // 1) Distância (km × preço/km)
+  const km = Number(cot.distanciaKm) || 0;
+  const vKm = km * t.precoKm;
+  if (vKm > 0) linhas.push({ label: `Deslocamento (${km} km × ${fmtBRL(t.precoKm)})`, valor: vKm });
+
+  // 2) Mão de obra (ajudantes)
+  const nAjud = Number(cot.ajudantes) || 0;
+  let vAjud = 0;
+  if (cot.ajudanteModo === 'diaria') {
+    vAjud = nAjud * t.ajudanteDiaria * (Number(cot.diarias) || 1);
+    if (vAjud > 0) linhas.push({ label: `${nAjud} ajudante(s) × ${Number(cot.diarias) || 1} diária(s)`, valor: vAjud });
+  } else {
+    vAjud = nAjud * t.ajudanteHora * (Number(cot.horas) || 0);
+    if (vAjud > 0) linhas.push({ label: `${nAjud} ajudante(s) × ${Number(cot.horas) || 0}h`, valor: vAjud });
+  }
+
+  // 3) Escadas (subida e descida por andar/faixa)
+  const faixaValor = (tabelaEscada, andares) => {
+    const n = Number(andares) || 0;
+    if (n <= 0) return 0;
+    if (n <= 2) return tabelaEscada.faixa1a2 * n;
+    if (n <= 4) return tabelaEscada.faixa3a4 * n;
+    return tabelaEscada.faixa5plus * n;
+  };
+  const vSubida = cot.temElevadorOrigem ? 0 : faixaValor(t.escadaSubida, cot.andaresOrigem);
+  const vDescida = cot.temElevadorDestino ? 0 : faixaValor(t.escadaDescida, cot.andaresDestino);
+  if (vSubida > 0) linhas.push({ label: `Escada subida (${cot.andaresOrigem} andar/es na origem)`, valor: vSubida });
+  if (vDescida > 0) linhas.push({ label: `Escada descida (${cot.andaresDestino} andar/es no destino)`, valor: vDescida });
+
+  // 4) Serviços extras
+  const desmont = (Number(cot.desmontagemQtd) || 0) * t.desmontagemPeca;
+  const mont = (Number(cot.montagemQtd) || 0) * t.montagemPeca;
+  const embMovel = (Number(cot.embalagemMovelQtd) || 0) * t.embalagemMovelPeca;
+  const embMiud = (Number(cot.embalagemMiudezaQtd) || 0) * t.embalagemMiudezaCaixa;
+  const icamento = cot.icamento ? t.icamento : 0;
+  const horaParada = (Number(cot.horasParada) || 0) * t.horaParada;
+  if (desmont > 0) linhas.push({ label: `Desmontagem (${cot.desmontagemQtd} peça/s)`, valor: desmont });
+  if (mont > 0) linhas.push({ label: `Montagem (${cot.montagemQtd} peça/s)`, valor: mont });
+  if (embMovel > 0) linhas.push({ label: `Embalagem de móveis (${cot.embalagemMovelQtd} peça/s)`, valor: embMovel });
+  if (embMiud > 0) linhas.push({ label: `Embalagem de miudezas (${cot.embalagemMiudezaQtd} caixa/s)`, valor: embMiud });
+  if (icamento > 0) linhas.push({ label: 'Içamento', valor: icamento });
+  if (horaParada > 0) linhas.push({ label: `Hora parada (${cot.horasParada}h)`, valor: horaParada });
+
+  // 5) Materiais
+  let vMateriais = 0;
+  const matDetalhe = [];
+  Object.keys(cot.materiais || {}).forEach(k => {
+    const qtd = Number(cot.materiais[k]) || 0;
+    if (qtd > 0 && t.materiais[k] != null) {
+      const v = qtd * t.materiais[k];
+      vMateriais += v;
+      matDetalhe.push({ label: `${MATERIAIS_LABEL[k]} × ${qtd}`, valor: v });
+    }
+  });
+
+  const subtotalServicos = vKm + vAjud + vSubida + vDescida + desmont + mont + embMovel + embMiud + icamento + horaParada;
+  let subtotal = subtotalServicos + vMateriais;
+
+  // Valor mínimo do frete
+  const aplicouMinimo = subtotal < t.valorMinimo && subtotal > 0;
+  if (aplicouMinimo) subtotal = t.valorMinimo;
+
+  // Desconto
+  const desconto = Number(cot.desconto) || 0;
+  const totalComDesc = Math.max(0, subtotal - desconto);
+
+  // Lucro estimado (margem sobre o subtotal)
+  const lucroEstimado = totalComDesc * (t.margemLucro / 100);
+
+  return {
+    linhas, matDetalhe,
+    subtotalServicos, vMateriais,
+    subtotal, aplicouMinimo, desconto,
+    total: totalComDesc,
+    lucroEstimado,
+  };
+}
+
+// Estado inicial de uma nova cotação
+function novaCotacaoVazia() {
+  return {
+    // passo 1
+    tipoServico: 'Mudança', // Mudança | Frete | Carreto
+    clienteNome: '', clienteTelefone: '',
+    dataPrevista: todayISO(), horaPrevista: '',
+    origem: '', destino: '', distanciaKm: '',
+    tipoImovel: 'Casa', // Casa | Apartamento | Comércio
+    andaresOrigem: 0, temElevadorOrigem: false,
+    andaresDestino: 0, temElevadorDestino: false,
+    // passo 2 — itens
+    itens: {}, // { 'Sofá': 2, ... }
+    itensCustom: [], // [{ nome, qtd }]
+    // passo 3 — serviços extras
+    ajudantes: 2, ajudanteModo: 'diaria', diarias: 1, horas: 0,
+    desmontagemQtd: 0, montagemQtd: 0,
+    embalagemMovelQtd: 0, embalagemMiudezaQtd: 0,
+    icamento: false, horasParada: 0,
+    // passo 4 — materiais
+    materiais: {},
+    // resumo
+    desconto: 0, obs: '',
+  };
+}
+
+function NovaCotacao({ data, setData, setToast, onSalvou, editItem }) {
+  const { isOwner } = useAuth();
+  const tabela = getTabelaMudancas(data.config);
+  const [step, setStep] = useState(1);
+  const [cot, setCot] = useState(() => editItem ? { ...novaCotacaoVazia(), ...editItem } : novaCotacaoVazia());
+  const [novoItemNome, setNovoItemNome] = useState('');
+
+  const upd = (patch) => setCot(prev => ({ ...prev, ...patch }));
+  const calc = useMemo(() => calcularOrcamento(cot, tabela), [cot, tabela]);
+
+  const setItem = (nome, delta) => {
+    setCot(prev => {
+      const itens = { ...prev.itens };
+      const atual = itens[nome] || 0;
+      const novo = Math.max(0, atual + delta);
+      if (novo === 0) delete itens[nome];
+      else itens[nome] = novo;
+      return { ...prev, itens };
+    });
+  };
+  const setMaterial = (k, delta) => {
+    setCot(prev => {
+      const materiais = { ...prev.materiais };
+      const atual = materiais[k] || 0;
+      const novo = Math.max(0, atual + delta);
+      if (novo === 0) delete materiais[k];
+      else materiais[k] = novo;
+      return { ...prev, materiais };
+    });
+  };
+  const addItemCustom = () => {
+    const nome = novoItemNome.trim();
+    if (!nome) return;
+    setCot(prev => ({ ...prev, itens: { ...prev.itens, [nome]: (prev.itens[nome] || 0) + 1 } }));
+    setNovoItemNome('');
+  };
+
+  const salvarCotacao = (statusFinal = 'orcamento') => {
+    const registro = {
+      ...cot,
+      id: editItem?.id || uid(),
+      status: statusFinal,
+      valorTotal: calc.total,
+      lucroEstimado: calc.lucroEstimado,
+      criadoEm: editItem?.criadoEm || new Date().toISOString(),
+      atualizadoEm: new Date().toISOString(),
+    };
+    setData(d => ({
+      ...d,
+      mudancas: editItem
+        ? (d.mudancas || []).map(x => x.id === editItem.id ? registro : x)
+        : [...(d.mudancas || []), registro],
+    }));
+    setToast(editItem ? 'Cotação atualizada' : 'Cotação salva');
+    onSalvou?.(registro);
+  };
+
+  const Stepper = () => (
+    <div className="cot-stepper">
+      {[1, 2, 3, 4].map(n => (
+        <React.Fragment key={n}>
+          <button className={`cot-step ${step === n ? 'on' : ''} ${step > n ? 'done' : ''}`} onClick={() => setStep(n)}>
+            {step > n ? <Check size={13} /> : n}
+          </button>
+          {n < 4 && <div className={`cot-step-line ${step > n ? 'done' : ''}`} />}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+
+  const Counter = ({ value, onMinus, onPlus }) => (
+    <div className="cot-counter">
+      <button onClick={onMinus} className="cot-counter-btn">−</button>
+      <span className="cot-counter-val mono">{value || 0}</span>
+      <button onClick={onPlus} className="cot-counter-btn">+</button>
+    </div>
+  );
+
+  return (
+    <div className="cot-wrap">
+      <div className="cot-main">
+        <div className="card p-5">
+          <Stepper />
+
+          {/* PASSO 1 — Dados da mudança */}
+          {step === 1 && (
+            <div className="space-y-4">
+              <h3 className="display h-card t-ink">Dados da mudança</h3>
+              <div>
+                <span className="label">Tipo de serviço</span>
+                <div className="cot-seg">
+                  {['Mudança', 'Frete', 'Carreto'].map(ts => (
+                    <button key={ts} className={`cot-seg-btn ${cot.tipoServico === ts ? 'on' : ''}`} onClick={() => upd({ tipoServico: ts })}>{ts}</button>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Field label="Nome do cliente"><input className="inp" value={cot.clienteNome} onChange={(e) => upd({ clienteNome: e.target.value })} placeholder="Ex.: João da Silva" /></Field>
+                <Field label="Telefone / WhatsApp"><input className="inp" value={cot.clienteTelefone} onChange={(e) => upd({ clienteTelefone: e.target.value })} placeholder="(19) 99999-9999" /></Field>
+                <Field label="Data prevista"><input type="date" className="inp" value={cot.dataPrevista} onChange={(e) => upd({ dataPrevista: e.target.value })} /></Field>
+                <Field label="Horário"><input type="time" className="inp" value={cot.horaPrevista} onChange={(e) => upd({ horaPrevista: e.target.value })} /></Field>
+                <Field label="Origem"><input className="inp" value={cot.origem} onChange={(e) => upd({ origem: e.target.value })} placeholder="Cidade / bairro de saída" /></Field>
+                <Field label="Destino"><input className="inp" value={cot.destino} onChange={(e) => upd({ destino: e.target.value })} placeholder="Cidade / bairro de chegada" /></Field>
+                <Field label="Distância estimada (km)"><input type="number" step="1" min="0" className="inp mono" value={cot.distanciaKm} onChange={(e) => upd({ distanciaKm: e.target.value })} placeholder="Ex.: 50" /></Field>
+                <Field label="Tipo de imóvel">
+                  <select className="inp" value={cot.tipoImovel} onChange={(e) => upd({ tipoImovel: e.target.value })}>
+                    <option>Casa</option><option>Apartamento</option><option>Comércio</option>
+                  </select>
+                </Field>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="cot-andar-box">
+                  <div className="text-sm font-semibold t-ink mb-2">Origem</div>
+                  <Field label="Andar (0 = térreo)"><input type="number" min="0" className="inp mono" value={cot.andaresOrigem} onChange={(e) => upd({ andaresOrigem: parseInt(e.target.value) || 0 })} /></Field>
+                  <label className="cot-check mt-2"><input type="checkbox" checked={cot.temElevadorOrigem} onChange={(e) => upd({ temElevadorOrigem: e.target.checked })} /> Tem elevador (não cobra escada)</label>
+                </div>
+                <div className="cot-andar-box">
+                  <div className="text-sm font-semibold t-ink mb-2">Destino</div>
+                  <Field label="Andar (0 = térreo)"><input type="number" min="0" className="inp mono" value={cot.andaresDestino} onChange={(e) => upd({ andaresDestino: parseInt(e.target.value) || 0 })} /></Field>
+                  <label className="cot-check mt-2"><input type="checkbox" checked={cot.temElevadorDestino} onChange={(e) => upd({ temElevadorDestino: e.target.checked })} /> Tem elevador (não cobra escada)</label>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* PASSO 2 — Itens */}
+          {step === 2 && (
+            <div className="space-y-4">
+              <h3 className="display h-card t-ink">Itens da mudança</h3>
+              <p className="text-sm t-soft">Informe a quantidade de cada item. Serve pra dimensionar o caminhão e a equipe.</p>
+              <div className="cot-item-list">
+                {ITENS_MUDANCA_CATALOGO.map(nome => (
+                  <div key={nome} className="cot-item-row">
+                    <span className="text-sm t-ink">{nome}</span>
+                    <Counter value={cot.itens[nome]} onMinus={() => setItem(nome, -1)} onPlus={() => setItem(nome, 1)} />
+                  </div>
+                ))}
+                {/* itens custom já adicionados que não estão no catálogo */}
+                {Object.keys(cot.itens).filter(n => !ITENS_MUDANCA_CATALOGO.includes(n)).map(nome => (
+                  <div key={nome} className="cot-item-row">
+                    <span className="text-sm t-ink">{nome} <span className="t-mute text-xs">(personalizado)</span></span>
+                    <Counter value={cot.itens[nome]} onMinus={() => setItem(nome, -1)} onPlus={() => setItem(nome, 1)} />
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <input className="inp" value={novoItemNome} onChange={(e) => setNovoItemNome(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') addItemCustom(); }} placeholder="Adicionar outro item…" style={{ flex: 1 }} />
+                <button className="btn btn-ghost" onClick={addItemCustom}><Plus size={15} /> Adicionar</button>
+              </div>
+            </div>
+          )}
+
+          {/* PASSO 3 — Serviços extras */}
+          {step === 3 && (
+            <div className="space-y-4">
+              <h3 className="display h-card t-ink">Serviços extras e mão de obra</h3>
+              <div className="cot-andar-box">
+                <div className="text-sm font-semibold t-ink mb-2">Ajudantes</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <Field label="Quantidade de ajudantes"><input type="number" min="0" className="inp mono" value={cot.ajudantes} onChange={(e) => upd({ ajudantes: parseInt(e.target.value) || 0 })} /></Field>
+                  <Field label="Cobrar por">
+                    <select className="inp" value={cot.ajudanteModo} onChange={(e) => upd({ ajudanteModo: e.target.value })}>
+                      <option value="diaria">Diária</option>
+                      <option value="hora">Hora</option>
+                    </select>
+                  </Field>
+                  {cot.ajudanteModo === 'diaria'
+                    ? <Field label="Nº de diárias"><input type="number" min="1" className="inp mono" value={cot.diarias} onChange={(e) => upd({ diarias: parseInt(e.target.value) || 1 })} /></Field>
+                    : <Field label="Nº de horas"><input type="number" min="0" className="inp mono" value={cot.horas} onChange={(e) => upd({ horas: parseInt(e.target.value) || 0 })} /></Field>}
+                </div>
+              </div>
+              <div className="cot-svc-grid">
+                <div className="cot-svc-item">
+                  <span className="text-sm t-ink">Desmontagem de móveis</span>
+                  <Counter value={cot.desmontagemQtd} onMinus={() => upd({ desmontagemQtd: Math.max(0, (cot.desmontagemQtd || 0) - 1) })} onPlus={() => upd({ desmontagemQtd: (cot.desmontagemQtd || 0) + 1 })} />
+                </div>
+                <div className="cot-svc-item">
+                  <span className="text-sm t-ink">Montagem de móveis</span>
+                  <Counter value={cot.montagemQtd} onMinus={() => upd({ montagemQtd: Math.max(0, (cot.montagemQtd || 0) - 1) })} onPlus={() => upd({ montagemQtd: (cot.montagemQtd || 0) + 1 })} />
+                </div>
+                <div className="cot-svc-item">
+                  <span className="text-sm t-ink">Embalagem de móveis (peças)</span>
+                  <Counter value={cot.embalagemMovelQtd} onMinus={() => upd({ embalagemMovelQtd: Math.max(0, (cot.embalagemMovelQtd || 0) - 1) })} onPlus={() => upd({ embalagemMovelQtd: (cot.embalagemMovelQtd || 0) + 1 })} />
+                </div>
+                <div className="cot-svc-item">
+                  <span className="text-sm t-ink">Embalagem de miudezas (caixas)</span>
+                  <Counter value={cot.embalagemMiudezaQtd} onMinus={() => upd({ embalagemMiudezaQtd: Math.max(0, (cot.embalagemMiudezaQtd || 0) - 1) })} onPlus={() => upd({ embalagemMiudezaQtd: (cot.embalagemMiudezaQtd || 0) + 1 })} />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="cot-check"><input type="checkbox" checked={cot.icamento} onChange={(e) => upd({ icamento: e.target.checked })} /> Içamento necessário ({fmtBRL(tabela.icamento)})</label>
+                <Field label="Horas paradas / espera"><input type="number" min="0" className="inp mono" value={cot.horasParada} onChange={(e) => upd({ horasParada: parseInt(e.target.value) || 0 })} /></Field>
+              </div>
+            </div>
+          )}
+
+          {/* PASSO 4 — Materiais */}
+          {step === 4 && (
+            <div className="space-y-4">
+              <h3 className="display h-card t-ink">Materiais e embalagens</h3>
+              <p className="text-sm t-soft">Quantidade de cada material. O valor é calculado pela tabela de preços.</p>
+              <div className="cot-item-list">
+                {Object.keys(MATERIAIS_LABEL).map(k => (
+                  <div key={k} className="cot-item-row">
+                    <span className="text-sm t-ink">{MATERIAIS_LABEL[k]} <span className="t-mute text-xs mono">{fmtBRL(tabela.materiais[k])}</span></span>
+                    <Counter value={cot.materiais[k]} onMinus={() => setMaterial(k, -1)} onPlus={() => setMaterial(k, 1)} />
+                  </div>
+                ))}
+              </div>
+              <Field label="Desconto (R$)"><input type="number" min="0" step="0.01" className="inp mono" value={cot.desconto} onChange={(e) => upd({ desconto: parseFloat(e.target.value) || 0 })} /></Field>
+              <Field label="Observações"><textarea className="inp" rows={2} value={cot.obs} onChange={(e) => upd({ obs: e.target.value })} placeholder="Condições, detalhes combinados…" /></Field>
+            </div>
+          )}
+
+          {/* Navegação */}
+          <div className="flex justify-between gap-2 mt-5 pt-4" style={{ borderTop: '1px solid #F1F2F4' }}>
+            <button className="btn btn-ghost" onClick={() => setStep(s => Math.max(1, s - 1))} disabled={step === 1}>Voltar</button>
+            {step < 4
+              ? <button className="btn btn-primary" onClick={() => setStep(s => Math.min(4, s + 1))}>Próximo</button>
+              : <button className="btn btn-primary" onClick={() => salvarCotacao('orcamento')}>Salvar orçamento</button>}
+          </div>
+        </div>
+      </div>
+
+      {/* Resumo lateral em tempo real */}
+      <div className="cot-side">
+        <div className="card p-5 cot-resumo">
+          <h4 className="display h-card t-ink mb-1">Resumo do orçamento</h4>
+          <div className="cot-total-box">
+            <div className="text-xs t-soft">Valor total</div>
+            <div className="cot-total mono">{fmtBRL(calc.total)}</div>
+            <div className="text-xs t-green mono">Lucro estimado: {fmtBRL(calc.lucroEstimado)}</div>
+          </div>
+          <div className="cot-resumo-list">
+            {calc.linhas.length === 0 && calc.matDetalhe.length === 0 && (
+              <p className="text-xs t-mute" style={{ padding: '8px 0' }}>Preencha os passos pra ver o cálculo…</p>
+            )}
+            {calc.linhas.map((l, i) => (
+              <div key={i} className="cot-resumo-line">
+                <span className="text-xs t-soft">{l.label}</span>
+                <span className="text-xs mono t-ink">{fmtBRL(l.valor)}</span>
+              </div>
+            ))}
+            {calc.matDetalhe.length > 0 && <div className="cot-resumo-sep">Materiais</div>}
+            {calc.matDetalhe.map((l, i) => (
+              <div key={i} className="cot-resumo-line">
+                <span className="text-xs t-soft">{l.label}</span>
+                <span className="text-xs mono t-ink">{fmtBRL(l.valor)}</span>
+              </div>
+            ))}
+            {calc.aplicouMinimo && (
+              <div className="cot-resumo-line" style={{ color: '#D97706' }}>
+                <span className="text-xs">Valor mínimo aplicado</span>
+                <span className="text-xs mono">{fmtBRL(calc.subtotal)}</span>
+              </div>
+            )}
+            {calc.desconto > 0 && (
+              <div className="cot-resumo-line" style={{ color: '#B4234B' }}>
+                <span className="text-xs">Desconto</span>
+                <span className="text-xs mono">− {fmtBRL(calc.desconto)}</span>
+              </div>
+            )}
+          </div>
+          <div className="cot-resumo-total">
+            <span>Total</span>
+            <span className="mono">{fmtBRL(calc.total)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Status do fluxo de serviço de mudança
+const MUD_STATUS = [
+  { k: 'orcamento', label: 'Orçamento', tone: 'slate' },
+  { k: 'aguardando', label: 'Aguardando aprovação', tone: 'orange' },
+  { k: 'confirmado', label: 'Confirmado', tone: 'blue' },
+  { k: 'agendado', label: 'Agendado', tone: 'blue' },
+  { k: 'andamento', label: 'Em andamento', tone: 'orange' },
+  { k: 'concluido', label: 'Concluído', tone: 'green' },
+  { k: 'cancelado', label: 'Cancelado', tone: 'red' },
+];
+const mudStatusInfo = (k) => MUD_STATUS.find(s => s.k === k) || MUD_STATUS[0];
+// próximo status natural no fluxo (pra botão de avançar)
+const MUD_PROXIMO = {
+  orcamento: 'aguardando',
+  aguardando: 'confirmado',
+  confirmado: 'agendado',
+  agendado: 'andamento',
+  andamento: 'concluido',
+};
+
+function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
+  const { mudancas = [] } = data;
+  const [filtroStatus, setFiltroStatus] = useState('all');
+  const [busca, setBusca] = useState('');
+  const [delTarget, setDelTarget] = useState(null);
+  const [detalhe, setDetalhe] = useState(null);
+
+  const kpis = useMemo(() => {
+    const orcamentos = mudancas.filter(m => m.status === 'orcamento' || m.status === 'aguardando').length;
+    const agendados = mudancas.filter(m => m.status === 'confirmado' || m.status === 'agendado').length;
+    const andamento = mudancas.filter(m => m.status === 'andamento').length;
+    const mesAtual = currentMonth();
+    const receita = mudancas
+      .filter(m => m.status === 'concluido' && (m.dataPrevista || '').startsWith(mesAtual))
+      .reduce((a, b) => a + (b.valorTotal || 0), 0);
+    return { orcamentos, agendados, andamento, receita };
+  }, [mudancas]);
+
+  const filtered = useMemo(() => {
+    let arr = mudancas;
+    if (filtroStatus !== 'all') arr = arr.filter(m => m.status === filtroStatus);
+    if (busca.trim()) {
+      const q = busca.toLowerCase();
+      arr = arr.filter(m =>
+        (m.clienteNome || '').toLowerCase().includes(q) ||
+        (m.origem || '').toLowerCase().includes(q) ||
+        (m.destino || '').toLowerCase().includes(q)
+      );
+    }
+    return [...arr].sort((a, b) => (b.criadoEm || '').localeCompare(a.criadoEm || ''));
+  }, [mudancas, filtroStatus, busca]);
+
+  const mudarStatus = (id, novo) => {
+    setData(d => ({ ...d, mudancas: (d.mudancas || []).map(m => m.id === id ? { ...m, status: novo, atualizadoEm: new Date().toISOString() } : m) }));
+    setToast(`Status: ${mudStatusInfo(novo).label}`);
+  };
+  const confirmDelete = () => {
+    if (delTarget) {
+      setData(d => ({ ...d, mudancas: (d.mudancas || []).filter(m => m.id !== delTarget.id) }));
+      setToast('Registro excluído'); setDelTarget(null);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <p className="text-sm t-soft" style={{ maxWidth: 480 }}>Todos os orçamentos e serviços de mudança. Avance o status conforme o serviço evolui.</p>
+        <NewButton onClick={onNova}>Nova cotação</NewButton>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+        <div className="card kpi p-4">
+          <div className="label">Orçamentos abertos</div>
+          <div className="mono stat-md t-ink" style={{ marginTop: 4 }}>{kpis.orcamentos}</div>
+          <div className="text-xs t-mute mt-1">aguardando decisão</div>
+        </div>
+        <div className="card kpi p-4">
+          <div className="label">Agendados</div>
+          <div className="mono stat-md t-ink" style={{ marginTop: 4 }}>{kpis.agendados}</div>
+          <div className="text-xs t-mute mt-1">confirmados / na agenda</div>
+        </div>
+        <div className="card kpi p-4">
+          <div className="label">Em andamento</div>
+          <div className={`mono stat-md ${kpis.andamento > 0 ? 't-orange' : 't-ink'}`} style={{ marginTop: 4 }}>{kpis.andamento}</div>
+          <div className="text-xs t-mute mt-1">acontecendo agora</div>
+        </div>
+        <div className="card kpi p-4">
+          <div className="label">Receita concluída (mês)</div>
+          <div className="mono stat-md t-green" style={{ marginTop: 4, fontSize: 18 }}>{fmtBRL(kpis.receita)}</div>
+          <div className="text-xs t-mute mt-1">serviços finalizados</div>
+        </div>
+      </div>
+
+      <div className="card p-4 sm:p-5">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+          <label className="block sm:col-span-2">
+            <span className="label">Buscar</span>
+            <input className="inp" placeholder="Cliente, origem ou destino" value={busca} onChange={(e) => setBusca(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="label">Status</span>
+            <select className="inp" value={filtroStatus} onChange={(e) => setFiltroStatus(e.target.value)}>
+              <option value="all">Todos</option>
+              {MUD_STATUS.map(s => <option key={s.k} value={s.k}>{s.label}</option>)}
+            </select>
+          </label>
+        </div>
+
+        {filtered.length === 0 ? <EmptyState icon={Package} title={mudancas.length === 0 ? 'Nenhuma cotação ainda. Crie a primeira!' : 'Nenhum registro para os filtros.'} /> : (
+          <div className="wms-list">
+            {filtered.map(m => {
+              const st = mudStatusInfo(m.status);
+              const prox = MUD_PROXIMO[m.status];
+              return (
+                <div key={m.id} className="wms-row">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold t-ink truncate">{m.clienteNome || 'Cliente não informado'} <span className="t-mute" style={{ fontWeight: 400 }}>· {m.tipoServico}</span></div>
+                    <div className="text-xs t-soft mt-0.5 flex flex-wrap gap-1.5 items-center">
+                      <Badge tone={st.tone}>{st.label}</Badge>
+                      {m.origem && m.destino && <span>{m.origem} → {m.destino}</span>}
+                      {m.dataPrevista && <span>· {fmtDate(m.dataPrevista)}{m.horaPrevista ? ` ${m.horaPrevista}` : ''}</span>}
+                    </div>
+                  </div>
+                  <div className="text-right" style={{ flexShrink: 0 }}>
+                    <div className="mono text-sm font-semibold t-ink">{fmtBRL(m.valorTotal || 0)}</div>
+                    {m.lucroEstimado > 0 && <div className="text-xs t-green mono">lucro {fmtBRL(m.lucroEstimado)}</div>}
+                  </div>
+                  <div className="row-actions flex items-center">
+                    {prox && (
+                      <button onClick={() => mudarStatus(m.id, prox)} className="conc-btn" title={`Avançar para ${mudStatusInfo(prox).label}`} style={{ background: '#7A1730' }}>
+                        <ChevronRight size={13} /> {mudStatusInfo(prox).label}
+                      </button>
+                    )}
+                    <button onClick={() => setDetalhe(m)} className="ibtn" title="Ver detalhes"><Eye size={14} /></button>
+                    <button onClick={() => onEditar(m)} className="ibtn" title="Editar"><Pencil size={14} /></button>
+                    <button onClick={() => setDelTarget(m)} className="ibtn ibtn-del" title="Excluir"><Trash2 size={14} /></button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Modal de detalhes */}
+      <Modal open={!!detalhe} onClose={() => setDetalhe(null)} title="Detalhes da cotação" wide>
+        {detalhe && <DetalheCotacao cot={detalhe} data={data} onMudarStatus={(novo) => { mudarStatus(detalhe.id, novo); setDetalhe({ ...detalhe, status: novo }); }} />}
+      </Modal>
+
+      <ConfirmModal item={delTarget} title="Excluir cotação" message={delTarget ? `Excluir a cotação de "${delTarget.clienteNome || 'cliente'}"?` : ''} onCancel={() => setDelTarget(null)} onConfirm={confirmDelete} />
+    </div>
+  );
+}
+
+function DetalheCotacao({ cot, data, onMudarStatus }) {
+  const tabela = getTabelaMudancas(data.config);
+  const calc = useMemo(() => calcularOrcamento(cot, tabela), [cot, tabela]);
+  const st = mudStatusInfo(cot.status);
+  const itens = Object.entries(cot.itens || {}).filter(([, q]) => q > 0);
+  const [gerando, setGerando] = useState(false);
+
+  const empresa = {
+    nome: data.config?.nomeEmpresa || 'Minha Empresa',
+    logoUrl: data.config?.logoUrl || '',
+    cnpj: data.config?.cnpj || '',
+    telefone: data.config?.telefone || '',
+    endereco: data.config?.endereco || '',
+    cidade: data.config?.cidade || '',
+    uf: data.config?.uf || '',
+    emailContato: data.config?.emailContato || '',
+  };
+
+  const baixarPDF = async () => {
+    setGerando(true);
+    try {
+      await gerarOrcamentoPDF(cot, calc, empresa, { modo: 'download' });
+    } catch (e) {
+      console.error('[PDF]', e);
+      alert('Não consegui gerar o PDF. Tenta de novo.');
+    } finally {
+      setGerando(false);
+    }
+  };
+
+  const enviarWhatsApp = () => {
+    const tel = (cot.clienteTelefone || '').replace(/\D/g, '');
+    const itensTxt = itens.map(([n, q]) => `${n} (${q})`).join(', ');
+    const linhas = [
+      `*Orçamento de ${cot.tipoServico}* — ${empresa.nome}`,
+      '',
+      `Cliente: ${cot.clienteNome || '-'}`,
+      `Data: ${fmtDate(cot.dataPrevista)}${cot.horaPrevista ? ' às ' + cot.horaPrevista : ''}`,
+      `Origem: ${cot.origem || '-'}`,
+      `Destino: ${cot.destino || '-'}`,
+      cot.distanciaKm ? `Distância: ${cot.distanciaKm} km` : '',
+      itensTxt ? `Itens: ${itensTxt}` : '',
+      '',
+      `*VALOR TOTAL: ${fmtBRL(calc.total)}*`,
+      '',
+      cot.obs ? `Obs: ${cot.obs}` : '',
+      'Orçamento válido por 7 dias.',
+    ].filter(Boolean);
+    const texto = encodeURIComponent(linhas.join('\n'));
+    const url = tel.length >= 10 ? `https://wa.me/55${tel}?text=${texto}` : `https://wa.me/?text=${texto}`;
+    window.open(url, '_blank');
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-lg font-semibold t-ink">{cot.clienteNome || 'Cliente não informado'}</div>
+          <div className="text-xs t-soft">{cot.tipoServico} · {cot.origem || '?'} → {cot.destino || '?'}</div>
+        </div>
+        <Badge tone={st.tone}>{st.label}</Badge>
+      </div>
+
+      {/* Ações principais: PDF + WhatsApp */}
+      <div className="flex gap-2 flex-wrap">
+        <button className="btn btn-primary" onClick={baixarPDF} disabled={gerando} style={{ background: '#7A1730' }}>
+          {gerando ? 'Gerando…' : <><FileSignature size={15} /> Gerar PDF</>}
+        </button>
+        <button className="btn btn-ghost" onClick={enviarWhatsApp} style={{ borderColor: '#25D366', color: '#128C7E' }}>
+          <Phone size={15} /> Enviar no WhatsApp
+        </button>
+      </div>
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="metric-box"><div className="text-xs t-soft">Data</div><div className="text-sm font-medium t-ink">{fmtDate(cot.dataPrevista)}{cot.horaPrevista ? ` ${cot.horaPrevista}` : ''}</div></div>
+        <div className="metric-box"><div className="text-xs t-soft">Distância</div><div className="text-sm font-medium t-ink mono">{cot.distanciaKm || 0} km</div></div>
+        <div className="metric-box"><div className="text-xs t-soft">Imóvel</div><div className="text-sm font-medium t-ink">{cot.tipoImovel}</div></div>
+        <div className="metric-box"><div className="text-xs t-soft">Telefone</div><div className="text-sm font-medium t-ink">{cot.clienteTelefone || '—'}</div></div>
+      </div>
+
+      {itens.length > 0 && (
+        <div>
+          <div className="label mb-2">Itens</div>
+          <div className="flex flex-wrap gap-1.5">
+            {itens.map(([nome, q]) => <span key={nome} className="badge badge-slate">{nome} × {q}</span>)}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <div className="label mb-2">Composição do valor</div>
+        <div className="cot-resumo-list" style={{ maxHeight: 'none' }}>
+          {calc.linhas.map((l, i) => (
+            <div key={i} className="cot-resumo-line"><span className="text-xs t-soft">{l.label}</span><span className="text-xs mono t-ink">{fmtBRL(l.valor)}</span></div>
+          ))}
+          {calc.matDetalhe.length > 0 && <div className="cot-resumo-sep">Materiais</div>}
+          {calc.matDetalhe.map((l, i) => (
+            <div key={i} className="cot-resumo-line"><span className="text-xs t-soft">{l.label}</span><span className="text-xs mono t-ink">{fmtBRL(l.valor)}</span></div>
+          ))}
+          {calc.desconto > 0 && <div className="cot-resumo-line" style={{ color: '#B4234B' }}><span className="text-xs">Desconto</span><span className="text-xs mono">− {fmtBRL(calc.desconto)}</span></div>}
+        </div>
+        <div className="cot-resumo-total"><span>Total</span><span className="mono">{fmtBRL(calc.total)}</span></div>
+      </div>
+
+      {cot.obs && <div><div className="label mb-1">Observações</div><p className="text-sm t-soft">{cot.obs}</p></div>}
+
+      <div>
+        <div className="label mb-2">Mudar status</div>
+        <div className="flex flex-wrap gap-1.5">
+          {MUD_STATUS.map(s => (
+            <button key={s.k} onClick={() => onMudarStatus(s.k)} className={`mb-chip ${cot.status === s.k ? 'on' : ''}`}>
+              {s.label}{cot.status === s.k && <Check size={12} />}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TabelaPrecos({ data, setData, setToast }) {
+  const { isOwner } = useAuth();
+  const salva = getTabelaMudancas(data.config);
+  const [t, setT] = useState(salva);
+  const [dirty, setDirty] = useState(false);
+
+  const upd = (patch) => { setT(prev => ({ ...prev, ...patch })); setDirty(true); };
+  const updEscadaS = (patch) => { setT(prev => ({ ...prev, escadaSubida: { ...prev.escadaSubida, ...patch } })); setDirty(true); };
+  const updEscadaD = (patch) => { setT(prev => ({ ...prev, escadaDescida: { ...prev.escadaDescida, ...patch } })); setDirty(true); };
+  const updMat = (patch) => { setT(prev => ({ ...prev, materiais: { ...prev.materiais, ...patch } })); setDirty(true); };
+
+  const salvar = () => {
+    setData(d => ({ ...d, config: { ...(d.config || {}), tabelaMudancas: t } }));
+    setDirty(false);
+    setToast('Tabela de preços salva');
+  };
+
+  const Money = ({ value, onChange, disabled }) => (
+    <div className="mud-money">
+      <span className="mud-money-cur">R$</span>
+      <input
+        type="number" step="0.01" min="0"
+        className="inp mono"
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        style={{ paddingLeft: 34 }}
+      />
+    </div>
+  );
+
+  const disabled = !isOwner;
+
+  return (
+    <div className="space-y-4">
+      {!isOwner && (
+        <div className="card p-4" style={{ background: '#FEF9F3', border: '1px solid #F5D5A8' }}>
+          <p className="text-sm" style={{ color: '#92400E' }}>Só o dono da empresa pode editar a tabela de preços. Você pode visualizar os valores abaixo.</p>
+        </div>
+      )}
+
+      {/* Serviços base */}
+      <div className="card p-5">
+        <h3 className="display h-card t-ink mb-1">Serviços — valores base</h3>
+        <p className="text-sm t-soft mb-4">Estes valores alimentam o cálculo automático das cotações.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <Field label="Preço por km rodado"><Money value={t.precoKm} onChange={(v) => upd({ precoKm: v })} disabled={disabled} /></Field>
+          <Field label="Valor mínimo do frete"><Money value={t.valorMinimo} onChange={(v) => upd({ valorMinimo: v })} disabled={disabled} /></Field>
+          <Field label="Ajudante — por hora"><Money value={t.ajudanteHora} onChange={(v) => upd({ ajudanteHora: v })} disabled={disabled} /></Field>
+          <Field label="Ajudante — diária"><Money value={t.ajudanteDiaria} onChange={(v) => upd({ ajudanteDiaria: v })} disabled={disabled} /></Field>
+          <Field label="Içamento (por içamento)"><Money value={t.icamento} onChange={(v) => upd({ icamento: v })} disabled={disabled} /></Field>
+          <Field label="Hora parada / espera"><Money value={t.horaParada} onChange={(v) => upd({ horaParada: v })} disabled={disabled} /></Field>
+          <Field label="Desmontagem (por peça)"><Money value={t.desmontagemPeca} onChange={(v) => upd({ desmontagemPeca: v })} disabled={disabled} /></Field>
+          <Field label="Montagem (por peça)"><Money value={t.montagemPeca} onChange={(v) => upd({ montagemPeca: v })} disabled={disabled} /></Field>
+          <Field label="Embalagem de móvel (por peça)"><Money value={t.embalagemMovelPeca} onChange={(v) => upd({ embalagemMovelPeca: v })} disabled={disabled} /></Field>
+          <Field label="Embalagem de miudezas (por caixa)"><Money value={t.embalagemMiudezaCaixa} onChange={(v) => upd({ embalagemMiudezaCaixa: v })} disabled={disabled} /></Field>
+          <Field label="Margem de lucro sugerida (%)">
+            <input type="number" step="1" min="0" className="inp mono" value={t.margemLucro} disabled={disabled} onChange={(e) => upd({ margemLucro: parseFloat(e.target.value) || 0 })} />
+          </Field>
+        </div>
+      </div>
+
+      {/* Escadas por faixa de andar */}
+      <div className="card p-5">
+        <h3 className="display h-card t-ink mb-1">Escadas — valor por andar</h3>
+        <p className="text-sm t-soft mb-4">Cobrança por andar, variando conforme a altura. Ex.: subir 5 andares na faixa "5º+" cobra o valor da faixa × 5.</p>
+        <div className="mud-escada-grid">
+          <div className="mud-escada-head"></div>
+          <div className="mud-escada-head">1º e 2º andar</div>
+          <div className="mud-escada-head">3º e 4º andar</div>
+          <div className="mud-escada-head">5º andar ou +</div>
+
+          <div className="mud-escada-lbl">Subida (por andar)</div>
+          <Money value={t.escadaSubida.faixa1a2} onChange={(v) => updEscadaS({ faixa1a2: v })} disabled={disabled} />
+          <Money value={t.escadaSubida.faixa3a4} onChange={(v) => updEscadaS({ faixa3a4: v })} disabled={disabled} />
+          <Money value={t.escadaSubida.faixa5plus} onChange={(v) => updEscadaS({ faixa5plus: v })} disabled={disabled} />
+
+          <div className="mud-escada-lbl">Descida (por andar)</div>
+          <Money value={t.escadaDescida.faixa1a2} onChange={(v) => updEscadaD({ faixa1a2: v })} disabled={disabled} />
+          <Money value={t.escadaDescida.faixa3a4} onChange={(v) => updEscadaD({ faixa3a4: v })} disabled={disabled} />
+          <Money value={t.escadaDescida.faixa5plus} onChange={(v) => updEscadaD({ faixa5plus: v })} disabled={disabled} />
+        </div>
+      </div>
+
+      {/* Materiais */}
+      <div className="card p-5">
+        <h3 className="display h-card t-ink mb-1">Materiais — preço unitário</h3>
+        <p className="text-sm t-soft mb-4">Preço de cada material usado nas embalagens e proteção.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {Object.keys(MATERIAIS_LABEL).map(k => (
+            <Field key={k} label={MATERIAIS_LABEL[k]}>
+              <Money value={t.materiais[k]} onChange={(v) => updMat({ [k]: v })} disabled={disabled} />
+            </Field>
+          ))}
+        </div>
+      </div>
+
+      {isOwner && (
+        <div className="mud-save-bar">
+          {dirty ? <span className="text-xs t-orange">Você tem alterações não salvas</span> : <span className="text-xs t-mute">Tudo salvo</span>}
+          <button className="btn btn-primary" onClick={salvar} disabled={!dirty}>Salvar tabela</button>
+        </div>
+      )}
     </div>
   );
 }

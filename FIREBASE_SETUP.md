@@ -126,7 +126,9 @@ users/{uid}                   { nome, email, companyId, role, createdAt }
 companies/{cid}               { nome, ownerUid, members[], createdAt }
   └── settings/main           { nomeEmpresa, logoUrl, cnpj, telefone,
                                 emailContato, endereco, cidade, uf,
-                                precoCombustivel, consumoPadrao }
+                                precoCombustivel, consumoPadrao,
+                                categoriasCustomEmpresa, categoryMemory,
+                                tabelaMudancas }   ← preços do módulo Mudanças
   └── members/{uid}           { nome, email, role, modulosPermitidos,
                                 joinedAt }   ← controle de acesso por módulo
   └── veiculos/{id}
@@ -140,6 +142,8 @@ companies/{cid}               { nome, ownerUid, members[], createdAt }
   └── metasPessoais/{id}
   └── crmLeads/{id}           (CRM Comercial)
   └── wms/{id}                (Armazém)
+  └── documentos/{id}         (CRLV, seguros, NFs, recibos)
+  └── mudancas/{id}           (cotações e serviços de mudança)
 ```
 
 Cada subcoleção é sincronizada em tempo real via `onSnapshot`. Quando um usuário cria/edita/exclui, o outro vê instantaneamente.

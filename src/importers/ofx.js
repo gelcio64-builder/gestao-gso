@@ -1,6 +1,26 @@
 // OFX parser — extrai transações de arquivos de extrato bancário
 // Suporta OFX 1.x (SGML-like) e 2.x (XML puro).
 
+// Detecta linhas que NÃO são transações reais — são apenas informações de
+// saldo que alguns bancos jogam no meio do extrato. Essas linhas devem ser
+// ignoradas na importação (não são entrada nem saída de dinheiro).
+export function isLinhaSaldo(descricao) {
+  const d = (descricao || '')
+    .toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return (
+    /\bSALDO\b/.test(d) ||                       // "SALDO", "SALDO TOTAL", "SALDO DO DIA"
+    /\bSDO\b/.test(d) ||                          // abreviação comum "SDO"
+    /\bDISPONIVEL\b/.test(d) && /\bDIA\b/.test(d) || // "DISPONIVEL DIA"
+    /\bSALDO\s+ANTERIOR\b/.test(d) ||
+    /\bSALDO\s+FINAL\b/.test(d) ||
+    /\bSALDO\s+BLOQUEADO\b/.test(d) ||
+    /\bTOTAL\s+DISPONIVEL\b/.test(d) ||
+    /\bLIMITE\s+(DE\s+)?CREDITO\b/.test(d) ||    // linhas de limite, não são movimentação
+    /\bS A L D O\b/.test(d)                       // OCR/formatação espaçada
+  );
+}
+
 function parseOFXDate(s) {
   if (!s) return '';
   const clean = s.replace(/[^\d]/g, '').slice(0, 8);
@@ -59,6 +79,7 @@ export function parseOFX(text, banco = '') {
     const memo = extractField(block, 'MEMO') || extractField(block, 'NAME') || '';
     const fitid = extractField(block, 'FITID');
     const valor = parseAmount(trnAmt);
+    if (isLinhaSaldo(memo)) continue; // ignora linhas de saldo, não são transações
     const tipoBase = valor >= 0 ? 'entrada' : 'saida';
     const guess = guessCategoria(memo);
     results.push({
@@ -81,6 +102,7 @@ export function parseOFX(text, banco = '') {
       const memo = extractField(block, 'MEMO') || extractField(block, 'NAME') || '';
       if (!dtPosted && !trnAmt) continue;
       const valor = parseAmount(trnAmt);
+      if (isLinhaSaldo(memo)) continue; // ignora linhas de saldo
       const tipoBase = valor >= 0 ? 'entrada' : 'saida';
       const guess = guessCategoria(memo);
       results.push({

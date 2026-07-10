@@ -5,7 +5,7 @@
 // Requer que o chamador passe um ArrayBuffer do arquivo, não texto.
 
 import * as XLSX from 'xlsx';
-import { guessCategoria } from './ofx';
+import { guessCategoria, isLinhaSaldo } from './ofx';
 
 function normalizeHeader(h) {
   return String(h || '')
@@ -102,6 +102,7 @@ export function parseXLSX(buffer, banco = '') {
     const data = parseDate(row[idxDate]);
     if (!data) continue;
     const descricao = (idxDesc >= 0 ? String(row[idxDesc] || '') : '').trim() || 'Sem descrição';
+    if (isLinhaSaldo(descricao)) continue; // ignora linhas de saldo, não são transações
 
     let valor = 0;
     if (idxValor >= 0) valor = parseValue(row[idxValor]);

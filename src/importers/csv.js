@@ -1,7 +1,7 @@
 // CSV parser — tenta identificar automaticamente as colunas
 // data, descrição e valor de um extrato ou planilha em CSV.
 
-import { guessCategoria } from './ofx';
+import { guessCategoria, isLinhaSaldo } from './ofx';
 
 function detectDelimiter(text) {
   const sample = text.split('\n').slice(0, 5).join('\n');
@@ -108,6 +108,7 @@ export function parseCSV(text, banco = '') {
     const data = parseDate(row[idxDate]);
     if (!data) continue;
     const descricao = (idxDesc >= 0 ? row[idxDesc] : '').trim() || 'Sem descrição';
+    if (isLinhaSaldo(descricao)) continue; // ignora linhas de saldo, não são transações
 
     let valor = 0;
     if (idxValor >= 0) valor = parseValue(row[idxValor]);

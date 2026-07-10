@@ -1,6 +1,6 @@
 # Gestão GSO
 
-Sistema de gestão para transportadoras — Painel, Financeiro Empresa, Financeiro Pessoal, Fretes & Linhas, Veículos, Combustível, Manutenção, Motoristas, Contratos, **CRM Comercial**, **Armazém (WMS)**, Documentos, Relatórios, **Importação (OFX/CSV/Boleto)** e Configurações.
+Sistema de gestão para transportadoras — Painel, Financeiro Empresa, Financeiro Pessoal, Fretes & Linhas, Veículos, Combustível, Manutenção, Motoristas, Contratos, **CRM Comercial**, **Armazém (WMS)**, **Documentos**, **Mudanças**, Relatórios, **Importação (OFX/CSV/XLSX/XML/Boleto)** e Configurações.
 
 Stack: **React 18 + Vite + Tailwind v3 + recharts + lucide-react + Firebase (Auth + Firestore)**.
 
@@ -10,9 +10,14 @@ Dados na nuvem com **sincronização em tempo real** via `onSnapshot`. Multiusu�
 
 - **CRM Comercial** — pipeline Kanban com 6 etapas (Prospecção → Contato → Proposta → Negociação → Ganho/Perdido), filtros por tipo de cliente, KPIs de pipeline/conversão/ticket médio.
 - **Central de Importação** — 5 formatos: **OFX** de extrato bancário, **Excel** (.xlsx/.xls) via SheetJS, **CSV** genérico, **XML NF-e/CT-e** (detecção automática de direção pelo CNPJ da empresa), e **boleto por linha digitável** (47/48 dígitos).
-- **Conciliação bancária** — status por lançamento (manual/pendente/conciliado) + barra de % no Painel.
+- **Conciliação bancária** — status por lançamento (manual/pendente/conciliado), banner de pendências + botão "Conciliar todos", barra de % no Painel.
+- **Categorização inteligente** — dropdown inline por lançamento, sugestão automática por palavra-chave, memória que aprende com o uso, criação de categorias customizadas.
 - **WMS básico** — cadastro de estoque com endereçamento, lote/validade, classificação ABC e alertas de vencimento.
-- **Acessos por Módulo** — dono da empresa controla em Configurações quais módulos cada colaborador enxerga no menu.
+- **Documentos** — CRLV, seguros, NFs, recibos com alertas de vencimento tricolor e vínculo a veículos/motoristas/contratos.
+- **Módulo Mudanças** — tabela de preços configurável, wizard de cotação em 4 passos com cálculo automático, gestão de status (orçamento → concluído), e **geração de PDF com marca d'água do logo da empresa** + envio por WhatsApp.
+- **OCR grátis** (Tesseract.js) — escaneamento de boletos, documentos e recibos por foto.
+- **Acessos por Módulo** — dono da empresa controla em Configurações quais módulos cada colaborador enxerga.
+- **Editor de logo** com zoom e reenquadramento, aplicado em tempo real no app e nos PDFs.
 - **Multi-empresa** — cada empresa tem seus dados totalmente isolados no Firestore.
 
 ---
