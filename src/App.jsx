@@ -3534,6 +3534,11 @@ function AppInner() {
         .orc-advance:hover{ transform:translateY(-1px); box-shadow:0 6px 14px rgba(122,23,48,.28); }
         .orc-advance:active{ transform:scale(.97); }
         .orc-icons{ display:flex; gap:2px; }
+        .orc-card-clickable{ cursor:pointer; display:flex; flex-direction:column; gap:10px; border-radius:10px; margin:-4px; padding:4px; transition:background .14s; outline:none; }
+        .orc-card-clickable:hover{ background:#FAFBFC; }
+        .orc-card-clickable:focus-visible{ box-shadow:0 0 0 2px #7A1730; }
+        .orc-ver-mais{ display:flex; align-items:center; justify-content:center; gap:5px; padding:7px; margin-top:2px; border-radius:8px; background:#F8F1F3; color:#7A1730; font-size:12px; font-weight:600; transition:background .14s; }
+        .orc-card-clickable:hover .orc-ver-mais{ background:#F0DFE4; }
 
         /* Card de rota */
         .rota-card{ background:#fff; border:1px solid #EFF0F2; border-radius:14px; padding:16px; }
@@ -3577,20 +3582,6 @@ function AppInner() {
         .fin-resumo-item{ background:#fff; padding:14px; text-align:center; }
         .fin-resumo-l{ font-size:11px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
         .fin-resumo-v{ font-size:17px; font-weight:700; color:#0B1324; margin-top:4px; }
-
-        /* Barra fixa inferior */
-        .det-bar{ position:sticky; bottom:0; z-index:20; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; margin:0 -18px -18px; background:rgba(255,255,255,.96); backdrop-filter:blur(10px); border-top:1px solid #E5E7EB; }
-        @media(max-width:640px){ .det-bar{ margin:0 -16px -16px; padding:11px 14px; } }
-        .det-bar-nums{ display:flex; gap:20px; align-items:center; }
-        .det-bar-num{ display:flex; flex-direction:column; }
-        .det-bar-l{ font-size:10px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
-        .det-bar-v{ font-size:17px; font-weight:700; color:#0B1324; line-height:1.1; }
-        .det-bar-btns{ display:flex; gap:8px; flex-shrink:0; }
-        .det-bar-pdf{ display:inline-flex; align-items:center; gap:6px; padding:10px 16px; border-radius:11px; background:#7A1730; color:#fff; border:0; font-family:inherit; font-size:13.5px; font-weight:600; cursor:pointer; transition:transform .14s, box-shadow .14s; }
-        .det-bar-pdf:hover{ transform:translateY(-1px); box-shadow:0 6px 16px rgba(122,23,48,.3); }
-        .det-bar-pdf:disabled{ opacity:.6; cursor:wait; }
-        .det-bar-wpp{ display:inline-flex; align-items:center; justify-content:center; width:42px; border-radius:11px; background:#25D366; color:#fff; border:0; cursor:pointer; transition:transform .14s, box-shadow .14s; }
-        .det-bar-wpp:hover{ transform:translateY(-1px); box-shadow:0 6px 16px rgba(37,211,102,.32); }
 
         /* Config de preços — grid 2 colunas */
         .preco-grid{ display:grid; grid-template-columns:1fr 1fr; gap:14px 16px; }
@@ -4904,37 +4895,42 @@ function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
               const prox = MUD_PROXIMO[m.status];
               return (
                 <div key={m.id} className="orc-card fade-in">
-                  <div className="orc-card-top">
-                    <div className="min-w-0 flex-1">
-                      <div className="orc-cliente truncate">{m.clienteNome || 'Cliente não informado'}</div>
-                      <div className="orc-tipo">{m.tipoServico}</div>
+                  <div className="orc-card-clickable" onClick={() => setDetalhe(m)} role="button" tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDetalhe(m); } }}>
+                    <div className="orc-card-top">
+                      <div className="min-w-0 flex-1">
+                        <div className="orc-cliente truncate">{m.clienteNome || 'Cliente não informado'}</div>
+                        <div className="orc-tipo">{m.tipoServico}</div>
+                      </div>
+                      <StatusChip status={m.status} />
                     </div>
-                    <StatusChip status={m.status} />
-                  </div>
 
-                  <div className="orc-rota">
-                    <span className="orc-rota-cidade truncate">{m.origem || '—'}</span>
-                    <ArrowUpRight size={13} className="orc-rota-arrow" />
-                    <span className="orc-rota-cidade truncate">{m.destino || '—'}</span>
-                  </div>
+                    <div className="orc-rota">
+                      <span className="orc-rota-cidade truncate">{m.origem || '—'}</span>
+                      <ArrowUpRight size={13} className="orc-rota-arrow" />
+                      <span className="orc-rota-cidade truncate">{m.destino || '—'}</span>
+                    </div>
 
-                  <div className="orc-meta">
-                    <div className="orc-meta-item">
-                      <span className="orc-meta-l">Distância</span>
-                      <span className="orc-meta-v mono">{m.distanciaKm || 0} km</span>
+                    <div className="orc-meta">
+                      <div className="orc-meta-item">
+                        <span className="orc-meta-l">Distância</span>
+                        <span className="orc-meta-v mono">{m.distanciaKm || 0} km</span>
+                      </div>
+                      <div className="orc-meta-item">
+                        <span className="orc-meta-l">Data</span>
+                        <span className="orc-meta-v">{m.dataPrevista ? fmtDate(m.dataPrevista) : '—'}</span>
+                      </div>
+                      <div className="orc-meta-item">
+                        <span className="orc-meta-l">Valor</span>
+                        <span className="orc-meta-v mono t-ink" style={{ fontWeight: 700 }}>{fmtBRL(m.valorTotal || 0)}</span>
+                      </div>
+                      <div className="orc-meta-item">
+                        <span className="orc-meta-l">Lucro previsto</span>
+                        <span className="orc-meta-v mono t-green">{fmtBRL(m.lucroEstimado || 0)}</span>
+                      </div>
                     </div>
-                    <div className="orc-meta-item">
-                      <span className="orc-meta-l">Data</span>
-                      <span className="orc-meta-v">{m.dataPrevista ? fmtDate(m.dataPrevista) : '—'}</span>
-                    </div>
-                    <div className="orc-meta-item">
-                      <span className="orc-meta-l">Valor</span>
-                      <span className="orc-meta-v mono t-ink" style={{ fontWeight: 700 }}>{fmtBRL(m.valorTotal || 0)}</span>
-                    </div>
-                    <div className="orc-meta-item">
-                      <span className="orc-meta-l">Lucro previsto</span>
-                      <span className="orc-meta-v mono t-green">{fmtBRL(m.lucroEstimado || 0)}</span>
-                    </div>
+
+                    <div className="orc-ver-mais"><Eye size={13} /> Ver detalhes completos</div>
                   </div>
 
                   <div className="orc-card-actions">
@@ -4942,7 +4938,6 @@ function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
                       ? <button onClick={() => mudarStatus(m.id, prox)} className="orc-advance"><ChevronRight size={13} /> {mudStatusInfo(prox).label}</button>
                       : <span />}
                     <div className="orc-icons">
-                      <button onClick={() => setDetalhe(m)} className="ibtn" title="Visualizar"><Eye size={15} /></button>
                       <button onClick={() => onEditar(m)} className="ibtn" title="Editar"><Pencil size={15} /></button>
                       <button onClick={() => setDelTarget(m)} className="ibtn ibtn-del" title="Excluir"><Trash2 size={15} /></button>
                     </div>
@@ -5129,35 +5124,6 @@ function DetalheCotacao({ cot, data, onMudarStatus }) {
               {s.label}{cot.status === s.k && <Check size={12} />}
             </button>
           ))}
-        </div>
-      </div>
-
-      {/* Espaço pra barra fixa não cobrir conteúdo */}
-      <div style={{ height: 8 }} />
-
-      {/* Barra fixa inferior */}
-      <div className="det-bar">
-        <div className="det-bar-nums">
-          <div className="det-bar-num">
-            <span className="det-bar-l">Total</span>
-            <span className="det-bar-v mono">{fmtBRL(calc.total)}</span>
-          </div>
-          <div className="det-bar-num hide-sm">
-            <span className="det-bar-l">Lucro</span>
-            <span className="det-bar-v mono t-green">{fmtBRL(calc.lucroEstimado)}</span>
-          </div>
-          <div className="det-bar-num hide-sm">
-            <span className="det-bar-l">Margem</span>
-            <span className="det-bar-v mono">{margemPct}%</span>
-          </div>
-        </div>
-        <div className="det-bar-btns">
-          <button className="det-bar-pdf" onClick={baixarPDF} disabled={gerando}>
-            <FileSignature size={15} /> <span className="hide-sm">Gerar</span> PDF
-          </button>
-          <button className="det-bar-wpp" onClick={enviarWhatsApp} title="Enviar no WhatsApp">
-            <Phone size={16} />
-          </button>
         </div>
       </div>
     </div>
