@@ -1084,8 +1084,27 @@ function FinanceiroEmpresa({ data, setData }) {
   const handleDelete = (id) => { const item = finEmpresa.find(x => x.id === id); if (item) setDelTarget(item); };
   const confirmDelete = () => { if (delTarget) { setData(d => ({ ...d, finEmpresa: d.finEmpresa.filter(x => x.id !== delTarget.id) })); setToast('Lançamento excluído com sucesso'); setDelTarget(null); } };
 
+  const pendentesConc = useMemo(() => finEmpresa.filter(x => x.statusConc === 'pendente'), [finEmpresa]);
+  const conciliarTodos = () => {
+    if (pendentesConc.length === 0) return;
+    setData(d => ({ ...d, finEmpresa: d.finEmpresa.map(y => y.statusConc === 'pendente' ? { ...y, statusConc: 'conciliado' } : y) }));
+    setToast(`${pendentesConc.length} lançamento(s) marcados como conciliados`);
+  };
+
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {pendentesConc.length > 0 && (
+        <div className="conc-banner">
+          <div className="conc-banner-ico"><CircleAlert size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">Você tem <b>{pendentesConc.length}</b> {pendentesConc.length === 1 ? 'lançamento pendente' : 'lançamentos pendentes'} de conciliação</div>
+            <div className="conc-banner-sub">Estes vieram da Importação. Confira valor e data com seu extrato, depois clique em <b>Conciliar</b> na linha ou em <b>Conciliar todos</b>.</div>
+          </div>
+          <button className="btn btn-primary" onClick={conciliarTodos} style={{ flexShrink: 0 }}>
+            <Check size={14} /> Conciliar todos
+          </button>
+        </div>
+      )}
       {/* Período — controla todos os dados da tela */}
       <div className="period-bar">
         {PERIODOS.map(p => <button key={p.k} onClick={() => setPeriodo(p.k)} className={`period-pill ${periodo === p.k ? 'on' : ''}`}>{p.label}</button>)}
@@ -1197,7 +1216,11 @@ function FinanceiroEmpresa({ data, setData }) {
                   <div className={`mono text-sm font-semibold text-right ${canc ? 't-mute' : isE ? 't-green' : 't-red'}`} style={{ flexShrink: 0, textDecoration: canc ? 'line-through' : 'none' }}>{isE ? '+ ' : '− '}{fmtBRL(x.valor)}</div>
                   <div className="row-actions flex">
                     {x.statusConc === 'pendente' && (
-                      <button onClick={() => setData(d => ({ ...d, finEmpresa: d.finEmpresa.map(y => y.id === x.id ? { ...y, statusConc: 'conciliado' } : y) }))} className="ibtn" title="Marcar como conciliado"><Check size={14} /></button>
+                      <button
+                        onClick={() => setData(d => ({ ...d, finEmpresa: d.finEmpresa.map(y => y.id === x.id ? { ...y, statusConc: 'conciliado' } : y) }))}
+                        className="conc-btn"
+                        title="Marcar como conciliado"
+                      ><Check size={13} /> Conciliar</button>
                     )}
                     <button onClick={() => { setEditing(x); setOpenForm(true); }} className="ibtn"><Pencil size={14} /></button>
                     <button onClick={() => handleDelete(x.id)} className="ibtn ibtn-del"><Trash2 size={14} /></button>
@@ -3313,9 +3336,7 @@ function AppInner() {
         .ibtn{ display:inline-flex; padding:7px; border-radius:9px; transition:.15s; color:#6B7280; background:transparent; border:none; cursor:pointer; }
         .ibtn:hover{ background:#E5E7EB; color:#0B1324; }
         .ibtn-del:hover{ background:#FFF1F2; color:#B4234B; }
-        .row-actions{ opacity:.55; transition:.15s; }
-        .row:hover .row-actions{ opacity:1; }
-        @media(min-width:640px){ .row-actions{ opacity:0; } }
+        .row-actions{ opacity:1; transition:.15s; }
 
         /* inputs */
         .inp{ width:100%; padding:10px 12px; background:#fff; border:1px solid #D1D5DB; border-radius:12px; font-size:14px; color:#0B1324; transition:.15s; }
@@ -3370,6 +3391,27 @@ function AppInner() {
         @media(max-width:520px){ .user-chip-info{ display:none; } .user-chip{ padding:4px; } }
         .cfg-logo-preview{ width:64px; height:64px; border-radius:14px; overflow:hidden; background:#fff; border:1px solid #E5E7EB; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
         .cfg-logo-preview img{ width:100%; height:100%; object-fit:cover; }
+        .cfg-logo-wrap{ position:relative; flex-shrink:0; display:inline-block; }
+        .cfg-logo-edit{
+          position:absolute; bottom:-4px; right:-4px;
+          width:28px; height:28px; border-radius:99px;
+          background:linear-gradient(135deg,#1D4ED8,#0EA5E9);
+          color:#fff;
+          display:flex; align-items:center; justify-content:center;
+          cursor:pointer;
+          box-shadow:0 3px 8px rgba(29,78,216,.35);
+          border:2px solid #fff;
+          transition:transform .12s, box-shadow .12s;
+        }
+        .cfg-logo-edit:hover{ transform:scale(1.08); box-shadow:0 4px 12px rgba(29,78,216,.45); }
+        .cfg-logo-edit:active{ transform:scale(.96); }
+        .cfg-logo-remove{
+          background:none; border:0; padding:0; margin-top:6px;
+          color:#B4234B; font-family:inherit; font-size:11.5px;
+          cursor:pointer; text-decoration:underline;
+          display:inline-block;
+        }
+        .cfg-logo-remove:hover{ color:#8B1834; }
         .cfg-logo-fallback{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:22px; letter-spacing:-.02em; }
 
         /* financeiro premium */
@@ -3476,8 +3518,9 @@ function AppInner() {
         .mini-label{ font-size:clamp(.6rem,1.8vw,.68rem); letter-spacing:.04em; text-transform:uppercase; font-weight:500; color:#6B7280; line-height:1.2; }
         .mini-val{ font-size:clamp(.85rem,3vw,1.05rem); font-weight:600; margin-top:5px; word-break:break-word; line-height:1.1; }
         .tx-list{ display:flex; flex-direction:column; gap:6px; padding:10px; }
-        .tx-item{ display:flex; align-items:center; gap:11px; padding:9px 11px; border:1px solid #EFF0F2; border-radius:11px; background:#fff; transition:transform .15s,box-shadow .15s,border-color .15s; }
+        .tx-item{ display:flex; align-items:center; gap:11px; padding:9px 11px; border:1px solid #EFF0F2; border-radius:11px; background:#fff; transition:transform .15s,box-shadow .15s,border-color .15s; position:relative; }
         .tx-item:hover{ border-color:#E5E7EB; box-shadow:0 4px 16px rgba(11,19,36,.07); transform:translateY(-1px); }
+        .tx-item:has(.cat-drop-menu){ z-index:60; transform:none !important; box-shadow:0 10px 30px rgba(11,19,36,.16); }
         .tx-overdue{ border-color:#FECDD3; background:linear-gradient(0deg,#FFF5F6,#fff); box-shadow:inset 3px 0 0 #B4234B; }
         .tx-overdue:hover{ border-color:#FDA4AF; box-shadow:inset 3px 0 0 #B4234B,0 4px 16px rgba(180,35,75,.12); }
         .tx-canc{ text-decoration:line-through; color:#9CA3AF; }
@@ -4699,19 +4742,14 @@ function Configuracoes({ data, setData, onRequestLogout }) {
         <p className="text-sm t-soft mb-4">Personalize a cara da sua empresa dentro do sistema.</p>
 
         <div className="flex items-center gap-4 mb-5" style={{ padding: 14, background: '#F4F6F8', borderRadius: 12, flexWrap: 'wrap' }}>
-          <div className="cfg-logo-preview">
-            {logoUrl && !logoErr
-              ? <img src={logoUrl} alt="logo" onError={() => setLogoErr(true)} onLoad={() => setLogoErr(false)} />
-              : <span className="cfg-logo-fallback">{iniciais}</span>}
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="t-ink font-semibold" style={{ fontSize: 15 }}>{nomeEmp || 'Sua empresa'}</div>
-            <div className="text-xs t-soft">{cnpj ? `CNPJ ${cnpj}` : 'Adicione um CNPJ (opcional)'}</div>
-            <div className="text-xs t-mute mt-0.5">Prévia do topo do app</div>
-          </div>
-          <div className="flex gap-2" style={{ flexShrink: 0 }}>
-            <label className="btn btn-primary btn-sm" style={{ cursor: 'pointer', margin: 0 }}>
-              {logoUrl ? 'Trocar foto' : 'Enviar foto'}
+          <div className="cfg-logo-wrap">
+            <div className="cfg-logo-preview">
+              {logoUrl && !logoErr
+                ? <img src={logoUrl} alt="logo" onError={() => setLogoErr(true)} onLoad={() => setLogoErr(false)} />
+                : <span className="cfg-logo-fallback">{iniciais}</span>}
+            </div>
+            <label className="cfg-logo-edit" title={logoUrl ? 'Trocar foto' : 'Enviar foto'}>
+              <Camera size={14} />
               <input
                 type="file"
                 accept="image/png,image/jpeg,image/webp"
@@ -4723,12 +4761,17 @@ function Configuracoes({ data, setData, onRequestLogout }) {
                 }}
               />
             </label>
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="t-ink font-semibold" style={{ fontSize: 15 }}>{nomeEmp || 'Sua empresa'}</div>
+            <div className="text-xs t-soft">{cnpj ? `CNPJ ${cnpj}` : 'Adicione um CNPJ (opcional)'}</div>
+            <div className="text-xs t-mute mt-0.5">Toque no ícone da câmera pra {logoUrl ? 'trocar' : 'enviar'} a foto</div>
             {logoUrl && (
               <button
                 type="button"
-                className="btn btn-ghost btn-sm"
+                className="cfg-logo-remove"
                 onClick={() => { setLogoUrl(''); setLogoErr(false); }}
-              >Remover</button>
+              >Remover foto</button>
             )}
           </div>
         </div>
