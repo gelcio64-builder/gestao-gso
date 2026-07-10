@@ -3491,6 +3491,136 @@ function AppInner() {
         .cot-resumo-line{ display:flex; justify-content:space-between; gap:10px; align-items:baseline; }
         .cot-resumo-sep{ font-size:10.5px; font-weight:600; color:#6B7280; text-transform:uppercase; letter-spacing:.05em; margin-top:8px; padding-top:6px; border-top:1px dashed #E5E7EB; }
         .cot-resumo-total{ display:flex; justify-content:space-between; align-items:center; margin-top:12px; padding-top:12px; border-top:2px solid #F1F2F4; font-weight:700; font-size:16px; color:#0B1324; }
+
+        /* ===== Mudanças — UI premium ===== */
+        @keyframes fadeIn{ from{ opacity:0; transform:translateY(6px); } to{ opacity:1; transform:none; } }
+        .fade-in{ animation:fadeIn .32s ease both; }
+
+        /* KPIs */
+        .mud-kpi-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+        @media(max-width:900px){ .mud-kpi-grid{ grid-template-columns:repeat(2,1fr); } }
+        @media(max-width:480px){ .mud-kpi-grid{ grid-template-columns:repeat(2,1fr); gap:10px; } }
+        .mud-kpi{ background:#fff; border:1px solid #EFF0F2; border-radius:16px; padding:16px; position:relative; overflow:hidden; transition:transform .18s, box-shadow .18s; }
+        .mud-kpi::before{ content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--kc,#1D4ED8); }
+        .mud-kpi:hover{ transform:translateY(-3px); box-shadow:0 12px 28px rgba(11,19,36,.08); }
+        .mud-kpi-ico{ width:38px; height:38px; border-radius:11px; display:flex; align-items:center; justify-content:center; margin-bottom:10px; }
+        .mud-kpi-num{ font-size:26px; font-weight:700; letter-spacing:-.02em; color:#0B1324; line-height:1.05; }
+        .mud-kpi-lbl{ font-size:12.5px; font-weight:600; color:#0B1324; margin-top:3px; }
+        .mud-kpi-sub{ font-size:11px; color:#9CA3AF; margin-top:1px; }
+
+        /* Status chip */
+        .status-chip{ display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:99px; font-size:11px; font-weight:600; white-space:nowrap; }
+        .status-chip-lg{ padding:5px 13px; font-size:12.5px; }
+        .status-dot{ width:6px; height:6px; border-radius:99px; flex-shrink:0; }
+
+        /* Card de orçamento compacto */
+        .orc-grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+        @media(max-width:760px){ .orc-grid{ grid-template-columns:1fr; } }
+        .orc-card{ background:#fff; border:1px solid #EFF0F2; border-radius:14px; padding:14px; display:flex; flex-direction:column; gap:10px; transition:transform .16s, box-shadow .16s, border-color .16s; }
+        .orc-card:hover{ transform:translateY(-2px); box-shadow:0 10px 26px rgba(11,19,36,.08); border-color:#E5E7EB; }
+        .orc-card-top{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+        .orc-cliente{ font-size:14.5px; font-weight:700; color:#0B1324; }
+        .orc-tipo{ font-size:11.5px; color:#9CA3AF; margin-top:1px; }
+        .orc-rota{ display:flex; align-items:center; gap:7px; padding:7px 10px; background:#F8F9FB; border-radius:9px; }
+        .orc-rota-cidade{ font-size:12.5px; font-weight:500; color:#374151; flex:1; min-width:0; }
+        .orc-rota-arrow{ color:#7A1730; flex-shrink:0; }
+        .orc-meta{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+        @media(max-width:420px){ .orc-meta{ grid-template-columns:repeat(2,1fr); } }
+        .orc-meta-item{ display:flex; flex-direction:column; gap:1px; }
+        .orc-meta-l{ font-size:10px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
+        .orc-meta-v{ font-size:13px; color:#374151; font-weight:500; }
+        .orc-card-actions{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:10px; border-top:1px solid #F4F5F7; }
+        .orc-advance{ display:inline-flex; align-items:center; gap:4px; padding:6px 11px; border-radius:8px; background:#7A1730; color:#fff; border:0; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; transition:transform .14s, box-shadow .14s; }
+        .orc-advance:hover{ transform:translateY(-1px); box-shadow:0 6px 14px rgba(122,23,48,.28); }
+        .orc-advance:active{ transform:scale(.97); }
+        .orc-icons{ display:flex; gap:2px; }
+
+        /* Card de rota */
+        .rota-card{ background:#fff; border:1px solid #EFF0F2; border-radius:14px; padding:16px; }
+        .rota-linha{ display:flex; align-items:center; gap:12px; }
+        .rota-ponto{ display:flex; align-items:center; gap:9px; flex:1; min-width:0; }
+        .rota-pin{ width:26px; height:26px; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
+        .rota-pin-origem{ background:#16A34A; }
+        .rota-pin-destino{ background:#DC2626; }
+        .rota-lbl{ font-size:10px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.04em; }
+        .rota-cidade{ font-size:13.5px; font-weight:600; color:#0B1324; }
+        .rota-seta{ color:#9CA3AF; flex-shrink:0; transform:rotate(45deg); }
+        .rota-metrics{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:14px 0; }
+        .rota-metric{ background:#F8F9FB; border-radius:10px; padding:10px 12px; text-align:center; }
+        .rota-metric-v{ font-size:16px; font-weight:700; color:#0B1324; }
+        .rota-metric-l{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; margin-top:2px; }
+        .rota-btn{ display:flex; align-items:center; justify-content:center; gap:7px; width:100%; padding:11px; border-radius:10px; background:#0B1533; color:#fff; text-decoration:none; font-size:13px; font-weight:600; transition:background .15s, transform .14s; }
+        .rota-btn:hover{ background:#16224A; transform:translateY(-1px); }
+        .rota-btn:active{ transform:scale(.99); }
+
+        /* Detalhe da cotação premium */
+        .det-wrap{ display:flex; flex-direction:column; gap:16px; }
+        .det-head{ background:linear-gradient(135deg,#0B1533,#16224A); border-radius:16px; padding:18px; color:#fff; }
+        .det-head-top{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:16px; }
+        .det-cliente{ font-size:19px; font-weight:700; letter-spacing:-.01em; }
+        .det-sub{ font-size:12.5px; color:rgba(255,255,255,.6); margin-top:2px; }
+        .det-fin{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+        .det-fin-item{ background:rgba(255,255,255,.08); border-radius:11px; padding:11px 13px; }
+        .det-fin-l{ font-size:10.5px; color:rgba(255,255,255,.55); text-transform:uppercase; letter-spacing:.04em; }
+        .det-fin-v{ font-size:17px; font-weight:700; margin-top:3px; }
+        .det-fin-v.t-green{ color:#86EFAC; }
+        .det-actions{ display:flex; gap:10px; flex-wrap:wrap; }
+        .det-actions .btn{ flex:1; min-width:140px; justify-content:center; }
+        .det-wpp{ flex:1; min-width:140px; display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:10px 16px; border-radius:12px; background:#25D366; color:#fff; border:0; font-family:inherit; font-size:14px; font-weight:600; cursor:pointer; transition:transform .14s, box-shadow .14s; }
+        .det-wpp:hover{ transform:translateY(-1px); box-shadow:0 8px 18px rgba(37,211,102,.32); }
+        .item-chip{ display:inline-flex; align-items:center; gap:4px; padding:5px 11px; border-radius:99px; background:#F1F3F5; color:#374151; font-size:12.5px; }
+        .item-chip b{ color:#0B1324; }
+
+        /* Resumo financeiro card */
+        .fin-resumo{ display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:#EFF0F2; border:1px solid #EFF0F2; border-radius:14px; overflow:hidden; }
+        @media(max-width:520px){ .fin-resumo{ grid-template-columns:repeat(2,1fr); } }
+        .fin-resumo-item{ background:#fff; padding:14px; text-align:center; }
+        .fin-resumo-l{ font-size:11px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
+        .fin-resumo-v{ font-size:17px; font-weight:700; color:#0B1324; margin-top:4px; }
+
+        /* Barra fixa inferior */
+        .det-bar{ position:sticky; bottom:0; z-index:20; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; margin:0 -18px -18px; background:rgba(255,255,255,.96); backdrop-filter:blur(10px); border-top:1px solid #E5E7EB; }
+        @media(max-width:640px){ .det-bar{ margin:0 -16px -16px; padding:11px 14px; } }
+        .det-bar-nums{ display:flex; gap:20px; align-items:center; }
+        .det-bar-num{ display:flex; flex-direction:column; }
+        .det-bar-l{ font-size:10px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
+        .det-bar-v{ font-size:17px; font-weight:700; color:#0B1324; line-height:1.1; }
+        .det-bar-btns{ display:flex; gap:8px; flex-shrink:0; }
+        .det-bar-pdf{ display:inline-flex; align-items:center; gap:6px; padding:10px 16px; border-radius:11px; background:#7A1730; color:#fff; border:0; font-family:inherit; font-size:13.5px; font-weight:600; cursor:pointer; transition:transform .14s, box-shadow .14s; }
+        .det-bar-pdf:hover{ transform:translateY(-1px); box-shadow:0 6px 16px rgba(122,23,48,.3); }
+        .det-bar-pdf:disabled{ opacity:.6; cursor:wait; }
+        .det-bar-wpp{ display:inline-flex; align-items:center; justify-content:center; width:42px; border-radius:11px; background:#25D366; color:#fff; border:0; cursor:pointer; transition:transform .14s, box-shadow .14s; }
+        .det-bar-wpp:hover{ transform:translateY(-1px); box-shadow:0 6px 16px rgba(37,211,102,.32); }
+
+        /* Config de preços — grid 2 colunas */
+        .preco-grid{ display:grid; grid-template-columns:1fr 1fr; gap:14px 16px; }
+        @media(max-width:560px){ .preco-grid{ grid-template-columns:1fr; } }
+        /* Materiais em cards */
+        .mat-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; }
+        .mat-card{ background:#F8F9FB; border:1px solid #EFF0F2; border-radius:12px; padding:12px; transition:border-color .15s, box-shadow .15s; }
+        .mat-card:hover{ border-color:#E0E3E8; box-shadow:0 4px 12px rgba(11,19,36,.05); }
+        .mat-card-nome{ font-size:12.5px; font-weight:600; color:#374151; margin-bottom:8px; line-height:1.3; }
+
+        /* Skeleton loading */
+        @keyframes shimmer{ 0%{ background-position:-400px 0; } 100%{ background-position:400px 0; } }
+        .skel-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+        @media(max-width:900px){ .skel-grid{ grid-template-columns:repeat(2,1fr); } }
+        .skel-card{ height:104px; border-radius:16px; }
+        .skel-line, .skel-card{ background:linear-gradient(90deg,#EFF1F4 25%,#F7F8FA 50%,#EFF1F4 75%); background-size:800px 100%; animation:shimmer 1.4s infinite linear; border-radius:12px; }
+
+        /* Polimento responsivo módulo Mudanças */
+        @media(max-width:640px){
+          .det-head{ padding:15px; }
+          .det-cliente{ font-size:17px; }
+          .det-fin-v{ font-size:15px; }
+          .cot-total{ font-size:23px; }
+          .mud-kpi-num{ font-size:22px; }
+        }
+        @media(max-width:380px){
+          .det-fin{ gap:7px; }
+          .det-fin-item{ padding:9px 10px; }
+          .orc-meta{ grid-template-columns:repeat(2,1fr); }
+        }
         .cfg-logo-fallback{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:22px; letter-spacing:-.02em; }
 
         /* financeiro premium */
@@ -3789,7 +3919,15 @@ function AppInner() {
           userName={user?.displayName || user?.email}
           onLogout={openLogout}
         />
-        {!loaded ? <div className="p-10 t-soft text-sm">Carregando dados…</div> : <>
+        {!loaded ? (
+          <div className="p-4 sm:p-6 space-y-4">
+            <div className="skel-grid">
+              {[0, 1, 2, 3].map(i => <div key={i} className="skel-card" />)}
+            </div>
+            <div className="skel-line" style={{ width: '100%', height: 120 }} />
+            <div className="skel-line" style={{ width: '100%', height: 120 }} />
+          </div>
+        ) : <>
           {route === 'dashboard' && <Dashboard data={data} />}
           {route === 'finEmpresa' && <FinanceiroEmpresa data={data} setData={setData} />}
           {route === 'linhas' && <Linhas data={data} setData={setData} />}
@@ -4589,13 +4727,13 @@ function NovaCotacao({ data, setData, setToast, onSalvou, editItem }) {
 
 // Status do fluxo de serviço de mudança
 const MUD_STATUS = [
-  { k: 'orcamento', label: 'Orçamento', tone: 'slate' },
-  { k: 'aguardando', label: 'Aguardando aprovação', tone: 'orange' },
-  { k: 'confirmado', label: 'Confirmado', tone: 'blue' },
-  { k: 'agendado', label: 'Agendado', tone: 'blue' },
-  { k: 'andamento', label: 'Em andamento', tone: 'orange' },
-  { k: 'concluido', label: 'Concluído', tone: 'green' },
-  { k: 'cancelado', label: 'Cancelado', tone: 'red' },
+  { k: 'orcamento', label: 'Orçamento', tone: 'slate', cor: '#CA8A04', bg: '#FEF9C3' },
+  { k: 'aguardando', label: 'Aguardando aprovação', tone: 'orange', cor: '#EA580C', bg: '#FFEDD5' },
+  { k: 'confirmado', label: 'Confirmado', tone: 'blue', cor: '#2563EB', bg: '#DBEAFE' },
+  { k: 'agendado', label: 'Agendado', tone: 'blue', cor: '#7C3AED', bg: '#EDE9FE' },
+  { k: 'andamento', label: 'Em andamento', tone: 'orange', cor: '#059669', bg: '#D1FAE5' },
+  { k: 'concluido', label: 'Concluído', tone: 'green', cor: '#16A34A', bg: '#DCFCE7' },
+  { k: 'cancelado', label: 'Cancelado', tone: 'red', cor: '#DC2626', bg: '#FEE2E2' },
 ];
 const mudStatusInfo = (k) => MUD_STATUS.find(s => s.k === k) || MUD_STATUS[0];
 // próximo status natural no fluxo (pra botão de avançar)
@@ -4606,6 +4744,67 @@ const MUD_PROXIMO = {
   agendado: 'andamento',
   andamento: 'concluido',
 };
+
+// Chip de status moderno com bolinha colorida
+function StatusChip({ status, size = 'sm' }) {
+  const s = mudStatusInfo(status);
+  return (
+    <span className={`status-chip ${size === 'lg' ? 'status-chip-lg' : ''}`} style={{ background: s.bg, color: s.cor }}>
+      <span className="status-dot" style={{ background: s.cor }} />
+      {s.label}
+    </span>
+  );
+}
+
+// Monta URL do Google Maps com origem → destino
+function googleMapsUrl(origem, destino) {
+  if (!origem && !destino) return 'https://www.google.com/maps';
+  const o = encodeURIComponent(origem || '');
+  const d = encodeURIComponent(destino || '');
+  if (origem && destino) return `https://www.google.com/maps/dir/?api=1&origin=${o}&destination=${d}&travelmode=driving`;
+  return `https://www.google.com/maps/search/?api=1&query=${d || o}`;
+}
+
+// Card de rota: origem → destino + métricas + botão Google Maps
+function RotaCard({ cot, tabela }) {
+  const km = Number(cot.distanciaKm) || 0;
+  const combustivel = km * (tabela?.precoKm != null ? 0 : 0); // combustível estimado usa consumo se existir
+  const url = googleMapsUrl(cot.origem, cot.destino);
+  return (
+    <div className="rota-card">
+      <div className="rota-linha">
+        <div className="rota-ponto">
+          <span className="rota-pin rota-pin-origem"><MapPin size={13} /></span>
+          <div className="min-w-0">
+            <div className="rota-lbl">Origem</div>
+            <div className="rota-cidade truncate">{cot.origem || '—'}</div>
+          </div>
+        </div>
+        <div className="rota-seta"><ArrowDownRight size={16} /></div>
+        <div className="rota-ponto">
+          <span className="rota-pin rota-pin-destino"><MapPin size={13} /></span>
+          <div className="min-w-0">
+            <div className="rota-lbl">Destino</div>
+            <div className="rota-cidade truncate">{cot.destino || '—'}</div>
+          </div>
+        </div>
+      </div>
+      <div className="rota-metrics">
+        <div className="rota-metric">
+          <div className="rota-metric-v mono">{km} km</div>
+          <div className="rota-metric-l">Distância</div>
+        </div>
+        <div className="rota-metric">
+          <div className="rota-metric-v mono">{fmtBRL(km * tabela.precoKm)}</div>
+          <div className="rota-metric-l">Deslocamento</div>
+        </div>
+      </div>
+      <a href={url} target="_blank" rel="noopener noreferrer" className="rota-btn">
+        <MapPin size={15} /> Abrir no Google Maps
+      </a>
+    </div>
+  );
+}
 
 function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
   const { mudancas = [] } = data;
@@ -4657,26 +4856,30 @@ function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
         <NewButton onClick={onNova}>Nova cotação</NewButton>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
-        <div className="card kpi p-4">
-          <div className="label">Orçamentos abertos</div>
-          <div className="mono stat-md t-ink" style={{ marginTop: 4 }}>{kpis.orcamentos}</div>
-          <div className="text-xs t-mute mt-1">aguardando decisão</div>
+      <div className="mud-kpi-grid">
+        <div className="mud-kpi fade-in" style={{ '--kc': '#CA8A04' }}>
+          <div className="mud-kpi-ico" style={{ background: '#FEF9C3', color: '#CA8A04' }}><FileSignature size={18} /></div>
+          <div className="mud-kpi-num">{kpis.orcamentos}</div>
+          <div className="mud-kpi-lbl">Orçamentos</div>
+          <div className="mud-kpi-sub">aguardando decisão</div>
         </div>
-        <div className="card kpi p-4">
-          <div className="label">Agendados</div>
-          <div className="mono stat-md t-ink" style={{ marginTop: 4 }}>{kpis.agendados}</div>
-          <div className="text-xs t-mute mt-1">confirmados / na agenda</div>
+        <div className="mud-kpi fade-in" style={{ '--kc': '#7C3AED' }}>
+          <div className="mud-kpi-ico" style={{ background: '#EDE9FE', color: '#7C3AED' }}><Calendar size={18} /></div>
+          <div className="mud-kpi-num">{kpis.agendados}</div>
+          <div className="mud-kpi-lbl">Agendados</div>
+          <div className="mud-kpi-sub">confirmados / na agenda</div>
         </div>
-        <div className="card kpi p-4">
-          <div className="label">Em andamento</div>
-          <div className={`mono stat-md ${kpis.andamento > 0 ? 't-orange' : 't-ink'}`} style={{ marginTop: 4 }}>{kpis.andamento}</div>
-          <div className="text-xs t-mute mt-1">acontecendo agora</div>
+        <div className="mud-kpi fade-in" style={{ '--kc': '#059669' }}>
+          <div className="mud-kpi-ico" style={{ background: '#D1FAE5', color: '#059669' }}><Activity size={18} /></div>
+          <div className="mud-kpi-num" style={{ color: kpis.andamento > 0 ? '#059669' : undefined }}>{kpis.andamento}</div>
+          <div className="mud-kpi-lbl">Em andamento</div>
+          <div className="mud-kpi-sub">acontecendo agora</div>
         </div>
-        <div className="card kpi p-4">
-          <div className="label">Receita concluída (mês)</div>
-          <div className="mono stat-md t-green" style={{ marginTop: 4, fontSize: 18 }}>{fmtBRL(kpis.receita)}</div>
-          <div className="text-xs t-mute mt-1">serviços finalizados</div>
+        <div className="mud-kpi fade-in" style={{ '--kc': '#16A34A' }}>
+          <div className="mud-kpi-ico" style={{ background: '#DCFCE7', color: '#16A34A' }}><Coins size={18} /></div>
+          <div className="mud-kpi-num mono t-green" style={{ fontSize: 20 }}>{fmtBRL(kpis.receita)}</div>
+          <div className="mud-kpi-lbl">Receita prevista (mês)</div>
+          <div className="mud-kpi-sub">serviços concluídos</div>
         </div>
       </div>
 
@@ -4696,33 +4899,53 @@ function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
         </div>
 
         {filtered.length === 0 ? <EmptyState icon={Package} title={mudancas.length === 0 ? 'Nenhuma cotação ainda. Crie a primeira!' : 'Nenhum registro para os filtros.'} /> : (
-          <div className="wms-list">
+          <div className="orc-grid">
             {filtered.map(m => {
-              const st = mudStatusInfo(m.status);
               const prox = MUD_PROXIMO[m.status];
               return (
-                <div key={m.id} className="wms-row">
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold t-ink truncate">{m.clienteNome || 'Cliente não informado'} <span className="t-mute" style={{ fontWeight: 400 }}>· {m.tipoServico}</span></div>
-                    <div className="text-xs t-soft mt-0.5 flex flex-wrap gap-1.5 items-center">
-                      <Badge tone={st.tone}>{st.label}</Badge>
-                      {m.origem && m.destino && <span>{m.origem} → {m.destino}</span>}
-                      {m.dataPrevista && <span>· {fmtDate(m.dataPrevista)}{m.horaPrevista ? ` ${m.horaPrevista}` : ''}</span>}
+                <div key={m.id} className="orc-card fade-in">
+                  <div className="orc-card-top">
+                    <div className="min-w-0 flex-1">
+                      <div className="orc-cliente truncate">{m.clienteNome || 'Cliente não informado'}</div>
+                      <div className="orc-tipo">{m.tipoServico}</div>
+                    </div>
+                    <StatusChip status={m.status} />
+                  </div>
+
+                  <div className="orc-rota">
+                    <span className="orc-rota-cidade truncate">{m.origem || '—'}</span>
+                    <ArrowUpRight size={13} className="orc-rota-arrow" />
+                    <span className="orc-rota-cidade truncate">{m.destino || '—'}</span>
+                  </div>
+
+                  <div className="orc-meta">
+                    <div className="orc-meta-item">
+                      <span className="orc-meta-l">Distância</span>
+                      <span className="orc-meta-v mono">{m.distanciaKm || 0} km</span>
+                    </div>
+                    <div className="orc-meta-item">
+                      <span className="orc-meta-l">Data</span>
+                      <span className="orc-meta-v">{m.dataPrevista ? fmtDate(m.dataPrevista) : '—'}</span>
+                    </div>
+                    <div className="orc-meta-item">
+                      <span className="orc-meta-l">Valor</span>
+                      <span className="orc-meta-v mono t-ink" style={{ fontWeight: 700 }}>{fmtBRL(m.valorTotal || 0)}</span>
+                    </div>
+                    <div className="orc-meta-item">
+                      <span className="orc-meta-l">Lucro previsto</span>
+                      <span className="orc-meta-v mono t-green">{fmtBRL(m.lucroEstimado || 0)}</span>
                     </div>
                   </div>
-                  <div className="text-right" style={{ flexShrink: 0 }}>
-                    <div className="mono text-sm font-semibold t-ink">{fmtBRL(m.valorTotal || 0)}</div>
-                    {m.lucroEstimado > 0 && <div className="text-xs t-green mono">lucro {fmtBRL(m.lucroEstimado)}</div>}
-                  </div>
-                  <div className="row-actions flex items-center">
-                    {prox && (
-                      <button onClick={() => mudarStatus(m.id, prox)} className="conc-btn" title={`Avançar para ${mudStatusInfo(prox).label}`} style={{ background: '#7A1730' }}>
-                        <ChevronRight size={13} /> {mudStatusInfo(prox).label}
-                      </button>
-                    )}
-                    <button onClick={() => setDetalhe(m)} className="ibtn" title="Ver detalhes"><Eye size={14} /></button>
-                    <button onClick={() => onEditar(m)} className="ibtn" title="Editar"><Pencil size={14} /></button>
-                    <button onClick={() => setDelTarget(m)} className="ibtn ibtn-del" title="Excluir"><Trash2 size={14} /></button>
+
+                  <div className="orc-card-actions">
+                    {prox
+                      ? <button onClick={() => mudarStatus(m.id, prox)} className="orc-advance"><ChevronRight size={13} /> {mudStatusInfo(prox).label}</button>
+                      : <span />}
+                    <div className="orc-icons">
+                      <button onClick={() => setDetalhe(m)} className="ibtn" title="Visualizar"><Eye size={15} /></button>
+                      <button onClick={() => onEditar(m)} className="ibtn" title="Editar"><Pencil size={15} /></button>
+                      <button onClick={() => setDelTarget(m)} className="ibtn ibtn-del" title="Excluir"><Trash2 size={15} /></button>
+                    </div>
                   </div>
                 </div>
               );
@@ -4794,26 +5017,56 @@ function DetalheCotacao({ cot, data, onMudarStatus }) {
     window.open(url, '_blank');
   };
 
+  // Custos = total menos o lucro estimado (sem mudar nenhum cálculo, só derivando pra exibir)
+  const custos = Math.max(0, calc.total - (calc.lucroEstimado || 0));
+  const margemPct = calc.total > 0 ? Math.round((calc.lucroEstimado / calc.total) * 100) : 0;
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div>
-          <div className="text-lg font-semibold t-ink">{cot.clienteNome || 'Cliente não informado'}</div>
-          <div className="text-xs t-soft">{cot.tipoServico} · {cot.origem || '?'} → {cot.destino || '?'}</div>
+    <div className="det-wrap">
+      {/* Cabeçalho premium */}
+      <div className="det-head">
+        <div className="det-head-top">
+          <div className="min-w-0">
+            <div className="det-cliente">{cot.clienteNome || 'Cliente não informado'}</div>
+            <div className="det-sub">{cot.tipoServico}{cot.tipoImovel ? ` · ${cot.tipoImovel}` : ''}</div>
+          </div>
+          <StatusChip status={cot.status} size="lg" />
         </div>
-        <Badge tone={st.tone}>{st.label}</Badge>
+        <div className="det-fin">
+          <div className="det-fin-item">
+            <div className="det-fin-l">Valor da cotação</div>
+            <div className="det-fin-v mono">{fmtBRL(calc.total)}</div>
+          </div>
+          <div className="det-fin-item">
+            <div className="det-fin-l">Lucro previsto</div>
+            <div className="det-fin-v mono t-green">{fmtBRL(calc.lucroEstimado)}</div>
+          </div>
+          <div className="det-fin-item">
+            <div className="det-fin-l">Margem</div>
+            <div className="det-fin-v mono">{margemPct}%</div>
+          </div>
+        </div>
       </div>
 
-      {/* Ações principais: PDF + WhatsApp */}
-      <div className="flex gap-2 flex-wrap">
+      {/* Ações principais */}
+      <div className="det-actions">
         <button className="btn btn-primary" onClick={baixarPDF} disabled={gerando} style={{ background: '#7A1730' }}>
           {gerando ? 'Gerando…' : <><FileSignature size={15} /> Gerar PDF</>}
         </button>
-        <button className="btn btn-ghost" onClick={enviarWhatsApp} style={{ borderColor: '#25D366', color: '#128C7E' }}>
+        <button className="det-wpp" onClick={enviarWhatsApp}>
           <Phone size={15} /> Enviar no WhatsApp
         </button>
       </div>
 
+      {/* Rota com Google Maps */}
+      {(cot.origem || cot.destino) && (
+        <div>
+          <div className="label mb-2">Rota</div>
+          <RotaCard cot={cot} tabela={tabela} />
+        </div>
+      )}
+
+      {/* Métricas rápidas */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="metric-box"><div className="text-xs t-soft">Data</div><div className="text-sm font-medium t-ink">{fmtDate(cot.dataPrevista)}{cot.horaPrevista ? ` ${cot.horaPrevista}` : ''}</div></div>
         <div className="metric-box"><div className="text-xs t-soft">Distância</div><div className="text-sm font-medium t-ink mono">{cot.distanciaKm || 0} km</div></div>
@@ -4823,13 +5076,34 @@ function DetalheCotacao({ cot, data, onMudarStatus }) {
 
       {itens.length > 0 && (
         <div>
-          <div className="label mb-2">Itens</div>
+          <div className="label mb-2">Itens da mudança</div>
           <div className="flex flex-wrap gap-1.5">
-            {itens.map(([nome, q]) => <span key={nome} className="badge badge-slate">{nome} × {q}</span>)}
+            {itens.map(([nome, q]) => <span key={nome} className="item-chip">{nome} <b>× {q}</b></span>)}
           </div>
         </div>
       )}
 
+      {/* Resumo financeiro (card destacado) */}
+      <div className="fin-resumo">
+        <div className="fin-resumo-item">
+          <div className="fin-resumo-l">Valor total</div>
+          <div className="fin-resumo-v mono">{fmtBRL(calc.total)}</div>
+        </div>
+        <div className="fin-resumo-item">
+          <div className="fin-resumo-l">Custos</div>
+          <div className="fin-resumo-v mono" style={{ color: '#DC2626' }}>{fmtBRL(custos)}</div>
+        </div>
+        <div className="fin-resumo-item">
+          <div className="fin-resumo-l">Lucro</div>
+          <div className="fin-resumo-v mono" style={{ color: '#16A34A' }}>{fmtBRL(calc.lucroEstimado)}</div>
+        </div>
+        <div className="fin-resumo-item">
+          <div className="fin-resumo-l">Margem</div>
+          <div className="fin-resumo-v mono">{margemPct}%</div>
+        </div>
+      </div>
+
+      {/* Composição detalhada */}
       <div>
         <div className="label mb-2">Composição do valor</div>
         <div className="cot-resumo-list" style={{ maxHeight: 'none' }}>
@@ -4855,6 +5129,35 @@ function DetalheCotacao({ cot, data, onMudarStatus }) {
               {s.label}{cot.status === s.k && <Check size={12} />}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* Espaço pra barra fixa não cobrir conteúdo */}
+      <div style={{ height: 8 }} />
+
+      {/* Barra fixa inferior */}
+      <div className="det-bar">
+        <div className="det-bar-nums">
+          <div className="det-bar-num">
+            <span className="det-bar-l">Total</span>
+            <span className="det-bar-v mono">{fmtBRL(calc.total)}</span>
+          </div>
+          <div className="det-bar-num hide-sm">
+            <span className="det-bar-l">Lucro</span>
+            <span className="det-bar-v mono t-green">{fmtBRL(calc.lucroEstimado)}</span>
+          </div>
+          <div className="det-bar-num hide-sm">
+            <span className="det-bar-l">Margem</span>
+            <span className="det-bar-v mono">{margemPct}%</span>
+          </div>
+        </div>
+        <div className="det-bar-btns">
+          <button className="det-bar-pdf" onClick={baixarPDF} disabled={gerando}>
+            <FileSignature size={15} /> <span className="hide-sm">Gerar</span> PDF
+          </button>
+          <button className="det-bar-wpp" onClick={enviarWhatsApp} title="Enviar no WhatsApp">
+            <Phone size={16} />
+          </button>
         </div>
       </div>
     </div>
@@ -4902,21 +5205,21 @@ function TabelaPrecos({ data, setData, setToast }) {
         </div>
       )}
 
-      {/* Serviços base */}
+      {/* Serviços base — grid 2 colunas */}
       <div className="card p-5">
         <h3 className="display h-card t-ink mb-1">Serviços — valores base</h3>
         <p className="text-sm t-soft mb-4">Estes valores alimentam o cálculo automático das cotações.</p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="preco-grid">
           <Field label="Preço por km rodado"><Money value={t.precoKm} onChange={(v) => upd({ precoKm: v })} disabled={disabled} /></Field>
           <Field label="Valor mínimo do frete"><Money value={t.valorMinimo} onChange={(v) => upd({ valorMinimo: v })} disabled={disabled} /></Field>
           <Field label="Ajudante — por hora"><Money value={t.ajudanteHora} onChange={(v) => upd({ ajudanteHora: v })} disabled={disabled} /></Field>
           <Field label="Ajudante — diária"><Money value={t.ajudanteDiaria} onChange={(v) => upd({ ajudanteDiaria: v })} disabled={disabled} /></Field>
-          <Field label="Içamento (por içamento)"><Money value={t.icamento} onChange={(v) => upd({ icamento: v })} disabled={disabled} /></Field>
-          <Field label="Hora parada / espera"><Money value={t.horaParada} onChange={(v) => upd({ horaParada: v })} disabled={disabled} /></Field>
-          <Field label="Desmontagem (por peça)"><Money value={t.desmontagemPeca} onChange={(v) => upd({ desmontagemPeca: v })} disabled={disabled} /></Field>
           <Field label="Montagem (por peça)"><Money value={t.montagemPeca} onChange={(v) => upd({ montagemPeca: v })} disabled={disabled} /></Field>
+          <Field label="Desmontagem (por peça)"><Money value={t.desmontagemPeca} onChange={(v) => upd({ desmontagemPeca: v })} disabled={disabled} /></Field>
           <Field label="Embalagem de móvel (por peça)"><Money value={t.embalagemMovelPeca} onChange={(v) => upd({ embalagemMovelPeca: v })} disabled={disabled} /></Field>
           <Field label="Embalagem de miudezas (por caixa)"><Money value={t.embalagemMiudezaCaixa} onChange={(v) => upd({ embalagemMiudezaCaixa: v })} disabled={disabled} /></Field>
+          <Field label="Içamento (por içamento)"><Money value={t.icamento} onChange={(v) => upd({ icamento: v })} disabled={disabled} /></Field>
+          <Field label="Hora parada / espera"><Money value={t.horaParada} onChange={(v) => upd({ horaParada: v })} disabled={disabled} /></Field>
           <Field label="Margem de lucro sugerida (%)">
             <input type="number" step="1" min="0" className="inp mono" value={t.margemLucro} disabled={disabled} onChange={(e) => upd({ margemLucro: parseFloat(e.target.value) || 0 })} />
           </Field>
@@ -4945,15 +5248,16 @@ function TabelaPrecos({ data, setData, setToast }) {
         </div>
       </div>
 
-      {/* Materiais */}
+      {/* Materiais — grid de cards */}
       <div className="card p-5">
         <h3 className="display h-card t-ink mb-1">Materiais — preço unitário</h3>
         <p className="text-sm t-soft mb-4">Preço de cada material usado nas embalagens e proteção.</p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="mat-grid">
           {Object.keys(MATERIAIS_LABEL).map(k => (
-            <Field key={k} label={MATERIAIS_LABEL[k]}>
+            <div key={k} className="mat-card">
+              <div className="mat-card-nome">{MATERIAIS_LABEL[k]}</div>
               <Money value={t.materiais[k]} onChange={(v) => updMat({ [k]: v })} disabled={disabled} />
-            </Field>
+            </div>
           ))}
         </div>
       </div>
