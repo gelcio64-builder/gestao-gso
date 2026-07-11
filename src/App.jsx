@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Area, AreaChart, LineChart, Line, PieChart, Pie, Cell
+  ResponsiveContainer, Area, AreaChart, LineChart, Line, PieChart, Pie, Cell, ComposedChart
 } from 'recharts';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { AuthGate } from './auth/AuthGate';
@@ -1028,15 +1028,11 @@ function FinanceiroEmpresa({ data, setData }) {
   const [periodo, setPeriodo] = useState('mes');
   const [expandTx, setExpandTx] = useState(false);
   const [delTarget, setDelTarget] = useState(null);
+  const [saudeOpen, setSaudeOpen] = useState(false);
   const [toast, setToast] = useState('');
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2500); return () => clearTimeout(t); }, [toast]);
 
   const inRange = (s, a, b) => { const d = new Date(s); return d >= a && d <= b; };
-
-  const sparks = useMemo(() => {
-    const s = reportSeries(finEmpresa.filter(x => effStatus(x) !== 'cancelado'), periodo);
-    return { receita: s.map(b => b.receita), lucro: s.map(b => b.lucro), custo: s.map(b => b.custo) };
-  }, [finEmpresa, periodo]);
 
   const m = useMemo(() => {
     const { start, end, prevStart, prevEnd } = periodRange(periodo);
@@ -1074,6 +1070,87 @@ function FinanceiroEmpresa({ data, setData }) {
     )));
     return { saldo, aReceber, aPagar, despMes, recorrente };
   }, [finEmpresa, linhas]);
+
+  // Saúde Financeira: nota 0-100 derivada de indicadores que já calculamos.
+  // Não altera nenhum cálculo existente — só combina os números pra dar um panorama.
+  const saude = useMemo(() => {
+    let nota = 50; // base neutra
+    const fatores = [];
+
+    // 1) Caixa positivo (peso alto)
+    if (resumo.saldo > 0) { nota += 15; fatores.push({ ok: true, txt: 'Caixa positivo' }); }
+    else { nota -= 20; fatores.push({ ok: false, txt: 'Caixa negativo' }); }
+
+    // 2) Margem de lucro do período
+    if (m.margem >= 20) { nota += 15; fatores.push({ ok: true, txt: `Margem saudável (${m.margem.toFixed(0)}%)` }); }
+    else if (m.margem >= 8) { nota += 7; fatores.push({ ok: true, txt: `Margem razoável (${m.margem.toFixed(0)}%)` }); }
+    else if (m.margem >= 0) { fatores.push({ ok: false, txt: `Margem baixa (${m.margem.toFixed(0)}%)` }); }
+    else { nota -= 15; fatores.push({ ok: false, txt: 'Operando no prejuízo' }); }
+
+    // 3) Contas a pagar vs a receber
+    if (resumo.aReceber >= resumo.aPagar) { nota += 10; fatores.push({ ok: true, txt: 'A receber cobre o a pagar' }); }
+    else { nota -= 10; fatores.push({ ok: false, txt: 'A pagar maior que a receber' }); }
+
+    // 4) Contas vencidas (peso alto — sinal de aperto)
+    const vencidas = finEmpresa.filter(x => effStatus(x) === 'vencido');
+    const totalVencido = vencidas.reduce((a, b) => a + b.valor, 0);
+    if (vencidas.length === 0) { nota += 10; fatores.push({ ok: true, txt: 'Nenhuma conta vencida' }); }
+    else { nota -= Math.min(20, vencidas.length * 5); fatores.push({ ok: false, txt: `${vencidas.length} conta(s) vencida(s)` }); }
+
+    // 5) Receita recorrente (previsibilidade)
+    if (resumo.recorrente > 0) { nota += 5; fatores.push({ ok: true, txt: 'Tem receita recorrente' }); }
+
+    nota = Math.max(0, Math.min(100, Math.round(nota)));
+
+    let nivel, cor;
+    if (nota >= 80) { nivel = 'Excelente'; cor = '#16A34A'; }
+    else if (nota >= 60) { nivel = 'Boa'; cor = '#0EA5E9'; }
+    else if (nota >= 40) { nivel = 'Atenção'; cor = '#D97706'; }
+    else { nivel = 'Crítica'; cor = '#DC2626'; }
+
+    // Sugestões automáticas com base nos fatores negativos
+    const sugestoes = [];
+    if (resumo.saldo <= 0) sugestoes.push('Priorize entradas: cobre os títulos a receber em aberto.');
+    if (m.margem < 8) sugestoes.push('Margem apertada — revise custos ou reajuste preços.');
+    if (totalVencido > 0) sugestoes.push(`Regularize ${fmtBRL(totalVencido)} em contas vencidas.`);
+    if (resumo.aPagar > resumo.aReceber) sugestoes.push('Renegocie prazos de pagamento para aliviar o caixa.');
+    if (sugestoes.length === 0) sugestoes.push('Continue assim! Mantenha o controle de vencimentos em dia.');
+
+    return { nota, nivel, cor, fatores, sugestoes, totalVencido, vencidas: vencidas.length };
+  }, [resumo, m, finEmpresa]);
+
+  // Série de fluxo de caixa (reaproveita reportSeries) + saldo acumulado
+  const fluxo = useMemo(() => {
+    const serie = reportSeries(finEmpresa.filter(x => effStatus(x) !== 'cancelado'), periodo);
+    let acumulado = 0;
+    return serie.map(b => {
+      acumulado += b.lucro;
+      return { label: b.label, entradas: b.receita, saidas: b.custo, saldo: acumulado };
+    });
+  }, [finEmpresa, periodo]);
+
+  // Despesas por categoria (rosca) — reaproveita groupByCat
+  const despCategorias = useMemo(() => {
+    const { start, end } = periodRange(periodo);
+    const saidas = finEmpresa.filter(x => x.tipo === 'saida' && effStatus(x) !== 'cancelado' && inRange(x.data, start, end));
+    const grp = groupByCat(saidas);
+    const total = grp.reduce((a, b) => a + b.valor, 0);
+    const top = grp.slice(0, 6);
+    const outros = grp.slice(6).reduce((a, b) => a + b.valor, 0);
+    const arr = top.map((c, i) => ({ nome: c.nome, valor: c.valor, pct: total ? Math.round(c.valor / total * 100) : 0, cor: CAT_DONUT_CORES[i % CAT_DONUT_CORES.length] }));
+    if (outros > 0) arr.push({ nome: 'Outros', valor: outros, pct: total ? Math.round(outros / total * 100) : 0, cor: '#9AA1AC' });
+    return { arr, total };
+  }, [finEmpresa, periodo]);
+
+  const [catSel, setCatSel] = useState(null); // categoria clicada pra ver lançamentos
+
+  // Próximos vencimentos: contas em aberto (pendente/vencido) ordenadas por data
+  const vencimentos = useMemo(() => {
+    return finEmpresa
+      .filter(x => { const s = effStatus(x); return s === 'pendente' || s === 'vencido'; })
+      .sort((a, b) => (a.data || '').localeCompare(b.data || ''))
+      .slice(0, 6);
+  }, [finEmpresa]);
 
   const filtered = useMemo(() => {
     const { start, end } = periodRange(periodo);
@@ -1134,11 +1211,149 @@ function FinanceiroEmpresa({ data, setData }) {
         {PERIODOS.map(p => <button key={p.k} onClick={() => setPeriodo(p.k)} className={`period-pill ${periodo === p.k ? 'on' : ''}`}>{p.label}</button>)}
       </div>
 
-      {/* Cards premium */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
-        <FinStatCard accent="green" icon={TrendingUp} title="Receita Bruta" value={fmtBRL(m.receita)} deltaPct={m.gRec} sub={`${m.gRec >= 0 ? '+' : ''}${m.gRec.toFixed(0)}% vs. período anterior`} spark={sparks.receita} sparkColor="#10A37F" />
-        <FinStatCard accent="blue" icon={Activity} title="Lucro Líquido" value={fmtBRL(m.lucro)} sub={`Margem de ${m.margem.toFixed(0)}%`} spark={sparks.lucro} sparkColor="#1D4ED8" />
-        <FinStatCard accent="red" icon={TrendingDown} title="Custos" value={fmtBRL(m.custo)} deltaPct={m.gCusto} sub={m.topCat ? `Maior: ${m.topCat.nome} · ${m.topCat.share.toFixed(0)}%` : 'Sem custos no período'} spark={sparks.custo} sparkColor="#E06A85" />
+      {/* Cards principais premium + Saúde Financeira */}
+      <div className="fe-cards-grid">
+        <div className="fe-card fade-in">
+          <div className="fe-card-ico" style={{ background: 'var(--color-primary)', opacity: .92 }}><Wallet size={17} /></div>
+          <div className="fe-card-lbl">Saldo em caixa</div>
+          <div className={`fe-card-val mono ${resumo.saldo >= 0 ? '' : 't-red'}`}>{fmtBRL(resumo.saldo)}</div>
+          <div className="fe-card-sub">Entradas − saídas pagas</div>
+        </div>
+        <div className="fe-card fade-in">
+          <div className="fe-card-ico" style={{ background: '#16A34A' }}><ArrowDownRight size={17} /></div>
+          <div className="fe-card-lbl">A receber</div>
+          <div className="fe-card-val mono t-green">{fmtBRL(resumo.aReceber)}</div>
+          <div className="fe-card-sub">Títulos em aberto</div>
+        </div>
+        <div className="fe-card fade-in">
+          <div className="fe-card-ico" style={{ background: '#DC2626' }}><ArrowUpRight size={17} /></div>
+          <div className="fe-card-lbl">A pagar</div>
+          <div className="fe-card-val mono t-red">{fmtBRL(resumo.aPagar)}</div>
+          <div className="fe-card-sub">Contas em aberto</div>
+        </div>
+        <div className="fe-card fade-in">
+          <div className="fe-card-ico" style={{ background: 'var(--color-accent)' }}><Activity size={17} /></div>
+          <div className="fe-card-lbl">Lucro do período</div>
+          <div className={`fe-card-val mono ${m.lucro >= 0 ? '' : 't-red'}`}>{fmtBRL(m.lucro)}</div>
+          <div className="fe-card-sub">Margem: {m.margem.toFixed(0)}%</div>
+        </div>
+        <div className="fe-card fade-in">
+          <div className="fe-card-ico" style={{ background: '#0EA5E9' }}><TrendingUp size={17} /></div>
+          <div className="fe-card-lbl">Receita recorrente</div>
+          <div className="fe-card-val mono t-green">{fmtBRL(resumo.recorrente)}</div>
+          <div className="fe-card-sub">Prevista no mês</div>
+        </div>
+
+        {/* Card de Saúde Financeira */}
+        <div className="fe-saude fade-in">
+          <div className="fe-saude-head">
+            <Sparkles size={13} style={{ color: saude.cor }} />
+            <span className="fe-saude-titulo">Saúde financeira</span>
+          </div>
+          <div className="fe-saude-body">
+            <div className="fe-saude-ring" style={{ '--pct': `${saude.nota}%`, '--cor': saude.cor }}>
+              <div className="fe-saude-nota">
+                <span className="mono">{saude.nota}</span>
+                <small>/100</small>
+              </div>
+            </div>
+            <div className="fe-saude-nivel" style={{ color: saude.cor }}>{saude.nivel}</div>
+          </div>
+          <button className="fe-saude-btn" onClick={() => setSaudeOpen(true)}>Ver detalhes <ChevronRight size={13} /></button>
+        </div>
+      </div>
+
+      {/* Fluxo de caixa + Despesas por categoria */}
+      <div className="fe-mid-grid">
+        <div className="card p-4 sm:p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="display h-card t-ink">Fluxo de caixa</h3>
+            <span className="text-xs t-mute">entradas · saídas · saldo acumulado</span>
+          </div>
+          <div style={{ height: 260 }}>
+            <ResponsiveContainer>
+              <ComposedChart data={fluxo} margin={{ top: 6, right: 4, left: -18, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F3" vertical={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
+                <Tooltip formatter={(v) => fmtBRL(v)} contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 12 }} />
+                <Bar dataKey="entradas" name="Entradas" fill="#16A34A" radius={[4, 4, 0, 0]} maxBarSize={20} />
+                <Bar dataKey="saidas" name="Saídas" fill="#DC2626" radius={[4, 4, 0, 0]} maxBarSize={20} />
+                <Line type="monotone" dataKey="saldo" name="Saldo acumulado" stroke="var(--color-primary)" strokeWidth={2.5} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="card p-4 sm:p-5">
+          <h3 className="display h-card t-ink mb-3">Despesas por categoria</h3>
+          {despCategorias.arr.length === 0 ? (
+            <EmptyState icon={Coins} title="Sem despesas no período." />
+          ) : (
+            <div className="fe-donut-wrap">
+              <div className="fe-donut">
+                <ResponsiveContainer>
+                  <PieChart>
+                    <Pie data={despCategorias.arr} dataKey="valor" nameKey="nome" cx="50%" cy="50%" innerRadius={52} outerRadius={78} paddingAngle={2} stroke="none">
+                      {despCategorias.arr.map((c, i) => <Cell key={i} fill={c.cor} style={{ cursor: 'pointer' }} onClick={() => setCatSel(c.nome)} />)}
+                    </Pie>
+                    <Tooltip formatter={(v) => fmtBRL(v)} contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 12 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="fe-donut-center">
+                  <span className="text-xs t-soft">Total</span>
+                  <span className="mono font-bold t-ink">{fmtBRL(despCategorias.total)}</span>
+                </div>
+              </div>
+              <div className="fe-donut-legend">
+                {despCategorias.arr.map((c, i) => (
+                  <button key={i} className="fe-leg-item" onClick={() => setCatSel(c.nome)}>
+                    <span className="fe-leg-dot" style={{ background: c.cor }} />
+                    <span className="fe-leg-nome truncate">{c.nome}</span>
+                    <span className="fe-leg-pct mono">{c.pct}%</span>
+                    <span className="fe-leg-val mono">{fmtBRL(c.valor)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Próximos vencimentos */}
+      <div className="card p-4 sm:p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="display h-card t-ink">Próximos vencimentos</h3>
+          <button className="fe-link-btn" onClick={() => { setFiltroTipo('todos'); setExpandTx(true); }}>Ver todos</button>
+        </div>
+        {vencimentos.length === 0 ? (
+          <EmptyState icon={Check} title="Nenhuma conta em aberto. Tudo em dia!" />
+        ) : (
+          <div className="fe-venc-list">
+            {vencimentos.map(v => {
+              const isE = v.tipo === 'entrada';
+              const st = effStatus(v);
+              const venc = st === 'vencido';
+              const d = new Date(v.data + 'T00:00:00');
+              return (
+                <div key={v.id} className="fe-venc-row">
+                  <div className="fe-venc-data">
+                    <span className="fe-venc-dia mono">{String(d.getDate()).padStart(2, '0')}</span>
+                    <span className="fe-venc-mes">{MONTHS_PT[d.getMonth()]?.slice(0, 3)}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium t-ink truncate">{v.descricao}</div>
+                    <div className="text-xs t-soft">{v.categoria}{v.recorrente ? ' · recorrente' : ''}</div>
+                  </div>
+                  <div className="text-right" style={{ flexShrink: 0 }}>
+                    <div className={`mono text-sm font-semibold ${isE ? 't-green' : 't-red'}`}>{isE ? '+ ' : '− '}{fmtBRL(v.valor)}</div>
+                    <span className={`fe-venc-badge ${venc ? 'venc' : 'pend'}`}>{venc ? 'Vencido' : 'Pendente'}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Resumo inteligente */}
@@ -1262,6 +1477,79 @@ function FinanceiroEmpresa({ data, setData }) {
         )}
       </div>
 
+      {/* Lançamentos de uma categoria (ao clicar na rosca) */}
+      <Modal open={!!catSel} onClose={() => setCatSel(null)} title={catSel ? `Despesas · ${catSel}` : ''} wide>
+        {catSel && (() => {
+          const { start, end } = periodRange(periodo);
+          const itens = finEmpresa
+            .filter(x => x.tipo === 'saida' && x.categoria === catSel && effStatus(x) !== 'cancelado' && inRange(x.data, start, end))
+            .sort((a, b) => (b.data || '').localeCompare(a.data || ''));
+          const total = itens.reduce((a, b) => a + b.valor, 0);
+          return (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm t-soft">{itens.length} lançamento(s)</span>
+                <span className="mono font-bold t-red">{fmtBRL(total)}</span>
+              </div>
+              <div className="space-y-1.5" style={{ maxHeight: 380, overflowY: 'auto' }}>
+                {itens.map(x => (
+                  <div key={x.id} className="fe-cat-item">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium t-ink truncate">{x.descricao}</div>
+                      <div className="text-xs t-soft">{fmtDate(x.data)} · {effStatus(x)}</div>
+                    </div>
+                    <span className="mono text-sm font-semibold t-red" style={{ flexShrink: 0 }}>− {fmtBRL(x.valor)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* Painel de detalhes da Saúde Financeira */}
+      <Modal open={saudeOpen} onClose={() => setSaudeOpen(false)} title="Saúde financeira" wide>
+        <div className="space-y-4">
+          <div className="fe-saude-detail-top">
+            <div className="fe-saude-ring fe-saude-ring-lg" style={{ '--pct': `${saude.nota}%`, '--cor': saude.cor }}>
+              <div className="fe-saude-nota"><span className="mono">{saude.nota}</span><small>/100</small></div>
+            </div>
+            <div>
+              <div className="text-lg font-bold" style={{ color: saude.cor }}>{saude.nivel}</div>
+              <p className="text-sm t-soft mt-1" style={{ maxWidth: 320 }}>Nota calculada a partir de caixa, margem, contas em aberto, vencimentos e recorrência.</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="metric-box"><div className="text-xs t-soft">Margem</div><div className="text-sm font-semibold t-ink mono">{m.margem.toFixed(1)}%</div></div>
+            <div className="metric-box"><div className="text-xs t-soft">Lucro</div><div className={`text-sm font-semibold mono ${m.lucro >= 0 ? 't-green' : 't-red'}`}>{fmtBRL(m.lucro)}</div></div>
+            <div className="metric-box"><div className="text-xs t-soft">Caixa</div><div className={`text-sm font-semibold mono ${resumo.saldo >= 0 ? 't-ink' : 't-red'}`}>{fmtBRL(resumo.saldo)}</div></div>
+            <div className="metric-box"><div className="text-xs t-soft">Vencidas</div><div className={`text-sm font-semibold mono ${saude.vencidas > 0 ? 't-red' : 't-ink'}`}>{saude.vencidas}</div></div>
+          </div>
+
+          <div>
+            <div className="label mb-2">O que está pesando na nota</div>
+            <div className="space-y-1.5">
+              {saude.fatores.map((f, i) => (
+                <div key={i} className="fe-fator">
+                  <span className={`fe-fator-ico ${f.ok ? 'ok' : 'bad'}`}>{f.ok ? <Check size={12} /> : <X size={12} />}</span>
+                  <span className="text-sm t-ink">{f.txt}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="fe-sugestoes">
+            <div className="label mb-2" style={{ color: 'var(--color-primary)' }}>Sugestões</div>
+            <ul className="space-y-1.5">
+              {saude.sugestoes.map((s, i) => (
+                <li key={i} className="text-sm t-soft flex gap-2"><Lightbulb size={14} style={{ color: '#D97706', flexShrink: 0, marginTop: 2 }} /> {s}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </Modal>
+
       <Modal open={!!delTarget} onClose={() => setDelTarget(null)} title="Excluir lançamento">
         {delTarget && (
           <div className="space-y-4">
@@ -1360,6 +1648,7 @@ const CAT_FIN_PESSOAL = {
   saida: ['Moradia', 'Alimentação', 'Transporte', 'Cartão de Crédito', 'Empréstimos', 'Dívidas', 'Lazer', 'Saúde', 'Educação', 'Outros'],
 };
 const CAT_DIVIDA = ['Cartão de Crédito', 'Empréstimos', 'Dívidas'];
+const CAT_DONUT_CORES = ['#2563EB', '#16A34A', '#F59E0B', '#9AA1AC', '#7C3AED', '#EC4899'];
 const CAT_COLORS_PESSOAL = {
   'Moradia': '#1D4ED8', 'Alimentação': '#087F5B', 'Transporte': '#D97706', 'Cartão de Crédito': '#B4234B',
   'Empréstimos': '#7C3AED', 'Dívidas': '#BE123C', 'Lazer': '#0891B2', 'Saúde': '#DB2777', 'Educação': '#4F46E5', 'Outros': '#6B7280',
@@ -3452,7 +3741,7 @@ function AppInner() {
         .mud-tabs{ display:flex; gap:4px; background:#EDEFF2; padding:5px; border-radius:14px; flex-wrap:wrap; max-width:640px; }
         .mud-tab{ flex:1; min-width:130px; padding:11px 16px; border-radius:10px; border:0; background:transparent; color:#5B6472; font-family:inherit; font-size:13.5px; font-weight:600; cursor:pointer; transition:all .18s; }
         .mud-tab:hover{ color:#0B1324; background:rgba(255,255,255,.5); }
-        .mud-tab.on{ background:#0B1533; color:#fff; box-shadow:0 4px 14px rgba(11,21,51,.28); }
+        .mud-tab.on{ background:var(--color-primary); color:#fff; box-shadow:0 4px 14px rgba(11,21,51,.28); }
         .mud-money{ position:relative; }
         .mud-money-cur{ position:absolute; left:12px; top:50%; transform:translateY(-50%); font-size:12.5px; color:#9CA3AF; font-weight:600; pointer-events:none; z-index:1; }
         .mud-escada-grid{ display:grid; grid-template-columns:1.4fr 1fr 1fr 1fr; gap:10px; align-items:center; }
@@ -3461,7 +3750,7 @@ function AppInner() {
         @media(max-width:640px){
           .mud-escada-grid{ grid-template-columns:1fr 1fr; }
           .mud-escada-head:first-child{ display:none; }
-          .mud-escada-lbl{ grid-column:1 / -1; margin-top:6px; font-weight:600; color:#0B1533; }
+          .mud-escada-lbl{ grid-column:1 / -1; margin-top:6px; font-weight:600; color:var(--color-primary); }
         }
         .mud-save-bar{ position:sticky; bottom:0; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; background:rgba(255,255,255,.92); backdrop-filter:blur(8px); border:1px solid #EFF0F2; border-radius:12px; box-shadow:0 -4px 16px rgba(11,19,36,.06); }
         /* botão primário do módulo mudança usa bordô */
@@ -3472,24 +3761,24 @@ function AppInner() {
         @media(max-width:900px){ .cot-wrap{ grid-template-columns:1fr; } }
         .cot-assistente{ margin-bottom:22px; }
         .cot-assistente-head{ display:flex; align-items:center; gap:11px; margin-bottom:18px; }
-        .cot-assistente-ico{ width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,#0B1533,#25376b); color:#fff; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .cot-assistente-ico{ width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--color-primary),var(--color-secondary)); color:#fff; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
         .cot-assistente-titulo{ font-size:16px; font-weight:700; color:#0B1324; letter-spacing:-.01em; }
         .cot-assistente-sub{ font-size:12px; color:#9CA3AF; margin-top:1px; }
         .cot-stepper{ display:flex; align-items:flex-start; margin-bottom:20px; }
         .cot-step-wrap{ display:flex; flex-direction:column; align-items:center; gap:6px; flex-shrink:0; }
         .cot-step{ width:32px; height:32px; border-radius:99px; border:2px solid #E5E7EB; background:#fff; color:#9CA3AF; font-family:inherit; font-weight:700; font-size:13px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; transition:all .15s; }
-        .cot-step.on{ border-color:#0B1533; background:#0B1533; color:#fff; }
-        .cot-step.done{ border-color:#0B1533; background:#fff; color:#0B1533; }
+        .cot-step.on{ border-color:var(--color-primary); background:var(--color-primary); color:#fff; }
+        .cot-step.done{ border-color:var(--color-primary); background:#fff; color:var(--color-primary); }
         .cot-step-lbl{ font-size:11px; font-weight:500; color:#9CA3AF; white-space:nowrap; transition:color .15s; }
-        .cot-step-lbl.on{ color:#0B1533; font-weight:600; }
+        .cot-step-lbl.on{ color:var(--color-primary); font-weight:600; }
         .cot-step-line{ flex:1; height:2px; background:#E5E7EB; margin:16px 4px 0; transition:background .15s; }
-        .cot-step-line.done{ background:#0B1533; }
+        .cot-step-line.done{ background:var(--color-primary); }
         .cot-seg{ display:flex; gap:6px; background:#F1F2F4; padding:4px; border-radius:10px; }
         .cot-seg-btn{ flex:1; padding:9px; border-radius:7px; border:0; background:transparent; color:#4B5563; font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; transition:all .15s; }
-        .cot-seg-btn.on{ background:#0B1533; color:#fff; }
+        .cot-seg-btn.on{ background:var(--color-primary); color:#fff; }
         .cot-andar-box{ background:#F9FAFB; border:1px solid #EFF0F2; border-radius:12px; padding:14px; }
         .cot-check{ display:flex; align-items:center; gap:8px; font-size:13px; color:#0B1324; cursor:pointer; }
-        .cot-check input{ width:16px; height:16px; accent-color:#0B1533; }
+        .cot-check input{ width:16px; height:16px; accent-color:var(--color-primary); }
         .cot-item-list{ display:flex; flex-direction:column; gap:2px; }
         .cot-item-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 11px; border-radius:9px; transition:background .1s; }
         .cot-item-row:hover{ background:#F9FAFB; }
@@ -3501,7 +3790,7 @@ function AppInner() {
         @media(max-width:640px){ .cot-svc-grid{ grid-template-columns:1fr; } }
         .cot-svc-item{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; background:#F9FAFB; border:1px solid #EFF0F2; border-radius:10px; }
         .cot-side{ position:sticky; top:16px; }
-        .cot-total-box{ background:linear-gradient(135deg,#0B1533,#25376b); border-radius:12px; padding:14px 16px; color:#fff; margin:12px 0; }
+        .cot-total-box{ background:linear-gradient(135deg,var(--color-primary),var(--color-secondary)); border-radius:12px; padding:14px 16px; color:#fff; margin:12px 0; }
         .cot-total{ font-size:26px; font-weight:700; letter-spacing:-.02em; line-height:1.1; margin:2px 0; }
         .cot-total-box .t-green{ color:#86EFAC !important; }
         .cot-resumo-list{ display:flex; flex-direction:column; gap:5px; max-height:280px; overflow-y:auto; padding:2px 0; }
@@ -3548,11 +3837,11 @@ function AppInner() {
         /* Barra de busca moderna */
         .orc-search-bar{ display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
         .orc-search-input{ flex:1; min-width:200px; display:flex; align-items:center; gap:9px; padding:0 14px; background:#F6F7F9; border:1px solid #E4E7EC; border-radius:11px; transition:border-color .15s, background .15s; }
-        .orc-search-input:focus-within{ background:#fff; border-color:#0B1533; box-shadow:0 0 0 3px rgba(11,21,51,.08); }
+        .orc-search-input:focus-within{ background:#fff; border-color:var(--color-primary); box-shadow:0 0 0 3px rgba(11,21,51,.08); }
         .orc-search-ico{ color:#9CA3AF; flex-shrink:0; }
         .orc-search-field{ flex:1; min-width:0; border:0; background:transparent; outline:none; padding:11px 0; font-family:inherit; font-size:14px; color:#0B1324; }
         .orc-search-status{ padding:11px 14px; border:1px solid #E4E7EC; border-radius:11px; background:#fff; font-family:inherit; font-size:13.5px; color:#374151; cursor:pointer; min-width:170px; }
-        .orc-search-status:focus{ outline:none; border-color:#0B1533; box-shadow:0 0 0 3px rgba(11,21,51,.08); }
+        .orc-search-status:focus{ outline:none; border-color:var(--color-primary); box-shadow:0 0 0 3px rgba(11,21,51,.08); }
         @media(max-width:520px){ .orc-search-status{ flex:1; } }
 
         .orc-grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:16px; }
@@ -3565,21 +3854,21 @@ function AppInner() {
         .orc-tipo{ font-size:11.5px; color:#9CA3AF; margin-top:1px; }
         .orc-rota{ display:flex; align-items:center; gap:7px; padding:7px 10px; background:#F8F9FB; border-radius:9px; }
         .orc-rota-cidade{ font-size:12.5px; font-weight:500; color:#374151; flex:1; min-width:0; }
-        .orc-rota-arrow{ color:#0B1533; flex-shrink:0; }
+        .orc-rota-arrow{ color:var(--color-primary); flex-shrink:0; }
         .orc-meta{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
         @media(max-width:420px){ .orc-meta{ grid-template-columns:repeat(2,1fr); } }
         .orc-meta-item{ display:flex; flex-direction:column; gap:1px; }
         .orc-meta-l{ font-size:10px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
         .orc-meta-v{ font-size:13px; color:#374151; font-weight:500; }
         .orc-card-actions{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:10px; border-top:1px solid #F4F5F7; }
-        .orc-advance{ display:inline-flex; align-items:center; gap:4px; padding:6px 11px; border-radius:8px; background:#0B1533; color:#fff; border:0; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; transition:transform .14s, box-shadow .14s; }
+        .orc-advance{ display:inline-flex; align-items:center; gap:4px; padding:6px 11px; border-radius:8px; background:var(--color-primary); color:#fff; border:0; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; transition:transform .14s, box-shadow .14s; }
         .orc-advance:hover{ transform:translateY(-1px); box-shadow:0 6px 14px rgba(11,21,51,.28); }
         .orc-advance:active{ transform:scale(.97); }
         .orc-icons{ display:flex; gap:2px; }
         .orc-card-clickable{ cursor:pointer; display:flex; flex-direction:column; gap:10px; border-radius:10px; margin:-4px; padding:4px; transition:background .14s; outline:none; }
         .orc-card-clickable:hover{ background:#FAFBFC; }
-        .orc-card-clickable:focus-visible{ box-shadow:0 0 0 2px #0B1533; }
-        .orc-ver-mais{ display:flex; align-items:center; justify-content:center; gap:5px; padding:7px; margin-top:2px; border-radius:8px; background:#EEF1F8; color:#0B1533; font-size:12px; font-weight:600; transition:background .14s; }
+        .orc-card-clickable:focus-visible{ box-shadow:0 0 0 2px var(--color-primary); }
+        .orc-ver-mais{ display:flex; align-items:center; justify-content:center; gap:5px; padding:7px; margin-top:2px; border-radius:8px; background:#EEF1F8; color:var(--color-primary); font-size:12px; font-weight:600; transition:background .14s; }
         .orc-card-clickable:hover .orc-ver-mais{ background:#DEE4F2; }
 
         /* Card de rota */
@@ -3596,13 +3885,13 @@ function AppInner() {
         .rota-metric{ background:#F8F9FB; border-radius:10px; padding:10px 12px; text-align:center; }
         .rota-metric-v{ font-size:16px; font-weight:700; color:#0B1324; }
         .rota-metric-l{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; margin-top:2px; }
-        .rota-btn{ display:flex; align-items:center; justify-content:center; gap:7px; width:100%; padding:11px; border-radius:10px; background:#0B1533; color:#fff; text-decoration:none; font-size:13px; font-weight:600; transition:background .15s, transform .14s; }
+        .rota-btn{ display:flex; align-items:center; justify-content:center; gap:7px; width:100%; padding:11px; border-radius:10px; background:var(--color-primary); color:#fff; text-decoration:none; font-size:13px; font-weight:600; transition:background .15s, transform .14s; }
         .rota-btn:hover{ background:#16224A; transform:translateY(-1px); }
         .rota-btn:active{ transform:scale(.99); }
 
         /* Detalhe da cotação premium */
         .det-wrap{ display:flex; flex-direction:column; gap:16px; }
-        .det-head{ background:linear-gradient(135deg,#0B1533,#16224A); border-radius:16px; padding:18px; color:#fff; }
+        .det-head{ background:linear-gradient(135deg,var(--color-primary),var(--color-primary-hover)); border-radius:16px; padding:18px; color:#fff; }
         .det-head-top{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:16px; }
         .det-cliente{ font-size:19px; font-weight:700; letter-spacing:-.01em; }
         .det-sub{ font-size:12.5px; color:rgba(255,255,255,.6); margin-top:2px; }
@@ -3742,6 +4031,68 @@ function AppInner() {
         .meta-ico{ width:26px; height:26px; border-radius:8px; background:#EFF4FF; color:#1D4ED8; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
         .btn-sm{ padding:6px 12px !important; font-size:13px !important; }
         .pf-tile{ padding:13px 14px !important; min-height:84px; display:flex; flex-direction:column; transition:transform .25s ease, box-shadow .25s ease; will-change:transform; }
+
+        /* Financeiro Empresa — cards principais premium */
+        .fe-cards-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:14px; }
+        @media(max-width:1200px){ .fe-cards-grid{ grid-template-columns:repeat(3,1fr); } }
+        @media(max-width:720px){ .fe-cards-grid{ grid-template-columns:repeat(2,1fr); } }
+        .fe-card{ background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; padding:15px; box-shadow:0 1px 3px rgba(11,19,36,.04); transition:transform .18s, box-shadow .18s; }
+        .fe-card:hover{ transform:translateY(-3px); box-shadow:0 12px 28px rgba(11,19,36,.09); }
+        .fe-card-ico{ width:34px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#fff; margin-bottom:11px; }
+        .fe-card-lbl{ font-size:11.5px; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:.03em; font-weight:600; }
+        .fe-card-val{ font-size:19px; font-weight:700; color:var(--color-text); letter-spacing:-.02em; margin-top:3px; line-height:1.1; }
+        .fe-card-sub{ font-size:11px; color:#9CA3AF; margin-top:3px; }
+
+        /* Card Saúde Financeira */
+        .fe-saude{ background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; padding:15px; box-shadow:0 1px 3px rgba(11,19,36,.04); display:flex; flex-direction:column; align-items:center; }
+        .fe-saude-head{ display:flex; align-items:center; gap:5px; align-self:flex-start; }
+        .fe-saude-titulo{ font-size:11px; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:.03em; font-weight:600; }
+        .fe-saude-body{ display:flex; flex-direction:column; align-items:center; margin:6px 0; }
+        .fe-saude-ring{ position:relative; width:74px; height:74px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:conic-gradient(var(--cor) var(--pct), #EFF1F4 0); }
+        .fe-saude-ring::before{ content:''; position:absolute; width:58px; height:58px; border-radius:50%; background:var(--color-surface); }
+        .fe-saude-nota{ position:relative; z-index:1; display:flex; align-items:baseline; gap:1px; }
+        .fe-saude-nota span{ font-size:22px; font-weight:700; color:var(--color-text); }
+        .fe-saude-nota small{ font-size:10px; color:#9CA3AF; }
+        .fe-saude-nivel{ font-size:13px; font-weight:700; margin-top:5px; }
+        .fe-saude-btn{ margin-top:8px; display:inline-flex; align-items:center; gap:3px; font-size:12px; font-weight:600; color:var(--color-primary); background:none; border:0; cursor:pointer; font-family:inherit; }
+        .fe-saude-btn:hover{ text-decoration:underline; }
+        .fe-saude-ring-lg{ width:96px; height:96px; flex-shrink:0; }
+        .fe-saude-ring-lg::before{ width:76px; height:76px; }
+        .fe-saude-ring-lg .fe-saude-nota span{ font-size:28px; }
+        .fe-saude-detail-top{ display:flex; align-items:center; gap:18px; }
+        .fe-fator{ display:flex; align-items:center; gap:9px; }
+        .fe-fator-ico{ width:20px; height:20px; border-radius:6px; display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; }
+        .fe-fator-ico.ok{ background:#16A34A; }
+        .fe-fator-ico.bad{ background:#DC2626; }
+        .fe-sugestoes{ background:#F8FAFC; border:1px solid #EEF1F5; border-radius:12px; padding:14px; }
+
+        /* Fluxo + categorias grid */
+        .fe-mid-grid{ display:grid; grid-template-columns:1.5fr 1fr; gap:16px; }
+        @media(max-width:1000px){ .fe-mid-grid{ grid-template-columns:1fr; } }
+        /* Rosca de categorias */
+        .fe-donut-wrap{ display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+        .fe-donut{ position:relative; width:180px; height:180px; flex-shrink:0; margin:0 auto; }
+        .fe-donut-center{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; pointer-events:none; }
+        .fe-donut-legend{ flex:1; min-width:180px; display:flex; flex-direction:column; gap:4px; }
+        .fe-leg-item{ display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:5px 7px; border-radius:8px; background:none; border:0; cursor:pointer; font-family:inherit; text-align:left; transition:background .14s; }
+        .fe-leg-item:hover{ background:#F6F7F9; }
+        .fe-leg-dot{ width:9px; height:9px; border-radius:99px; flex-shrink:0; }
+        .fe-leg-nome{ font-size:12.5px; color:#374151; font-weight:500; }
+        .fe-leg-pct{ font-size:12px; color:#9CA3AF; }
+        .fe-leg-val{ font-size:12px; font-weight:600; color:#0B1324; }
+        /* Vencimentos */
+        .fe-venc-list{ display:flex; flex-direction:column; gap:2px; }
+        .fe-venc-row{ display:flex; align-items:center; gap:12px; padding:9px 6px; border-radius:9px; transition:background .12s; }
+        .fe-venc-row:hover{ background:#F9FAFB; }
+        .fe-venc-data{ width:42px; height:42px; border-radius:10px; background:#F1F3F5; display:flex; flex-direction:column; align-items:center; justify-content:center; flex-shrink:0; }
+        .fe-venc-dia{ font-size:15px; font-weight:700; color:#0B1324; line-height:1; }
+        .fe-venc-mes{ font-size:9.5px; color:#9CA3AF; text-transform:uppercase; }
+        .fe-venc-badge{ display:inline-block; margin-top:2px; padding:1px 7px; border-radius:99px; font-size:9.5px; font-weight:600; }
+        .fe-venc-badge.pend{ background:#FEF3C7; color:#B45309; }
+        .fe-venc-badge.venc{ background:#FEE2E2; color:#DC2626; }
+        .fe-link-btn{ font-size:12.5px; font-weight:600; color:var(--color-primary); background:none; border:0; cursor:pointer; font-family:inherit; }
+        .fe-link-btn:hover{ text-decoration:underline; }
+        .fe-cat-item{ display:flex; align-items:center; gap:12px; padding:9px 11px; border-radius:9px; background:#F9FAFB; }
         .pf-tile:hover{ transform:translateY(-4px); box-shadow:0 8px 16px rgba(11,19,36,.07),0 22px 50px rgba(11,19,36,.10); }
         .pf-tile:active{ transform:scale(.985); }
         .pf-tile-head{ display:flex; align-items:center; justify-content:space-between; gap:6px; min-height:18px; }
@@ -5173,7 +5524,7 @@ function DetalheCotacao({ cot, data, onMudarStatus }) {
 
       {/* Ações principais */}
       <div className="det-actions">
-        <button className="btn btn-primary" onClick={baixarPDF} disabled={gerando} style={{ background: '#0B1533' }}>
+        <button className="btn btn-primary" onClick={baixarPDF} disabled={gerando} style={{ background: 'var(--color-primary)' }}>
           {gerando ? 'Gerando…' : <><FileSignature size={15} /> Gerar PDF</>}
         </button>
         <button className="det-wpp" onClick={enviarWhatsApp}>
@@ -5371,7 +5722,7 @@ function TabelaPrecos({ data, setData, setToast }) {
 
       {/* Seção Serviços */}
       <div className="acc-card">
-        <AccHead secao="servicos" titulo="Serviços — valores base" sub="Km, ajudantes, montagem, embalagem…" icon={Package} cor="#0B1533" />
+        <AccHead secao="servicos" titulo="Serviços — valores base" sub="Km, ajudantes, montagem, embalagem…" icon={Package} cor="var(--color-primary)" />
         {aberta === 'servicos' && (
           <div className="acc-body">
             <div className="preco-grid">

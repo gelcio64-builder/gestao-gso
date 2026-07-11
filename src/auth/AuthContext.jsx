@@ -83,20 +83,36 @@ export function AuthProvider({ children }) {
 
   async function signup({ nome, email, senha, empresaNome, codigoEmpresa }) {
     try {
-      let companyId = (codigoEmpresa || '').trim();
-      if (companyId) {
-        const snap = await getDoc(doc(fdb, 'companies', companyId));
-        if (!snap.exists()) throw new Error('Código de empresa inválido.');
-      }
+      const codigo = (codigoEmpresa || '').trim();
+      const entrando = !!codigo;
+
+      // 1) Autentica PRIMEIRO — sem estar logado, nenhuma leitura/escrita passa nas regras.
       const cred = await createUserWithEmailAndPassword(auth, email, senha);
       await updateProfile(cred.user, { displayName: nome });
-      if (!companyId) {
+      const uid = cred.user.uid;
+
+      let companyId = codigo;
+
+      if (entrando) {
+        // 2) Entrando numa empresa existente via código de convite.
+        //    Adiciona o usuário à lista `members` da empresa. A regra
+        //    `joiningOrCreating()` libera o update porque o próprio uid
+        //    passa a constar em request.resource.data.members.
+        try {
+          await updateDoc(doc(fdb, 'companies', companyId), { members: arrayUnion(uid) });
+        } catch (joinErr) {
+          // Código inválido/inexistente: desfaz o usuário recém-criado pra não deixar órfão
+          try { await cred.user.delete(); } catch (_) {}
+          throw new Error('Código de convite inválido. Confira com o dono da empresa.');
+        }
+      } else {
+        // 2) Criando uma empresa nova (esse usuário vira dono).
         const newRef = doc(collection(fdb, 'companies'));
         companyId = newRef.id;
         await setDoc(newRef, {
           nome: empresaNome || 'Minha Empresa',
-          ownerUid: cred.user.uid,
-          members: [cred.user.uid],
+          ownerUid: uid,
+          members: [uid],
           createdAt: serverTimestamp(),
         });
         await setDoc(doc(fdb, 'companies', companyId, 'settings', 'main'), {
@@ -104,17 +120,17 @@ export function AuthProvider({ children }) {
           precoCombustivel: 5.89,
           consumoPadrao: 10,
         });
-      } else {
-        await updateDoc(doc(fdb, 'companies', companyId), { members: arrayUnion(cred.user.uid) });
       }
-      await setDoc(doc(fdb, 'users', cred.user.uid), {
+
+      // 3) Cria o perfil do usuário e o registro de membro.
+      await setDoc(doc(fdb, 'users', uid), {
         nome, email, companyId,
-        role: (codigoEmpresa || '').trim() ? 'member' : 'owner',
+        role: entrando ? 'member' : 'owner',
         createdAt: serverTimestamp(),
       });
-      await setDoc(doc(fdb, 'companies', companyId, 'members', cred.user.uid), {
+      await setDoc(doc(fdb, 'companies', companyId, 'members', uid), {
         nome, email,
-        role: (codigoEmpresa || '').trim() ? 'member' : 'owner',
+        role: entrando ? 'member' : 'owner',
         modulosPermitidos: null,
         joinedAt: serverTimestamp(),
       });
