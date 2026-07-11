@@ -7,7 +7,7 @@ import {
   Activity, Clock, Coins, Receipt, ChevronRight, ChevronDown, CircleAlert, Sun, Phone,
   Trophy, Flame, Lightbulb, Percent, Calendar,
   Home, ShoppingCart, CreditCard, Heart, GraduationCap, Target, PiggyBank, Gauge, Sparkles,
-  LogOut, Copy, Check, Building2, Camera, Package, Eye,
+  LogOut, Copy, Check, Building2, Camera, Package, Eye, Search,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -16,6 +16,7 @@ import {
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { AuthGate } from './auth/AuthGate';
 import { useFirestoreSync } from './data/useFirestoreSync';
+import { PALETTES, getPalette, applyPalette, DEFAULT_PALETTE_ID } from './theme/palettes';
 import { fdb } from './firebase';
 import { collection, doc as fsDoc, onSnapshot, updateDoc } from 'firebase/firestore';
 import { parseOFX, isLinhaSaldo } from './importers/ofx';
@@ -3266,6 +3267,11 @@ function AppInner() {
   const [logoutOpen, setLogoutOpen] = useState(false);
   const openLogout = () => setLogoutOpen(true);
 
+  // Aplica a paleta de cores da empresa assim que o config carrega (e quando muda).
+  useEffect(() => {
+    applyPalette(data.config?.paletteId || DEFAULT_PALETTE_ID);
+  }, [data.config?.paletteId]);
+
   // Guard: if user hit a route they can't see (via memory of last route or direct URL), send to dashboard
   useEffect(() => {
     if (isOwner || !modulosPermitidos) return;
@@ -3304,6 +3310,11 @@ function AppInner() {
   return (
     <div className="app-root">
       <style>{`
+        :root{
+          --color-primary:#0B1533; --color-primary-hover:#16224A; --color-secondary:#25376b;
+          --color-accent:#1D4ED8; --color-background:#F3F4F6; --color-surface:#FFFFFF;
+          --color-text:#0B1324; --color-text-muted:#6B7280; --color-primary-rgb:11,21,51;
+        }
         .app-root{ display:flex; min-height:100vh; background:#F3F4F6; font-family:'Geist',system-ui,-apple-system,sans-serif; color:#0B1324; }
         *{ -webkit-tap-highlight-color:transparent; box-sizing:border-box; }
 
@@ -3377,7 +3388,7 @@ function AppInner() {
         .seg-btn.on{ background:#fff; color:#0B1324; box-shadow:0 1px 2px rgba(0,0,0,.06); }
 
         /* ===== SIDEBAR ===== */
-        .sidebar{ position:fixed; top:0; left:0; height:100vh; width:270px; background:#0B1533; z-index:50; display:flex; flex-direction:column; transform:translateX(-100%); transition:transform .28s cubic-bezier(.4,0,.2,1); box-shadow:2px 0 28px rgba(0,0,0,.28); }
+        .sidebar{ position:fixed; top:0; left:0; height:100vh; width:270px; background:var(--color-primary); z-index:50; display:flex; flex-direction:column; transform:translateX(-100%); transition:transform .28s cubic-bezier(.4,0,.2,1); box-shadow:2px 0 28px rgba(0,0,0,.28); }
         .sidebar.open{ transform:translateX(0); }
         .sb-overlay{ position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.35); -webkit-backdrop-filter:blur(2px); backdrop-filter:blur(2px); }
         .sb-header{ padding:20px; border-bottom:1px solid rgba(255,255,255,.08); }
@@ -3391,7 +3402,7 @@ function AppInner() {
         .sb-nav{ flex:1; overflow-y:auto; padding:16px 12px; display:flex; flex-direction:column; gap:4px; }
         .sb-item{ display:flex; align-items:center; gap:12px; width:100%; padding:11px 12px; border-radius:11px; font-size:14px; color:#CBD5E1; transition:.15s; text-align:left; background:transparent; border:none; cursor:pointer; }
         .sb-item:hover{ background:rgba(255,255,255,.08); color:#fff; }
-        .sb-item.on{ background:#fff; color:#0B1324; font-weight:600; }
+        .sb-item.on{ background:#fff; color:var(--color-primary); font-weight:600; }
         .sb-foot{ padding:16px 20px; border-top:1px solid rgba(255,255,255,.08); color:#5B6781; font-size:11px; }
         @media(min-width:1024px){
           .sidebar{ position:sticky; transform:translateX(0); box-shadow:none; }
@@ -3438,10 +3449,10 @@ function AppInner() {
         .cfg-logo-remove:hover{ color:#8B1834; }
 
         /* Mudanças */
-        .mud-tabs{ display:flex; gap:6px; background:#F1F2F4; padding:4px; border-radius:12px; flex-wrap:wrap; }
-        .mud-tab{ flex:1; min-width:130px; padding:9px 14px; border-radius:9px; border:0; background:transparent; color:#4B5563; font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; transition:all .15s; }
-        .mud-tab:hover{ color:#0B1324; }
-        .mud-tab.on{ background:#fff; color:#7A1730; box-shadow:0 2px 8px rgba(11,19,36,.08); }
+        .mud-tabs{ display:flex; gap:4px; background:#EDEFF2; padding:5px; border-radius:14px; flex-wrap:wrap; max-width:640px; }
+        .mud-tab{ flex:1; min-width:130px; padding:11px 16px; border-radius:10px; border:0; background:transparent; color:#5B6472; font-family:inherit; font-size:13.5px; font-weight:600; cursor:pointer; transition:all .18s; }
+        .mud-tab:hover{ color:#0B1324; background:rgba(255,255,255,.5); }
+        .mud-tab.on{ background:#0B1533; color:#fff; box-shadow:0 4px 14px rgba(11,21,51,.28); }
         .mud-money{ position:relative; }
         .mud-money-cur{ position:absolute; left:12px; top:50%; transform:translateY(-50%); font-size:12.5px; color:#9CA3AF; font-weight:600; pointer-events:none; z-index:1; }
         .mud-escada-grid{ display:grid; grid-template-columns:1.4fr 1fr 1fr 1fr; gap:10px; align-items:center; }
@@ -3450,7 +3461,7 @@ function AppInner() {
         @media(max-width:640px){
           .mud-escada-grid{ grid-template-columns:1fr 1fr; }
           .mud-escada-head:first-child{ display:none; }
-          .mud-escada-lbl{ grid-column:1 / -1; margin-top:6px; font-weight:600; color:#7A1730; }
+          .mud-escada-lbl{ grid-column:1 / -1; margin-top:6px; font-weight:600; color:#0B1533; }
         }
         .mud-save-bar{ position:sticky; bottom:0; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; background:rgba(255,255,255,.92); backdrop-filter:blur(8px); border:1px solid #EFF0F2; border-radius:12px; box-shadow:0 -4px 16px rgba(11,19,36,.06); }
         /* botão primário do módulo mudança usa bordô */
@@ -3459,18 +3470,26 @@ function AppInner() {
         /* Cotação wizard */
         .cot-wrap{ display:grid; grid-template-columns:1fr 320px; gap:16px; align-items:start; }
         @media(max-width:900px){ .cot-wrap{ grid-template-columns:1fr; } }
-        .cot-stepper{ display:flex; align-items:center; margin-bottom:20px; }
+        .cot-assistente{ margin-bottom:22px; }
+        .cot-assistente-head{ display:flex; align-items:center; gap:11px; margin-bottom:18px; }
+        .cot-assistente-ico{ width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,#0B1533,#25376b); color:#fff; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .cot-assistente-titulo{ font-size:16px; font-weight:700; color:#0B1324; letter-spacing:-.01em; }
+        .cot-assistente-sub{ font-size:12px; color:#9CA3AF; margin-top:1px; }
+        .cot-stepper{ display:flex; align-items:flex-start; margin-bottom:20px; }
+        .cot-step-wrap{ display:flex; flex-direction:column; align-items:center; gap:6px; flex-shrink:0; }
         .cot-step{ width:32px; height:32px; border-radius:99px; border:2px solid #E5E7EB; background:#fff; color:#9CA3AF; font-family:inherit; font-weight:700; font-size:13px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; transition:all .15s; }
-        .cot-step.on{ border-color:#7A1730; background:#7A1730; color:#fff; }
-        .cot-step.done{ border-color:#7A1730; background:#fff; color:#7A1730; }
-        .cot-step-line{ flex:1; height:2px; background:#E5E7EB; margin:0 4px; transition:background .15s; }
-        .cot-step-line.done{ background:#7A1730; }
+        .cot-step.on{ border-color:#0B1533; background:#0B1533; color:#fff; }
+        .cot-step.done{ border-color:#0B1533; background:#fff; color:#0B1533; }
+        .cot-step-lbl{ font-size:11px; font-weight:500; color:#9CA3AF; white-space:nowrap; transition:color .15s; }
+        .cot-step-lbl.on{ color:#0B1533; font-weight:600; }
+        .cot-step-line{ flex:1; height:2px; background:#E5E7EB; margin:16px 4px 0; transition:background .15s; }
+        .cot-step-line.done{ background:#0B1533; }
         .cot-seg{ display:flex; gap:6px; background:#F1F2F4; padding:4px; border-radius:10px; }
         .cot-seg-btn{ flex:1; padding:9px; border-radius:7px; border:0; background:transparent; color:#4B5563; font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; transition:all .15s; }
-        .cot-seg-btn.on{ background:#7A1730; color:#fff; }
+        .cot-seg-btn.on{ background:#0B1533; color:#fff; }
         .cot-andar-box{ background:#F9FAFB; border:1px solid #EFF0F2; border-radius:12px; padding:14px; }
         .cot-check{ display:flex; align-items:center; gap:8px; font-size:13px; color:#0B1324; cursor:pointer; }
-        .cot-check input{ width:16px; height:16px; accent-color:#7A1730; }
+        .cot-check input{ width:16px; height:16px; accent-color:#0B1533; }
         .cot-item-list{ display:flex; flex-direction:column; gap:2px; }
         .cot-item-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 11px; border-radius:9px; transition:background .1s; }
         .cot-item-row:hover{ background:#F9FAFB; }
@@ -3482,7 +3501,7 @@ function AppInner() {
         @media(max-width:640px){ .cot-svc-grid{ grid-template-columns:1fr; } }
         .cot-svc-item{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; background:#F9FAFB; border:1px solid #EFF0F2; border-radius:10px; }
         .cot-side{ position:sticky; top:16px; }
-        .cot-total-box{ background:linear-gradient(135deg,#7A1730,#A32744); border-radius:12px; padding:14px 16px; color:#fff; margin:12px 0; }
+        .cot-total-box{ background:linear-gradient(135deg,#0B1533,#25376b); border-radius:12px; padding:14px 16px; color:#fff; margin:12px 0; }
         .cot-total{ font-size:26px; font-weight:700; letter-spacing:-.02em; line-height:1.1; margin:2px 0; }
         .cot-total-box .t-green{ color:#86EFAC !important; }
         .cot-resumo-list{ display:flex; flex-direction:column; gap:5px; max-height:280px; overflow-y:auto; padding:2px 0; }
@@ -3500,13 +3519,22 @@ function AppInner() {
         .mud-kpi-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
         @media(max-width:900px){ .mud-kpi-grid{ grid-template-columns:repeat(2,1fr); } }
         @media(max-width:480px){ .mud-kpi-grid{ grid-template-columns:repeat(2,1fr); gap:10px; } }
-        .mud-kpi{ background:#fff; border:1px solid #EFF0F2; border-radius:16px; padding:16px; position:relative; overflow:hidden; transition:transform .18s, box-shadow .18s; }
+        .mud-kpi{ background:#fff; border:1px solid #EFF0F2; border-radius:16px; padding:16px; position:relative; overflow:hidden; transition:transform .18s, box-shadow .18s, border-color .18s; text-align:left; font-family:inherit; cursor:pointer; display:block; width:100%; }
         .mud-kpi::before{ content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--kc,#1D4ED8); }
         .mud-kpi:hover{ transform:translateY(-3px); box-shadow:0 12px 28px rgba(11,19,36,.08); }
+        .mud-kpi:active{ transform:translateY(-1px) scale(.99); }
+        .mud-kpi.active{ border-color:var(--kc,#1D4ED8); box-shadow:0 0 0 2px var(--kc,#1D4ED8), 0 12px 28px rgba(11,19,36,.1); }
+        .mud-kpi.active::before{ width:5px; }
+        .mud-kpi.active .mud-kpi-sub{ color:var(--kc,#1D4ED8); font-weight:600; }
         .mud-kpi-ico{ width:38px; height:38px; border-radius:11px; display:flex; align-items:center; justify-content:center; margin-bottom:10px; }
         .mud-kpi-num{ font-size:26px; font-weight:700; letter-spacing:-.02em; color:#0B1324; line-height:1.05; }
         .mud-kpi-lbl{ font-size:12.5px; font-weight:600; color:#0B1324; margin-top:3px; }
         .mud-kpi-sub{ font-size:11px; color:#9CA3AF; margin-top:1px; }
+
+        /* Faixa de filtro ativo */
+        .orc-filtro-ativo{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 14px; margin-bottom:14px; background:#EEF2FF; border:1px solid #C7D2FE; border-radius:10px; font-size:13px; color:#1E3A8A; }
+        .orc-filtro-limpar{ display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:7px; background:#fff; border:1px solid #C7D2FE; color:#1E3A8A; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; transition:background .14s; }
+        .orc-filtro-limpar:hover{ background:#DBEAFE; }
 
         /* Status chip */
         .status-chip{ display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:99px; font-size:11px; font-weight:600; white-space:nowrap; }
@@ -3514,31 +3542,45 @@ function AppInner() {
         .status-dot{ width:6px; height:6px; border-radius:99px; flex-shrink:0; }
 
         /* Card de orçamento compacto */
-        .orc-grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }
+        /* Container central do módulo */
+        .mud-container{ max-width:1240px; margin:0 auto; }
+
+        /* Barra de busca moderna */
+        .orc-search-bar{ display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
+        .orc-search-input{ flex:1; min-width:200px; display:flex; align-items:center; gap:9px; padding:0 14px; background:#F6F7F9; border:1px solid #E4E7EC; border-radius:11px; transition:border-color .15s, background .15s; }
+        .orc-search-input:focus-within{ background:#fff; border-color:#0B1533; box-shadow:0 0 0 3px rgba(11,21,51,.08); }
+        .orc-search-ico{ color:#9CA3AF; flex-shrink:0; }
+        .orc-search-field{ flex:1; min-width:0; border:0; background:transparent; outline:none; padding:11px 0; font-family:inherit; font-size:14px; color:#0B1324; }
+        .orc-search-status{ padding:11px 14px; border:1px solid #E4E7EC; border-radius:11px; background:#fff; font-family:inherit; font-size:13.5px; color:#374151; cursor:pointer; min-width:170px; }
+        .orc-search-status:focus{ outline:none; border-color:#0B1533; box-shadow:0 0 0 3px rgba(11,21,51,.08); }
+        @media(max-width:520px){ .orc-search-status{ flex:1; } }
+
+        .orc-grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:16px; }
+        @media(min-width:1400px){ .orc-grid{ grid-template-columns:repeat(3,1fr); } }
         @media(max-width:760px){ .orc-grid{ grid-template-columns:1fr; } }
-        .orc-card{ background:#fff; border:1px solid #EFF0F2; border-radius:14px; padding:14px; display:flex; flex-direction:column; gap:10px; transition:transform .16s, box-shadow .16s, border-color .16s; }
+        .orc-card{ background:#fff; border:1px solid #E4E7EC; border-radius:16px; padding:16px; display:flex; flex-direction:column; gap:11px; box-shadow:0 1px 3px rgba(11,19,36,.04); transition:transform .16s, box-shadow .16s, border-color .16s; }
         .orc-card:hover{ transform:translateY(-2px); box-shadow:0 10px 26px rgba(11,19,36,.08); border-color:#E5E7EB; }
         .orc-card-top{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
         .orc-cliente{ font-size:14.5px; font-weight:700; color:#0B1324; }
         .orc-tipo{ font-size:11.5px; color:#9CA3AF; margin-top:1px; }
         .orc-rota{ display:flex; align-items:center; gap:7px; padding:7px 10px; background:#F8F9FB; border-radius:9px; }
         .orc-rota-cidade{ font-size:12.5px; font-weight:500; color:#374151; flex:1; min-width:0; }
-        .orc-rota-arrow{ color:#7A1730; flex-shrink:0; }
+        .orc-rota-arrow{ color:#0B1533; flex-shrink:0; }
         .orc-meta{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
         @media(max-width:420px){ .orc-meta{ grid-template-columns:repeat(2,1fr); } }
         .orc-meta-item{ display:flex; flex-direction:column; gap:1px; }
         .orc-meta-l{ font-size:10px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
         .orc-meta-v{ font-size:13px; color:#374151; font-weight:500; }
         .orc-card-actions{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:10px; border-top:1px solid #F4F5F7; }
-        .orc-advance{ display:inline-flex; align-items:center; gap:4px; padding:6px 11px; border-radius:8px; background:#7A1730; color:#fff; border:0; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; transition:transform .14s, box-shadow .14s; }
-        .orc-advance:hover{ transform:translateY(-1px); box-shadow:0 6px 14px rgba(122,23,48,.28); }
+        .orc-advance{ display:inline-flex; align-items:center; gap:4px; padding:6px 11px; border-radius:8px; background:#0B1533; color:#fff; border:0; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; transition:transform .14s, box-shadow .14s; }
+        .orc-advance:hover{ transform:translateY(-1px); box-shadow:0 6px 14px rgba(11,21,51,.28); }
         .orc-advance:active{ transform:scale(.97); }
         .orc-icons{ display:flex; gap:2px; }
         .orc-card-clickable{ cursor:pointer; display:flex; flex-direction:column; gap:10px; border-radius:10px; margin:-4px; padding:4px; transition:background .14s; outline:none; }
         .orc-card-clickable:hover{ background:#FAFBFC; }
-        .orc-card-clickable:focus-visible{ box-shadow:0 0 0 2px #7A1730; }
-        .orc-ver-mais{ display:flex; align-items:center; justify-content:center; gap:5px; padding:7px; margin-top:2px; border-radius:8px; background:#F8F1F3; color:#7A1730; font-size:12px; font-weight:600; transition:background .14s; }
-        .orc-card-clickable:hover .orc-ver-mais{ background:#F0DFE4; }
+        .orc-card-clickable:focus-visible{ box-shadow:0 0 0 2px #0B1533; }
+        .orc-ver-mais{ display:flex; align-items:center; justify-content:center; gap:5px; padding:7px; margin-top:2px; border-radius:8px; background:#EEF1F8; color:#0B1533; font-size:12px; font-weight:600; transition:background .14s; }
+        .orc-card-clickable:hover .orc-ver-mais{ background:#DEE4F2; }
 
         /* Card de rota */
         .rota-card{ background:#fff; border:1px solid #EFF0F2; border-radius:14px; padding:16px; }
@@ -3591,6 +3633,49 @@ function AppInner() {
         .mat-card{ background:#F8F9FB; border:1px solid #EFF0F2; border-radius:12px; padding:12px; transition:border-color .15s, box-shadow .15s; }
         .mat-card:hover{ border-color:#E0E3E8; box-shadow:0 4px 12px rgba(11,19,36,.05); }
         .mat-card-nome{ font-size:12.5px; font-weight:600; color:#374151; margin-bottom:8px; line-height:1.3; }
+
+        /* Accordion Tabela de Preços */
+        .acc-card{ background:#fff; border:1px solid #E4E7EC; border-radius:16px; overflow:hidden; box-shadow:0 1px 3px rgba(11,19,36,.04); }
+        .acc-head{ width:100%; display:flex; align-items:center; gap:13px; padding:16px 18px; background:transparent; border:0; cursor:pointer; font-family:inherit; text-align:left; transition:background .14s; }
+        .acc-head:hover{ background:#FAFBFC; }
+        .acc-head-ico{ width:40px; height:40px; border-radius:11px; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .acc-head-txt{ flex:1; min-width:0; }
+        .acc-head-titulo{ font-size:14.5px; font-weight:700; color:#0B1324; }
+        .acc-head-sub{ font-size:12px; color:#9CA3AF; margin-top:1px; }
+        .acc-head-chev{ color:#9CA3AF; flex-shrink:0; transition:transform .22s; }
+        .acc-head.open .acc-head-chev{ transform:rotate(180deg); }
+        .acc-body{ padding:4px 18px 20px; animation:accOpen .24s ease; }
+        @keyframes accOpen{ from{ opacity:0; transform:translateY(-6px); } to{ opacity:1; transform:none; } }
+
+        /* Aparência — seletor de paletas */
+        .pal-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+        @media(max-width:900px){ .pal-grid{ grid-template-columns:repeat(2,1fr); } }
+        @media(max-width:560px){ .pal-grid{ grid-template-columns:1fr; } }
+        .pal-card{ border:2px solid #E4E7EC; border-radius:14px; padding:14px; cursor:pointer; transition:border-color .16s, box-shadow .16s, transform .16s; background:#fff; outline:none; }
+        .pal-card:hover{ transform:translateY(-2px); box-shadow:0 10px 24px rgba(11,19,36,.08); }
+        .pal-card:focus-visible{ border-color:var(--color-primary); }
+        .pal-card.ativa{ border-color:var(--color-primary); box-shadow:0 0 0 3px rgba(var(--color-primary-rgb),.12); }
+        .pal-card.preview{ border-color:#CBD5E1; }
+        .pal-card.locked{ cursor:default; }
+        .pal-card.locked:hover{ transform:none; box-shadow:none; }
+        .pal-card-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:12px; }
+        .pal-nome{ font-size:14px; font-weight:700; color:#0B1324; }
+        .pal-desc{ font-size:11.5px; color:#9CA3AF; margin-top:1px; }
+        .pal-ativa-badge{ display:inline-flex; align-items:center; gap:3px; padding:3px 9px; border-radius:99px; background:var(--color-primary); color:#fff; font-size:10.5px; font-weight:600; white-space:nowrap; flex-shrink:0; }
+        .pal-dots{ display:flex; gap:7px; margin-bottom:12px; }
+        .pal-dot{ width:22px; height:22px; border-radius:99px; flex-shrink:0; }
+        .pal-preview{ display:flex; height:74px; border-radius:10px; overflow:hidden; border:1px solid #EFF0F2; }
+        .pal-preview-side{ width:30%; padding:9px 7px; display:flex; flex-direction:column; gap:5px; }
+        .pal-preview-side span{ height:6px; border-radius:99px; display:block; }
+        .pal-preview-side span:first-child{ width:100%; }
+        .pal-preview-side span:nth-child(2){ width:75%; }
+        .pal-preview-side span:nth-child(3){ width:60%; }
+        .pal-preview-body{ flex:1; padding:10px; display:flex; flex-direction:column; gap:7px; }
+        .pal-preview-btn{ height:14px; width:52px; border-radius:5px; }
+        .pal-preview-card{ flex:1; border-radius:6px; box-shadow:0 1px 3px rgba(0,0,0,.06); padding:7px; display:flex; flex-direction:column; gap:5px; justify-content:center; }
+        .pal-preview-card span{ height:5px; border-radius:99px; display:block; }
+        .pal-preview-card span:first-child{ width:40%; }
+        .pal-preview-card span:last-child{ width:70%; }
 
         /* Skeleton loading */
         @keyframes shimmer{ 0%{ background-position:-400px 0; } 100%{ background-position:400px 0; } }
@@ -4309,25 +4394,27 @@ function Mudancas({ data, setData }) {
   const irParaCotacao = (item = null) => { setEditItem(item); setAba('cotacao'); };
 
   return (
-    <div className="p-4 sm:p-6 space-y-4">
-      <div className="mud-tabs">
-        <button className={`mud-tab ${aba === 'tabela' ? 'on' : ''}`} onClick={() => setAba('tabela')}>Tabela de Preços</button>
-        <button className={`mud-tab ${aba === 'cotacao' ? 'on' : ''}`} onClick={() => { setEditItem(null); setAba('cotacao'); }}>Nova Cotação</button>
-        <button className={`mud-tab ${aba === 'servicos' ? 'on' : ''}`} onClick={() => setAba('servicos')}>Orçamentos & Serviços</button>
-      </div>
+    <div className="p-4 sm:p-6">
+      <div className="mud-container space-y-4">
+        <div className="mud-tabs">
+          <button className={`mud-tab ${aba === 'tabela' ? 'on' : ''}`} onClick={() => setAba('tabela')}>Tabela de Preços</button>
+          <button className={`mud-tab ${aba === 'cotacao' ? 'on' : ''}`} onClick={() => { setEditItem(null); setAba('cotacao'); }}>Nova Cotação</button>
+          <button className={`mud-tab ${aba === 'servicos' ? 'on' : ''}`} onClick={() => setAba('servicos')}>Orçamentos & Serviços</button>
+        </div>
 
-      {aba === 'tabela' && <TabelaPrecos data={data} setData={setData} setToast={setToast} />}
-      {aba === 'cotacao' && (
-        <NovaCotacao
-          key={editItem?.id || 'nova'}
-          data={data} setData={setData} setToast={setToast}
-          editItem={editItem}
-          onSalvou={() => { setEditItem(null); setAba('servicos'); }}
-        />
-      )}
-      {aba === 'servicos' && (
-        <ListaServicos data={data} setData={setData} setToast={setToast} onEditar={irParaCotacao} onNova={() => irParaCotacao(null)} />
-      )}
+        {aba === 'tabela' && <TabelaPrecos data={data} setData={setData} setToast={setToast} />}
+        {aba === 'cotacao' && (
+          <NovaCotacao
+            key={editItem?.id || 'nova'}
+            data={data} setData={setData} setToast={setToast}
+            editItem={editItem}
+            onSalvou={() => { setEditItem(null); setAba('servicos'); }}
+          />
+        )}
+        {aba === 'servicos' && (
+          <ListaServicos data={data} setData={setData} setToast={setToast} onEditar={irParaCotacao} onNova={() => irParaCotacao(null)} />
+        )}
+      </div>
       <Toast msg={toast} />
     </div>
   );
@@ -4500,16 +4587,29 @@ function NovaCotacao({ data, setData, setToast, onSalvou, editItem }) {
     onSalvou?.(registro);
   };
 
+  const STEP_LABELS = ['Rota', 'Itens', 'Serviços', 'Materiais'];
   const Stepper = () => (
-    <div className="cot-stepper">
-      {[1, 2, 3, 4].map(n => (
-        <React.Fragment key={n}>
-          <button className={`cot-step ${step === n ? 'on' : ''} ${step > n ? 'done' : ''}`} onClick={() => setStep(n)}>
-            {step > n ? <Check size={13} /> : n}
-          </button>
-          {n < 4 && <div className={`cot-step-line ${step > n ? 'done' : ''}`} />}
-        </React.Fragment>
-      ))}
+    <div className="cot-assistente">
+      <div className="cot-assistente-head">
+        <div className="cot-assistente-ico"><Sparkles size={15} /></div>
+        <div>
+          <div className="cot-assistente-titulo">Assistente de cotação</div>
+          <div className="cot-assistente-sub">Passo {step} de 4 · {STEP_LABELS[step - 1]}</div>
+        </div>
+      </div>
+      <div className="cot-stepper">
+        {[1, 2, 3, 4].map(n => (
+          <React.Fragment key={n}>
+            <div className="cot-step-wrap">
+              <button className={`cot-step ${step === n ? 'on' : ''} ${step > n ? 'done' : ''}`} onClick={() => setStep(n)}>
+                {step > n ? <Check size={13} /> : n}
+              </button>
+              <span className={`cot-step-lbl ${step === n ? 'on' : ''}`}>{STEP_LABELS[n - 1]}</span>
+            </div>
+            {n < 4 && <div className={`cot-step-line ${step > n ? 'done' : ''}`} />}
+          </React.Fragment>
+        ))}
+      </div>
     </div>
   );
 
@@ -4800,9 +4900,22 @@ function RotaCard({ cot, tabela }) {
 function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
   const { mudancas = [] } = data;
   const [filtroStatus, setFiltroStatus] = useState('all');
+  const [kpiFiltro, setKpiFiltro] = useState(null); // 'orcamentos' | 'agendados' | 'andamento' | 'receita' | null
   const [busca, setBusca] = useState('');
   const [delTarget, setDelTarget] = useState(null);
   const [detalhe, setDetalhe] = useState(null);
+
+  // Mapa de cada KPI para os status que ele representa
+  const KPI_GRUPOS = {
+    orcamentos: ['orcamento', 'aguardando'],
+    agendados: ['confirmado', 'agendado'],
+    andamento: ['andamento'],
+    receita: ['concluido'],
+  };
+  const toggleKpi = (chave) => {
+    setKpiFiltro(prev => prev === chave ? null : chave);
+    setFiltroStatus('all'); // KPI e dropdown são mutuamente exclusivos
+  };
 
   const kpis = useMemo(() => {
     const orcamentos = mudancas.filter(m => m.status === 'orcamento' || m.status === 'aguardando').length;
@@ -4817,7 +4930,17 @@ function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
 
   const filtered = useMemo(() => {
     let arr = mudancas;
-    if (filtroStatus !== 'all') arr = arr.filter(m => m.status === filtroStatus);
+    // filtro por KPI (grupo de status) tem prioridade
+    if (kpiFiltro && KPI_GRUPOS[kpiFiltro]) {
+      const grupo = KPI_GRUPOS[kpiFiltro];
+      arr = arr.filter(m => grupo.includes(m.status));
+      if (kpiFiltro === 'receita') {
+        const mesAtual = currentMonth();
+        arr = arr.filter(m => (m.dataPrevista || '').startsWith(mesAtual));
+      }
+    } else if (filtroStatus !== 'all') {
+      arr = arr.filter(m => m.status === filtroStatus);
+    }
     if (busca.trim()) {
       const q = busca.toLowerCase();
       arr = arr.filter(m =>
@@ -4827,7 +4950,7 @@ function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
       );
     }
     return [...arr].sort((a, b) => (b.criadoEm || '').localeCompare(a.criadoEm || ''));
-  }, [mudancas, filtroStatus, busca]);
+  }, [mudancas, filtroStatus, kpiFiltro, busca]);
 
   const mudarStatus = (id, novo) => {
     setData(d => ({ ...d, mudancas: (d.mudancas || []).map(m => m.id === id ? { ...m, status: novo, atualizadoEm: new Date().toISOString() } : m) }));
@@ -4848,46 +4971,50 @@ function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
       </div>
 
       <div className="mud-kpi-grid">
-        <div className="mud-kpi fade-in" style={{ '--kc': '#CA8A04' }}>
+        <button className={`mud-kpi fade-in ${kpiFiltro === 'orcamentos' ? 'active' : ''}`} style={{ '--kc': '#CA8A04' }} onClick={() => toggleKpi('orcamentos')}>
           <div className="mud-kpi-ico" style={{ background: '#FEF9C3', color: '#CA8A04' }}><FileSignature size={18} /></div>
           <div className="mud-kpi-num">{kpis.orcamentos}</div>
           <div className="mud-kpi-lbl">Orçamentos</div>
-          <div className="mud-kpi-sub">aguardando decisão</div>
-        </div>
-        <div className="mud-kpi fade-in" style={{ '--kc': '#7C3AED' }}>
+          <div className="mud-kpi-sub">{kpiFiltro === 'orcamentos' ? 'filtrando ✓' : 'aguardando decisão'}</div>
+        </button>
+        <button className={`mud-kpi fade-in ${kpiFiltro === 'agendados' ? 'active' : ''}`} style={{ '--kc': '#7C3AED' }} onClick={() => toggleKpi('agendados')}>
           <div className="mud-kpi-ico" style={{ background: '#EDE9FE', color: '#7C3AED' }}><Calendar size={18} /></div>
           <div className="mud-kpi-num">{kpis.agendados}</div>
           <div className="mud-kpi-lbl">Agendados</div>
-          <div className="mud-kpi-sub">confirmados / na agenda</div>
-        </div>
-        <div className="mud-kpi fade-in" style={{ '--kc': '#059669' }}>
+          <div className="mud-kpi-sub">{kpiFiltro === 'agendados' ? 'filtrando ✓' : 'confirmados / na agenda'}</div>
+        </button>
+        <button className={`mud-kpi fade-in ${kpiFiltro === 'andamento' ? 'active' : ''}`} style={{ '--kc': '#059669' }} onClick={() => toggleKpi('andamento')}>
           <div className="mud-kpi-ico" style={{ background: '#D1FAE5', color: '#059669' }}><Activity size={18} /></div>
           <div className="mud-kpi-num" style={{ color: kpis.andamento > 0 ? '#059669' : undefined }}>{kpis.andamento}</div>
           <div className="mud-kpi-lbl">Em andamento</div>
-          <div className="mud-kpi-sub">acontecendo agora</div>
-        </div>
-        <div className="mud-kpi fade-in" style={{ '--kc': '#16A34A' }}>
+          <div className="mud-kpi-sub">{kpiFiltro === 'andamento' ? 'filtrando ✓' : 'acontecendo agora'}</div>
+        </button>
+        <button className={`mud-kpi fade-in ${kpiFiltro === 'receita' ? 'active' : ''}`} style={{ '--kc': '#16A34A' }} onClick={() => toggleKpi('receita')}>
           <div className="mud-kpi-ico" style={{ background: '#DCFCE7', color: '#16A34A' }}><Coins size={18} /></div>
           <div className="mud-kpi-num mono t-green" style={{ fontSize: 20 }}>{fmtBRL(kpis.receita)}</div>
           <div className="mud-kpi-lbl">Receita prevista (mês)</div>
-          <div className="mud-kpi-sub">serviços concluídos</div>
-        </div>
+          <div className="mud-kpi-sub">{kpiFiltro === 'receita' ? 'filtrando ✓' : 'serviços concluídos'}</div>
+        </button>
       </div>
 
       <div className="card p-4 sm:p-5">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
-          <label className="block sm:col-span-2">
-            <span className="label">Buscar</span>
-            <input className="inp" placeholder="Cliente, origem ou destino" value={busca} onChange={(e) => setBusca(e.target.value)} />
-          </label>
-          <label className="block">
-            <span className="label">Status</span>
-            <select className="inp" value={filtroStatus} onChange={(e) => setFiltroStatus(e.target.value)}>
-              <option value="all">Todos</option>
-              {MUD_STATUS.map(s => <option key={s.k} value={s.k}>{s.label}</option>)}
-            </select>
-          </label>
+        <div className="orc-search-bar">
+          <div className="orc-search-input">
+            <Search size={16} className="orc-search-ico" />
+            <input className="orc-search-field" placeholder="Buscar por cliente, origem ou destino…" value={busca} onChange={(e) => setBusca(e.target.value)} />
+          </div>
+          <select className="orc-search-status" value={filtroStatus} onChange={(e) => { setFiltroStatus(e.target.value); setKpiFiltro(null); }} disabled={!!kpiFiltro}>
+            <option value="all">Todos os status</option>
+            {MUD_STATUS.map(s => <option key={s.k} value={s.k}>{s.label}</option>)}
+          </select>
         </div>
+
+        {kpiFiltro && (
+          <div className="orc-filtro-ativo">
+            <span>Mostrando: <b>{kpiFiltro === 'orcamentos' ? 'Orçamentos' : kpiFiltro === 'agendados' ? 'Agendados' : kpiFiltro === 'andamento' ? 'Em andamento' : 'Concluídos do mês'}</b></span>
+            <button onClick={() => setKpiFiltro(null)} className="orc-filtro-limpar"><X size={13} /> Limpar</button>
+          </div>
+        )}
 
         {filtered.length === 0 ? <EmptyState icon={Package} title={mudancas.length === 0 ? 'Nenhuma cotação ainda. Crie a primeira!' : 'Nenhum registro para os filtros.'} /> : (
           <div className="orc-grid">
@@ -5045,7 +5172,7 @@ function DetalheCotacao({ cot, data, onMudarStatus }) {
 
       {/* Ações principais */}
       <div className="det-actions">
-        <button className="btn btn-primary" onClick={baixarPDF} disabled={gerando} style={{ background: '#7A1730' }}>
+        <button className="btn btn-primary" onClick={baixarPDF} disabled={gerando} style={{ background: '#0B1533' }}>
           {gerando ? 'Gerando…' : <><FileSignature size={15} /> Gerar PDF</>}
         </button>
         <button className="det-wpp" onClick={enviarWhatsApp}>
@@ -5135,6 +5262,9 @@ function TabelaPrecos({ data, setData, setToast }) {
   const salva = getTabelaMudancas(data.config);
   const [t, setT] = useState(salva);
   const [dirty, setDirty] = useState(false);
+  const [aberta, setAberta] = useState('servicos'); // primeira seção aberta por padrão
+
+  const toggle = (secao) => setAberta(prev => prev === secao ? null : secao);
 
   const upd = (patch) => { setT(prev => ({ ...prev, ...patch })); setDirty(true); };
   const updEscadaS = (patch) => { setT(prev => ({ ...prev, escadaSubida: { ...prev.escadaSubida, ...patch } })); setDirty(true); };
@@ -5163,69 +5293,91 @@ function TabelaPrecos({ data, setData, setToast }) {
 
   const disabled = !isOwner;
 
+  // Cabeçalho clicável de cada seção accordion
+  const AccHead = ({ secao, titulo, sub, icon: Icon, cor }) => (
+    <button className={`acc-head ${aberta === secao ? 'open' : ''}`} onClick={() => toggle(secao)}>
+      <div className="acc-head-ico" style={{ background: `${cor}18`, color: cor }}><Icon size={17} /></div>
+      <div className="acc-head-txt">
+        <div className="acc-head-titulo">{titulo}</div>
+        <div className="acc-head-sub">{sub}</div>
+      </div>
+      <ChevronDown size={18} className="acc-head-chev" />
+    </button>
+  );
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {!isOwner && (
         <div className="card p-4" style={{ background: '#FEF9F3', border: '1px solid #F5D5A8' }}>
           <p className="text-sm" style={{ color: '#92400E' }}>Só o dono da empresa pode editar a tabela de preços. Você pode visualizar os valores abaixo.</p>
         </div>
       )}
 
-      {/* Serviços base — grid 2 colunas */}
-      <div className="card p-5">
-        <h3 className="display h-card t-ink mb-1">Serviços — valores base</h3>
-        <p className="text-sm t-soft mb-4">Estes valores alimentam o cálculo automático das cotações.</p>
-        <div className="preco-grid">
-          <Field label="Preço por km rodado"><Money value={t.precoKm} onChange={(v) => upd({ precoKm: v })} disabled={disabled} /></Field>
-          <Field label="Valor mínimo do frete"><Money value={t.valorMinimo} onChange={(v) => upd({ valorMinimo: v })} disabled={disabled} /></Field>
-          <Field label="Ajudante — por hora"><Money value={t.ajudanteHora} onChange={(v) => upd({ ajudanteHora: v })} disabled={disabled} /></Field>
-          <Field label="Ajudante — diária"><Money value={t.ajudanteDiaria} onChange={(v) => upd({ ajudanteDiaria: v })} disabled={disabled} /></Field>
-          <Field label="Montagem (por peça)"><Money value={t.montagemPeca} onChange={(v) => upd({ montagemPeca: v })} disabled={disabled} /></Field>
-          <Field label="Desmontagem (por peça)"><Money value={t.desmontagemPeca} onChange={(v) => upd({ desmontagemPeca: v })} disabled={disabled} /></Field>
-          <Field label="Embalagem de móvel (por peça)"><Money value={t.embalagemMovelPeca} onChange={(v) => upd({ embalagemMovelPeca: v })} disabled={disabled} /></Field>
-          <Field label="Embalagem de miudezas (por caixa)"><Money value={t.embalagemMiudezaCaixa} onChange={(v) => upd({ embalagemMiudezaCaixa: v })} disabled={disabled} /></Field>
-          <Field label="Içamento (por içamento)"><Money value={t.icamento} onChange={(v) => upd({ icamento: v })} disabled={disabled} /></Field>
-          <Field label="Hora parada / espera"><Money value={t.horaParada} onChange={(v) => upd({ horaParada: v })} disabled={disabled} /></Field>
-          <Field label="Margem de lucro sugerida (%)">
-            <input type="number" step="1" min="0" className="inp mono" value={t.margemLucro} disabled={disabled} onChange={(e) => upd({ margemLucro: parseFloat(e.target.value) || 0 })} />
-          </Field>
-        </div>
-      </div>
-
-      {/* Escadas por faixa de andar */}
-      <div className="card p-5">
-        <h3 className="display h-card t-ink mb-1">Escadas — valor por andar</h3>
-        <p className="text-sm t-soft mb-4">Cobrança por andar, variando conforme a altura. Ex.: subir 5 andares na faixa "5º+" cobra o valor da faixa × 5.</p>
-        <div className="mud-escada-grid">
-          <div className="mud-escada-head"></div>
-          <div className="mud-escada-head">1º e 2º andar</div>
-          <div className="mud-escada-head">3º e 4º andar</div>
-          <div className="mud-escada-head">5º andar ou +</div>
-
-          <div className="mud-escada-lbl">Subida (por andar)</div>
-          <Money value={t.escadaSubida.faixa1a2} onChange={(v) => updEscadaS({ faixa1a2: v })} disabled={disabled} />
-          <Money value={t.escadaSubida.faixa3a4} onChange={(v) => updEscadaS({ faixa3a4: v })} disabled={disabled} />
-          <Money value={t.escadaSubida.faixa5plus} onChange={(v) => updEscadaS({ faixa5plus: v })} disabled={disabled} />
-
-          <div className="mud-escada-lbl">Descida (por andar)</div>
-          <Money value={t.escadaDescida.faixa1a2} onChange={(v) => updEscadaD({ faixa1a2: v })} disabled={disabled} />
-          <Money value={t.escadaDescida.faixa3a4} onChange={(v) => updEscadaD({ faixa3a4: v })} disabled={disabled} />
-          <Money value={t.escadaDescida.faixa5plus} onChange={(v) => updEscadaD({ faixa5plus: v })} disabled={disabled} />
-        </div>
-      </div>
-
-      {/* Materiais — grid de cards */}
-      <div className="card p-5">
-        <h3 className="display h-card t-ink mb-1">Materiais — preço unitário</h3>
-        <p className="text-sm t-soft mb-4">Preço de cada material usado nas embalagens e proteção.</p>
-        <div className="mat-grid">
-          {Object.keys(MATERIAIS_LABEL).map(k => (
-            <div key={k} className="mat-card">
-              <div className="mat-card-nome">{MATERIAIS_LABEL[k]}</div>
-              <Money value={t.materiais[k]} onChange={(v) => updMat({ [k]: v })} disabled={disabled} />
+      {/* Seção Serviços */}
+      <div className="acc-card">
+        <AccHead secao="servicos" titulo="Serviços — valores base" sub="Km, ajudantes, montagem, embalagem…" icon={Package} cor="#0B1533" />
+        {aberta === 'servicos' && (
+          <div className="acc-body">
+            <div className="preco-grid">
+              <Field label="Preço por km rodado"><Money value={t.precoKm} onChange={(v) => upd({ precoKm: v })} disabled={disabled} /></Field>
+              <Field label="Valor mínimo do frete"><Money value={t.valorMinimo} onChange={(v) => upd({ valorMinimo: v })} disabled={disabled} /></Field>
+              <Field label="Ajudante — por hora"><Money value={t.ajudanteHora} onChange={(v) => upd({ ajudanteHora: v })} disabled={disabled} /></Field>
+              <Field label="Ajudante — diária"><Money value={t.ajudanteDiaria} onChange={(v) => upd({ ajudanteDiaria: v })} disabled={disabled} /></Field>
+              <Field label="Montagem (por peça)"><Money value={t.montagemPeca} onChange={(v) => upd({ montagemPeca: v })} disabled={disabled} /></Field>
+              <Field label="Desmontagem (por peça)"><Money value={t.desmontagemPeca} onChange={(v) => upd({ desmontagemPeca: v })} disabled={disabled} /></Field>
+              <Field label="Embalagem de móvel (por peça)"><Money value={t.embalagemMovelPeca} onChange={(v) => upd({ embalagemMovelPeca: v })} disabled={disabled} /></Field>
+              <Field label="Embalagem de miudezas (por caixa)"><Money value={t.embalagemMiudezaCaixa} onChange={(v) => upd({ embalagemMiudezaCaixa: v })} disabled={disabled} /></Field>
+              <Field label="Içamento (por içamento)"><Money value={t.icamento} onChange={(v) => upd({ icamento: v })} disabled={disabled} /></Field>
+              <Field label="Hora parada / espera"><Money value={t.horaParada} onChange={(v) => upd({ horaParada: v })} disabled={disabled} /></Field>
+              <Field label="Margem de lucro sugerida (%)">
+                <input type="number" step="1" min="0" className="inp mono" value={t.margemLucro} disabled={disabled} onChange={(e) => upd({ margemLucro: parseFloat(e.target.value) || 0 })} />
+              </Field>
             </div>
-          ))}
-        </div>
+          </div>
+        )}
+      </div>
+
+      {/* Seção Escadas */}
+      <div className="acc-card">
+        <AccHead secao="escadas" titulo="Escadas — valor por andar" sub="Faixas por altura, subida e descida" icon={TrendingUp} cor="#7C3AED" />
+        {aberta === 'escadas' && (
+          <div className="acc-body">
+            <p className="text-sm t-soft mb-3">Cobrança por andar, variando conforme a altura. Ex.: subir 5 andares na faixa "5º+" cobra o valor da faixa × 5.</p>
+            <div className="mud-escada-grid">
+              <div className="mud-escada-head"></div>
+              <div className="mud-escada-head">1º e 2º andar</div>
+              <div className="mud-escada-head">3º e 4º andar</div>
+              <div className="mud-escada-head">5º andar ou +</div>
+
+              <div className="mud-escada-lbl">Subida (por andar)</div>
+              <Money value={t.escadaSubida.faixa1a2} onChange={(v) => updEscadaS({ faixa1a2: v })} disabled={disabled} />
+              <Money value={t.escadaSubida.faixa3a4} onChange={(v) => updEscadaS({ faixa3a4: v })} disabled={disabled} />
+              <Money value={t.escadaSubida.faixa5plus} onChange={(v) => updEscadaS({ faixa5plus: v })} disabled={disabled} />
+
+              <div className="mud-escada-lbl">Descida (por andar)</div>
+              <Money value={t.escadaDescida.faixa1a2} onChange={(v) => updEscadaD({ faixa1a2: v })} disabled={disabled} />
+              <Money value={t.escadaDescida.faixa3a4} onChange={(v) => updEscadaD({ faixa3a4: v })} disabled={disabled} />
+              <Money value={t.escadaDescida.faixa5plus} onChange={(v) => updEscadaD({ faixa5plus: v })} disabled={disabled} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Seção Materiais */}
+      <div className="acc-card">
+        <AccHead secao="materiais" titulo="Materiais — preço unitário" sub="Fita, caixas, plástico bolha, cobertor…" icon={Coins} cor="#059669" />
+        {aberta === 'materiais' && (
+          <div className="acc-body">
+            <div className="mat-grid">
+              {Object.keys(MATERIAIS_LABEL).map(k => (
+                <div key={k} className="mat-card">
+                  <div className="mat-card-nome">{MATERIAIS_LABEL[k]}</div>
+                  <Money value={t.materiais[k]} onChange={(v) => updMat({ [k]: v })} disabled={disabled} />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {isOwner && (
@@ -5903,6 +6055,93 @@ function MembrosSection({ company }) {
   );
 }
 
+function AparenciaSection({ data, setData, isOwner }) {
+  const atual = data.config?.paletteId || DEFAULT_PALETTE_ID;
+  const [preview, setPreview] = useState(null); // paleta sendo pré-visualizada (hover/tap antes de salvar)
+
+  // Aplica preview temporário; se sair sem salvar, o useEffect do AppInner restaura
+  const previewPaleta = (id) => {
+    setPreview(id);
+    applyPalette(id);
+  };
+  const cancelarPreview = () => {
+    setPreview(null);
+    applyPalette(atual);
+  };
+  const escolher = (id) => {
+    setData(d => ({ ...d, config: { ...(d.config || {}), paletteId: id } }));
+    setPreview(null);
+    applyPalette(id);
+  };
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-center gap-2 mb-1">
+        <Sparkles size={17} style={{ color: 'var(--color-primary)' }} />
+        <h3 className="display h-card t-ink">Aparência</h3>
+      </div>
+      <p className="text-sm t-soft mb-4">
+        Escolha a paleta de cores da sua empresa. A identidade visual é aplicada em todo o sistema — menu, botões, cabeçalhos e destaques.
+        {!isOwner && ' Apenas o dono da empresa pode alterar.'}
+      </p>
+
+      <div className="pal-grid">
+        {PALETTES.map(p => {
+          const ativa = atual === p.id;
+          const emPreview = preview === p.id;
+          return (
+            <div
+              key={p.id}
+              className={`pal-card ${ativa ? 'ativa' : ''} ${emPreview ? 'preview' : ''} ${!isOwner ? 'locked' : ''}`}
+              onClick={() => isOwner && escolher(p.id)}
+              onMouseEnter={() => isOwner && !ativa && previewPaleta(p.id)}
+              onMouseLeave={() => isOwner && cancelarPreview()}
+              role={isOwner ? 'button' : undefined}
+              tabIndex={isOwner ? 0 : undefined}
+              onKeyDown={(e) => { if (isOwner && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); escolher(p.id); } }}
+            >
+              <div className="pal-card-head">
+                <div className="min-w-0">
+                  <div className="pal-nome">{p.nome}</div>
+                  <div className="pal-desc">{p.descricao}</div>
+                </div>
+                {ativa && <span className="pal-ativa-badge"><Check size={12} /> Ativa</span>}
+              </div>
+
+              {/* círculos de cor */}
+              <div className="pal-dots">
+                <span className="pal-dot" style={{ background: p.colors.primary }} />
+                <span className="pal-dot" style={{ background: p.colors.secondary }} />
+                <span className="pal-dot" style={{ background: p.colors.accent }} />
+                <span className="pal-dot" style={{ background: p.colors.background, border: '1px solid #E5E7EB' }} />
+                <span className="pal-dot" style={{ background: p.colors.surface, border: '1px solid #E5E7EB' }} />
+              </div>
+
+              {/* mini-preview: sidebar + botão + card */}
+              <div className="pal-preview">
+                <div className="pal-preview-side" style={{ background: p.colors.primary }}>
+                  <span style={{ background: '#fff', opacity: .9 }} />
+                  <span style={{ background: 'rgba(255,255,255,.4)' }} />
+                  <span style={{ background: 'rgba(255,255,255,.4)' }} />
+                </div>
+                <div className="pal-preview-body" style={{ background: p.colors.background }}>
+                  <div className="pal-preview-btn" style={{ background: p.colors.primary }} />
+                  <div className="pal-preview-card" style={{ background: p.colors.surface }}>
+                    <span style={{ background: p.colors.accent }} />
+                    <span style={{ background: p.colors.textMuted, opacity: .3 }} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="text-xs t-mute mt-3">As cores de status (verde para sucesso, vermelho para alertas) permanecem fixas em todas as paletas.</p>
+    </div>
+  );
+}
+
 function Configuracoes({ data, setData, onRequestLogout }) {
   const { user, profile, company, logout, isOwner } = useAuth();
   const c = data.config || {};
@@ -6068,6 +6307,8 @@ function Configuracoes({ data, setData, onRequestLogout }) {
       </div>
 
       {isOwner && <MembrosSection company={company} />}
+
+      <AparenciaSection data={data} setData={setData} isOwner={isOwner} />
 
       <div className="card p-5">
         <h3 className="display h-card t-ink mb-3">Conta</h3>
