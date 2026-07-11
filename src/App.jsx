@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, Wallet, Truck, Car, Fuel, Wrench, Users,
   FileSignature, FolderOpen, BarChart3, Settings, Plus, Pencil,
@@ -2738,7 +2738,7 @@ function Relatorios({ data }) {
               <Tooltip formatter={v => fmtBRL(v)} contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 11, padding: '6px 10px' }} wrapperStyle={{ zIndex: 30 }} />
               <Line type="monotone" dataKey="receita" name="Receita" stroke="#087F5B" strokeWidth={2} dot={false} />
               <Line type="monotone" dataKey="custo" name="Custo" stroke="#B4234B" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="lucro" name="Lucro" stroke="#0B1533" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="lucro" name="Lucro" stroke="var(--color-primary)" strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -3363,8 +3363,8 @@ function AppInner() {
 
         /* buttons */
         .btn{ display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:11px 16px; border-radius:12px; font-size:14px; font-weight:500; transition:.15s; cursor:pointer; border:none; }
-        .btn-primary{ background:#0B1324; color:#fff; box-shadow:0 1px 2px rgba(11,19,36,.15); }
-        .btn-primary:hover{ background:#15233F; } .btn-primary:active{ transform:scale(.98); }
+        .btn-primary{ background:var(--color-primary); color:#fff; box-shadow:0 1px 2px rgba(var(--color-primary-rgb),.2); }
+        .btn-primary:hover{ background:var(--color-primary-hover); } .btn-primary:active{ transform:scale(.98); }
         .btn-ghost{ background:transparent; color:#0B1324; } .btn-ghost:hover{ background:#E5E7EB; }
 
         /* icon buttons */
@@ -3396,7 +3396,7 @@ function AppInner() {
         .sb-logo{ width:38px; height:38px; border-radius:11px; background:rgba(255,255,255,.1); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; overflow:hidden; }
         .sb-logo-emp{ background:#fff; padding:0; }
         .sb-logo-emp img{ width:100%; height:100%; object-fit:cover; }
-        .sb-logo-txt{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:14px; letter-spacing:-.01em; }
+        .sb-logo-txt{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,var(--color-primary),var(--color-secondary)); color:#fff; font-weight:700; font-size:14px; letter-spacing:-.01em; }
         .sb-name{ color:#fff; font-size:1.05rem; font-weight:600; line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         .sb-sub{ color:#7C89A3; font-size:11px; letter-spacing:.03em; margin-top:2px; }
         .sb-nav{ flex:1; overflow-y:auto; padding:16px 12px; display:flex; flex-direction:column; gap:4px; }
@@ -3417,7 +3417,7 @@ function AppInner() {
         .user-chip{ margin-left:auto; display:inline-flex; align-items:center; gap:10px; flex-shrink:0; background:#F4F6F8; border:1px solid #E5E7EB; border-radius:999px; padding:4px 5px 4px 5px; }
         .user-chip-avatar{ width:32px; height:32px; border-radius:999px; overflow:hidden; flex-shrink:0; background:#fff; border:1px solid #E5E7EB; display:flex; align-items:center; justify-content:center; }
         .user-chip-avatar img{ width:100%; height:100%; object-fit:cover; }
-        .user-chip-avatar span{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:12px; letter-spacing:-.01em; }
+        .user-chip-avatar span{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,var(--color-primary),var(--color-secondary)); color:#fff; font-weight:700; font-size:12px; letter-spacing:-.01em; }
         .user-chip-info{ display:flex; flex-direction:column; line-height:1.1; min-width:0; margin-left:2px; }
         .user-chip-emp{ font-size:10.5px; color:#6B7280; text-transform:uppercase; letter-spacing:.04em; font-weight:500; }
         .user-chip-name{ font-size:12.5px; color:#0B1324; font-weight:600; max-width:140px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -3787,7 +3787,7 @@ function AppInner() {
         .fin-card::before{ content:''; position:absolute; top:0; left:0; right:0; height:3px; }
         .fin-green::before{ background:linear-gradient(90deg,#087F5B,#34D399); }
         .fin-red::before{ background:linear-gradient(90deg,#B4234B,#FB7185); }
-        .fin-blue::before{ background:linear-gradient(90deg,#0B1533,#3B82F6); }
+        .fin-blue::before{ background:linear-gradient(90deg,var(--color-primary),var(--color-accent)); }
         .fin-card:hover{ transform:translateY(-2px); box-shadow:0 6px 12px rgba(11,19,36,.07),0 18px 44px rgba(11,19,36,.09); }
         .fin-spark{ height:52px; margin-top:10px; }
         .fin-ico{ display:inline-flex; padding:8px; border-radius:10px; }
@@ -5102,6 +5102,7 @@ function DetalheCotacao({ cot, data, onMudarStatus }) {
     cidade: data.config?.cidade || '',
     uf: data.config?.uf || '',
     emailContato: data.config?.emailContato || '',
+    corPrimaria: getPalette(data.config?.paletteId || DEFAULT_PALETTE_ID).colors.primary,
   };
 
   const baixarPDF = async () => {
@@ -5257,6 +5258,75 @@ function DetalheCotacao({ cot, data, onMudarStatus }) {
   );
 }
 
+// Campo de valor em R$ com edição livre — mantém o que o usuário digita como texto
+// e só converte pra número ao salvar/sair. Componente estável (fora de TabelaPrecos)
+// pra não perder o foco a cada tecla.
+function MoneyInput({ value, onChange, disabled }) {
+  const [txt, setTxt] = useState(String(value ?? 0));
+  const focado = useRef(false);
+
+  // Sincroniza com o valor externo só quando o campo NÃO está sendo editado
+  useEffect(() => {
+    if (!focado.current) setTxt(String(value ?? 0));
+  }, [value]);
+
+  const handleChange = (e) => {
+    let v = e.target.value.replace(',', '.');       // aceita vírgula
+    if (!/^\d*\.?\d*$/.test(v)) return;              // só números e um ponto
+    setTxt(v);
+    const n = parseFloat(v);
+    onChange(Number.isFinite(n) ? n : 0);            // propaga número (vazio = 0) sem travar a digitação
+  };
+  const handleBlur = () => {
+    focado.current = false;
+    const n = parseFloat(txt);
+    const final = Number.isFinite(n) ? n : 0;
+    setTxt(String(final));
+    onChange(final);
+  };
+
+  return (
+    <div className="mud-money">
+      <span className="mud-money-cur">R$</span>
+      <input
+        type="text" inputMode="decimal"
+        className="inp mono"
+        value={txt}
+        disabled={disabled}
+        onFocus={(e) => { focado.current = true; e.target.select(); }}
+        onChange={handleChange}
+        onBlur={handleBlur}
+        style={{ paddingLeft: 34 }}
+      />
+    </div>
+  );
+}
+
+// Campo numérico simples (ex.: %) com edição livre, componente estável.
+function PercentInput({ value, onChange, disabled }) {
+  const [txt, setTxt] = useState(String(value ?? 0));
+  const focado = useRef(false);
+  useEffect(() => { if (!focado.current) setTxt(String(value ?? 0)); }, [value]);
+  const handleChange = (e) => {
+    const v = e.target.value.replace(',', '.');
+    if (!/^\d*\.?\d*$/.test(v)) return;
+    setTxt(v);
+    const n = parseFloat(v);
+    onChange(Number.isFinite(n) ? n : 0);
+  };
+  const handleBlur = () => {
+    focado.current = false;
+    const n = parseFloat(txt);
+    const final = Number.isFinite(n) ? n : 0;
+    setTxt(String(final)); onChange(final);
+  };
+  return (
+    <input type="text" inputMode="decimal" className="inp mono" value={txt} disabled={disabled}
+      onFocus={(e) => { focado.current = true; e.target.select(); }}
+      onChange={handleChange} onBlur={handleBlur} />
+  );
+}
+
 function TabelaPrecos({ data, setData, setToast }) {
   const { isOwner } = useAuth();
   const salva = getTabelaMudancas(data.config);
@@ -5276,20 +5346,6 @@ function TabelaPrecos({ data, setData, setToast }) {
     setDirty(false);
     setToast('Tabela de preços salva');
   };
-
-  const Money = ({ value, onChange, disabled }) => (
-    <div className="mud-money">
-      <span className="mud-money-cur">R$</span>
-      <input
-        type="number" step="0.01" min="0"
-        className="inp mono"
-        value={value}
-        disabled={disabled}
-        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
-        style={{ paddingLeft: 34 }}
-      />
-    </div>
-  );
 
   const disabled = !isOwner;
 
@@ -5319,18 +5375,18 @@ function TabelaPrecos({ data, setData, setToast }) {
         {aberta === 'servicos' && (
           <div className="acc-body">
             <div className="preco-grid">
-              <Field label="Preço por km rodado"><Money value={t.precoKm} onChange={(v) => upd({ precoKm: v })} disabled={disabled} /></Field>
-              <Field label="Valor mínimo do frete"><Money value={t.valorMinimo} onChange={(v) => upd({ valorMinimo: v })} disabled={disabled} /></Field>
-              <Field label="Ajudante — por hora"><Money value={t.ajudanteHora} onChange={(v) => upd({ ajudanteHora: v })} disabled={disabled} /></Field>
-              <Field label="Ajudante — diária"><Money value={t.ajudanteDiaria} onChange={(v) => upd({ ajudanteDiaria: v })} disabled={disabled} /></Field>
-              <Field label="Montagem (por peça)"><Money value={t.montagemPeca} onChange={(v) => upd({ montagemPeca: v })} disabled={disabled} /></Field>
-              <Field label="Desmontagem (por peça)"><Money value={t.desmontagemPeca} onChange={(v) => upd({ desmontagemPeca: v })} disabled={disabled} /></Field>
-              <Field label="Embalagem de móvel (por peça)"><Money value={t.embalagemMovelPeca} onChange={(v) => upd({ embalagemMovelPeca: v })} disabled={disabled} /></Field>
-              <Field label="Embalagem de miudezas (por caixa)"><Money value={t.embalagemMiudezaCaixa} onChange={(v) => upd({ embalagemMiudezaCaixa: v })} disabled={disabled} /></Field>
-              <Field label="Içamento (por içamento)"><Money value={t.icamento} onChange={(v) => upd({ icamento: v })} disabled={disabled} /></Field>
-              <Field label="Hora parada / espera"><Money value={t.horaParada} onChange={(v) => upd({ horaParada: v })} disabled={disabled} /></Field>
+              <Field label="Preço por km rodado"><MoneyInput value={t.precoKm} onChange={(v) => upd({ precoKm: v })} disabled={disabled} /></Field>
+              <Field label="Valor mínimo do frete"><MoneyInput value={t.valorMinimo} onChange={(v) => upd({ valorMinimo: v })} disabled={disabled} /></Field>
+              <Field label="Ajudante — por hora"><MoneyInput value={t.ajudanteHora} onChange={(v) => upd({ ajudanteHora: v })} disabled={disabled} /></Field>
+              <Field label="Ajudante — diária"><MoneyInput value={t.ajudanteDiaria} onChange={(v) => upd({ ajudanteDiaria: v })} disabled={disabled} /></Field>
+              <Field label="Montagem (por peça)"><MoneyInput value={t.montagemPeca} onChange={(v) => upd({ montagemPeca: v })} disabled={disabled} /></Field>
+              <Field label="Desmontagem (por peça)"><MoneyInput value={t.desmontagemPeca} onChange={(v) => upd({ desmontagemPeca: v })} disabled={disabled} /></Field>
+              <Field label="Embalagem de móvel (por peça)"><MoneyInput value={t.embalagemMovelPeca} onChange={(v) => upd({ embalagemMovelPeca: v })} disabled={disabled} /></Field>
+              <Field label="Embalagem de miudezas (por caixa)"><MoneyInput value={t.embalagemMiudezaCaixa} onChange={(v) => upd({ embalagemMiudezaCaixa: v })} disabled={disabled} /></Field>
+              <Field label="Içamento (por içamento)"><MoneyInput value={t.icamento} onChange={(v) => upd({ icamento: v })} disabled={disabled} /></Field>
+              <Field label="Hora parada / espera"><MoneyInput value={t.horaParada} onChange={(v) => upd({ horaParada: v })} disabled={disabled} /></Field>
               <Field label="Margem de lucro sugerida (%)">
-                <input type="number" step="1" min="0" className="inp mono" value={t.margemLucro} disabled={disabled} onChange={(e) => upd({ margemLucro: parseFloat(e.target.value) || 0 })} />
+                <PercentInput value={t.margemLucro} onChange={(v) => upd({ margemLucro: v })} disabled={disabled} />
               </Field>
             </div>
           </div>
@@ -5350,14 +5406,14 @@ function TabelaPrecos({ data, setData, setToast }) {
               <div className="mud-escada-head">5º andar ou +</div>
 
               <div className="mud-escada-lbl">Subida (por andar)</div>
-              <Money value={t.escadaSubida.faixa1a2} onChange={(v) => updEscadaS({ faixa1a2: v })} disabled={disabled} />
-              <Money value={t.escadaSubida.faixa3a4} onChange={(v) => updEscadaS({ faixa3a4: v })} disabled={disabled} />
-              <Money value={t.escadaSubida.faixa5plus} onChange={(v) => updEscadaS({ faixa5plus: v })} disabled={disabled} />
+              <MoneyInput value={t.escadaSubida.faixa1a2} onChange={(v) => updEscadaS({ faixa1a2: v })} disabled={disabled} />
+              <MoneyInput value={t.escadaSubida.faixa3a4} onChange={(v) => updEscadaS({ faixa3a4: v })} disabled={disabled} />
+              <MoneyInput value={t.escadaSubida.faixa5plus} onChange={(v) => updEscadaS({ faixa5plus: v })} disabled={disabled} />
 
               <div className="mud-escada-lbl">Descida (por andar)</div>
-              <Money value={t.escadaDescida.faixa1a2} onChange={(v) => updEscadaD({ faixa1a2: v })} disabled={disabled} />
-              <Money value={t.escadaDescida.faixa3a4} onChange={(v) => updEscadaD({ faixa3a4: v })} disabled={disabled} />
-              <Money value={t.escadaDescida.faixa5plus} onChange={(v) => updEscadaD({ faixa5plus: v })} disabled={disabled} />
+              <MoneyInput value={t.escadaDescida.faixa1a2} onChange={(v) => updEscadaD({ faixa1a2: v })} disabled={disabled} />
+              <MoneyInput value={t.escadaDescida.faixa3a4} onChange={(v) => updEscadaD({ faixa3a4: v })} disabled={disabled} />
+              <MoneyInput value={t.escadaDescida.faixa5plus} onChange={(v) => updEscadaD({ faixa5plus: v })} disabled={disabled} />
             </div>
           </div>
         )}
@@ -5372,7 +5428,7 @@ function TabelaPrecos({ data, setData, setToast }) {
               {Object.keys(MATERIAIS_LABEL).map(k => (
                 <div key={k} className="mat-card">
                   <div className="mat-card-nome">{MATERIAIS_LABEL[k]}</div>
-                  <Money value={t.materiais[k]} onChange={(v) => updMat({ [k]: v })} disabled={disabled} />
+                  <MoneyInput value={t.materiais[k]} onChange={(v) => updMat({ [k]: v })} disabled={disabled} />
                 </div>
               ))}
             </div>
@@ -5383,7 +5439,7 @@ function TabelaPrecos({ data, setData, setToast }) {
       {isOwner && (
         <div className="mud-save-bar">
           {dirty ? <span className="text-xs t-orange">Você tem alterações não salvas</span> : <span className="text-xs t-mute">Tudo salvo</span>}
-          <button className="btn btn-primary" onClick={salvar} disabled={!dirty}>Salvar tabela</button>
+          <button className="btn btn-primary" onClick={salvar}>Salvar tabela</button>
         </div>
       )}
     </div>

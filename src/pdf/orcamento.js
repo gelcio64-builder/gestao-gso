@@ -16,6 +16,13 @@ const fmtData = (iso) => {
   return `${d}/${m}/${y}`;
 };
 
+// Converte "#RRGGBB" em [r,g,b] pra jsPDF; retorna null se inválido
+function hexToRgbArr(hex) {
+  if (!hex) return null;
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : null;
+}
+
 // Detecta dimensões de uma imagem base64 pra manter proporção
 function imgSize(dataUrl) {
   return new Promise((resolve) => {
@@ -39,7 +46,8 @@ export async function gerarOrcamentoPDF(cot, calc, empresa = {}, opts = {}) {
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const PW = 210, PH = 297;
   const M = 16; // margem
-  const BORDO = [122, 23, 48];
+  // Cor de destaque do PDF = cor primária da paleta da empresa (fallback: azul-marinho GSO)
+  const BORDO = hexToRgbArr(empresa.corPrimaria) || [11, 21, 51];
   const INK = [11, 19, 36];
   const GRAY = [110, 118, 130];
   let y = M;
