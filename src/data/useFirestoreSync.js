@@ -6,7 +6,7 @@ import { fdb } from '../firebase';
 
 const COLS = [
   'veiculos', 'motoristas', 'linhas', 'combustivel', 'manutencao',
-  'finEmpresa', 'finPessoal', 'contratos', 'metasPessoais', 'crmLeads', 'wms', 'documentos', 'mudancas',
+  'finEmpresa', 'finPessoal', 'contratos', 'metasPessoais', 'crmLeads', 'wms', 'documentos', 'mudancas', 'recorrencias',
 ];
 const DEFAULT_CONFIG = { nomeEmpresa: 'Minha Empresa', precoCombustivel: 5.89, consumoPadrao: 10 };
 

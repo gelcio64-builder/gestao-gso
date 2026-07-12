@@ -1020,8 +1020,292 @@ function LogoEditor({ file, onCancel, onConfirm }) {
   );
 }
 
+// ============================================================
+// RECORRÊNCIAS — motor de geração de lançamentos futuros
+// ============================================================
+// Uma recorrência é um "molde" (ex.: Aluguel R$6.000, todo dia 12, mensal).
+// A partir dela geramos lançamentos reais no finEmpresa, cada um marcado
+// com recorrenciaId — assim eles entram normalmente em todos os cálculos,
+// no calendário e nos vencimentos, sem duplicar lógica.
+
+const FREQUENCIAS = [
+  { k: 'mensal', label: 'Mensal', meses: 1 },
+  { k: 'bimestral', label: 'Bimestral', meses: 2 },
+  { k: 'trimestral', label: 'Trimestral', meses: 3 },
+  { k: 'semestral', label: 'Semestral', meses: 6 },
+  { k: 'anual', label: 'Anual', meses: 12 },
+  { k: 'semanal', label: 'Semanal', dias: 7 },
+  { k: 'quinzenal', label: 'Quinzenal', dias: 15 },
+];
+const freqInfo = (k) => FREQUENCIAS.find(f => f.k === k) || FREQUENCIAS[0];
+
+const REC_STATUS = [
+  { k: 'ativa', label: 'Ativa', tone: 'green' },
+  { k: 'pausada', label: 'Pausada', tone: 'orange' },
+  { k: 'encerrada', label: 'Encerrada', tone: 'slate' },
+];
+
+// Gera as datas de ocorrência de uma recorrência dentro de uma janela.
+// Puro: não toca em estado nem no Firebase.
+function gerarDatasRecorrencia(rec, ateISO) {
+  const datas = [];
+  const inicio = new Date((rec.dataInicio || todayISO()) + 'T00:00:00');
+  const limite = new Date(ateISO + 'T00:00:00');
+  const fim = rec.dataFim ? new Date(rec.dataFim + 'T00:00:00') : null;
+  const f = freqInfo(rec.frequencia);
+  const maxParcelas = Number(rec.parcelas) || 0; // 0 = sem limite
+
+  let cursor = new Date(inicio);
+  // Se for mensal-like e houver diaVencimento, ajusta o dia
+  const diaVenc = Number(rec.diaVencimento) || 0;
+  if (f.meses && diaVenc > 0) {
+    cursor.setDate(Math.min(diaVenc, new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate()));
+    if (cursor < inicio) cursor.setMonth(cursor.getMonth() + f.meses);
+  }
+
+  let n = 0;
+  while (cursor <= limite) {
+    if (fim && cursor > fim) break;
+    if (maxParcelas > 0 && n >= maxParcelas) break;
+    datas.push(cursor.toISOString().slice(0, 10));
+    n++;
+    if (f.meses) {
+      const mesAlvo = cursor.getMonth() + f.meses;
+      const proximo = new Date(cursor.getFullYear(), mesAlvo, 1);
+      const ultimoDia = new Date(proximo.getFullYear(), proximo.getMonth() + 1, 0).getDate();
+      proximo.setDate(Math.min(diaVenc > 0 ? diaVenc : cursor.getDate(), ultimoDia));
+      cursor = proximo;
+    } else {
+      cursor = new Date(cursor);
+      cursor.setDate(cursor.getDate() + f.dias);
+    }
+  }
+  return datas;
+}
+
+// Monta os lançamentos que faltam para uma recorrência, sem duplicar os já existentes.
+function lancamentosFaltantes(rec, finEmpresa, ateISO) {
+  if (rec.status !== 'ativa') return [];
+  if (rec.modo === 'lembrar') return []; // só lembra, não gera
+  const jaExistem = new Set(
+    finEmpresa.filter(x => x.recorrenciaId === rec.id).map(x => x.data)
+  );
+  return gerarDatasRecorrencia(rec, ateISO)
+    .filter(d => !jaExistem.has(d))
+    .map(d => ({
+      id: uid(),
+      recorrenciaId: rec.id,
+      tipo: rec.tipo,
+      descricao: rec.descricao,
+      categoria: rec.categoria,
+      valor: Number(rec.valor) || 0,
+      data: d,
+      vencimento: d,
+      status: 'pendente',
+      recorrente: true,
+      obs: rec.obs || '',
+      criadoEm: new Date().toISOString(),
+    }));
+}
+
+// ============================================================
+// SAÚDE FINANCEIRA — velocímetro (gauge) em SVG
+// ============================================================
+const SAUDE_FAIXAS = [
+  { min: 0,  max: 30,  label: 'Crítica',   cor: '#DC2626', icone: 'x'     },
+  { min: 31, max: 50,  label: 'Atenção',   cor: '#EA580C', icone: 'alert' },
+  { min: 51, max: 70,  label: 'Estável',   cor: '#EAB308', icone: 'alert' },
+  { min: 71, max: 85,  label: 'Saudável',  cor: '#16A34A', icone: 'check' },
+  { min: 86, max: 100, label: 'Excelente', cor: '#2563EB', icone: 'check' },
+];
+
+// Converte um valor 0-100 num ângulo de tela para o semicírculo superior.
+// Com polar() usando (ang-90): 270° = esquerda, 360° = topo, 450° = direita.
+function gaugeAngle(v) {
+  const clamped = Math.max(0, Math.min(100, v));
+  return 270 + (clamped / 100) * 180;
+}
+// Ponto na circunferência para um dado ângulo de tela (0°=topo, cresce horário)
+function polar(cx, cy, r, angGraus) {
+  const rad = (angGraus - 90) * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+// Path de um arco entre dois valores (0-100)
+function arcPath(cx, cy, r, v1, v2) {
+  const a1 = gaugeAngle(v1);
+  const a2 = gaugeAngle(v2);
+  const p1 = polar(cx, cy, r, a1);
+  const p2 = polar(cx, cy, r, a2);
+  const largeArc = (a2 - a1) > 180 ? 1 : 0;
+  return `M ${p1.x} ${p1.y} A ${r} ${r} 0 ${largeArc} 1 ${p2.x} ${p2.y}`;
+}
+
+function GaugeSaude({ nota, faixa }) {
+  const [anim, setAnim] = useState(0); // valor animado do ponteiro
+  const reduzir = typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+  useEffect(() => {
+    if (reduzir) { setAnim(nota); return; }
+    let raf;
+    const dur = 900;
+    const t0 = performance.now();
+    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+    const tick = (now) => {
+      const t = Math.min(1, (now - t0) / dur);
+      setAnim(nota * easeOutCubic(t));
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [nota, reduzir]);
+
+  const W = 300, H = 178;
+  const cx = W / 2, cy = 152, r = 112;
+  const ang = gaugeAngle(anim);
+  const ponta = polar(cx, cy, r - 24, ang);
+
+  const Ico = faixa.icone === 'check' ? Check : faixa.icone === 'alert' ? AlertTriangle : X;
+
+  return (
+    <div className="gauge-wrap">
+      <svg viewBox={`0 0 ${W} ${H}`} className="gauge-svg" role="img"
+        aria-label={`Saúde financeira: ${nota} de 100 — ${faixa.label}`}>
+        {/* trilha de fundo */}
+        <path d={arcPath(cx, cy, r, 0, 100)} fill="none" stroke="#EFF1F4" strokeWidth="20" strokeLinecap="round" />
+        {/* faixas coloridas */}
+        {SAUDE_FAIXAS.map((f, i) => (
+          <path key={i}
+            d={arcPath(cx, cy, r, f.min, f.max)}
+            fill="none" stroke={f.cor} strokeWidth="20"
+            strokeLinecap={i === 0 || i === SAUDE_FAIXAS.length - 1 ? 'round' : 'butt'}
+            opacity={nota >= f.min && nota <= f.max ? 1 : 0.32}
+            style={{ transition: 'opacity .5s ease' }}
+          />
+        ))}
+        {/* marcas 0 e 100 */}
+        <text x={cx - r - 2} y={cy + 16} className="gauge-tick">0</text>
+        <text x={cx + r + 2} y={cy + 16} className="gauge-tick" textAnchor="end">100</text>
+        {/* ponteiro */}
+        <line x1={cx} y1={cy} x2={ponta.x} y2={ponta.y}
+          stroke="#0B1324" strokeWidth="3.5" strokeLinecap="round" />
+        <circle cx={cx} cy={cy} r="8" fill="#0B1324" />
+        <circle cx={cx} cy={cy} r="3.5" fill="#fff" />
+      </svg>
+
+      {/* centro: ícone + status + nota */}
+      <div className="gauge-center">
+        <span className="gauge-badge" style={{ background: faixa.cor }}><Ico size={13} /></span>
+        <span className="gauge-status" style={{ color: faixa.cor }}>{faixa.label}</span>
+        <span className="gauge-nota">
+          <b className="mono">{Math.round(anim)}</b><small>/100</small>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function RecorrenciaForm({ inicial, config, onSave, onCancel }) {
+  const [f, setF] = useState({
+    tipo: inicial.tipo || 'saida',
+    descricao: inicial.descricao || '',
+    categoria: inicial.categoria || '',
+    valor: inicial.valor ?? '',
+    frequencia: inicial.frequencia || 'mensal',
+    diaVencimento: inicial.diaVencimento ?? new Date().getDate(),
+    dataInicio: inicial.dataInicio || todayISO(),
+    dataFim: inicial.dataFim || '',
+    parcelas: inicial.parcelas ?? '',
+    modo: inicial.modo || 'gerar', // gerar | lembrar
+    obs: inicial.obs || '',
+    status: inicial.status || 'ativa',
+    id: inicial.id,
+    criadoEm: inicial.criadoEm,
+  });
+  const upd = (patch) => setF(prev => ({ ...prev, ...patch }));
+  const cats = getCategoriasCompletas(f.tipo, config?.categoriasCustomEmpresa || {});
+  const usaDiaVenc = !!freqInfo(f.frequencia).meses;
+
+  const podeSalvar = f.descricao.trim() && Number(f.valor) > 0 && f.categoria;
+
+  // Prévia das próximas datas (ajuda a pessoa a entender o que vai ser gerado)
+  const previa = useMemo(() => {
+    if (!podeSalvar) return [];
+    const h = new Date(); h.setMonth(h.getMonth() + 12);
+    return gerarDatasRecorrencia(f, h.toISOString().slice(0, 10)).slice(0, 4);
+  }, [f, podeSalvar]);
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <span className="label">Tipo</span>
+        <div className="cot-seg">
+          <button className={`cot-seg-btn ${f.tipo === 'saida' ? 'on' : ''}`} onClick={() => upd({ tipo: 'saida', categoria: '' })}>Despesa</button>
+          <button className={`cot-seg-btn ${f.tipo === 'entrada' ? 'on' : ''}`} onClick={() => upd({ tipo: 'entrada', categoria: '' })}>Receita</button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Descrição"><input className="inp" value={f.descricao} onChange={(e) => upd({ descricao: e.target.value })} placeholder="Ex.: Aluguel da sede" /></Field>
+        <Field label="Categoria">
+          <select className="inp" value={f.categoria} onChange={(e) => upd({ categoria: e.target.value })}>
+            <option value="">Selecione…</option>
+            {cats.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="Valor (R$)"><input type="number" step="0.01" min="0" className="inp mono" value={f.valor} onChange={(e) => upd({ valor: e.target.value })} placeholder="0,00" /></Field>
+        <Field label="Frequência">
+          <select className="inp" value={f.frequencia} onChange={(e) => upd({ frequencia: e.target.value })}>
+            {FREQUENCIAS.map(fr => <option key={fr.k} value={fr.k}>{fr.label}</option>)}
+          </select>
+        </Field>
+        {usaDiaVenc && (
+          <Field label="Dia do vencimento">
+            <input type="number" min="1" max="31" className="inp mono" value={f.diaVencimento} onChange={(e) => upd({ diaVencimento: parseInt(e.target.value) || 1 })} />
+          </Field>
+        )}
+        <Field label="Data de início"><input type="date" className="inp" value={f.dataInicio} onChange={(e) => upd({ dataInicio: e.target.value })} /></Field>
+        <Field label="Data final (opcional)"><input type="date" className="inp" value={f.dataFim} onChange={(e) => upd({ dataFim: e.target.value })} /></Field>
+        <Field label="Nº de parcelas (opcional)"><input type="number" min="0" className="inp mono" value={f.parcelas} onChange={(e) => upd({ parcelas: e.target.value })} placeholder="deixe vazio p/ indeterminado" /></Field>
+      </div>
+
+      <div>
+        <span className="label">Modo</span>
+        <div className="cot-seg">
+          <button className={`cot-seg-btn ${f.modo === 'gerar' ? 'on' : ''}`} onClick={() => upd({ modo: 'gerar' })}>Gerar lançamentos</button>
+          <button className={`cot-seg-btn ${f.modo === 'lembrar' ? 'on' : ''}`} onClick={() => upd({ modo: 'lembrar' })}>Apenas lembrar</button>
+        </div>
+        <p className="text-xs t-mute mt-1.5">
+          {f.modo === 'gerar'
+            ? 'Os lançamentos futuros serão criados automaticamente no financeiro (status pendente).'
+            : 'Nenhum lançamento será criado — a recorrência serve só de referência.'}
+        </p>
+      </div>
+
+      <Field label="Observações"><textarea className="inp" rows={2} value={f.obs} onChange={(e) => upd({ obs: e.target.value })} /></Field>
+
+      {previa.length > 0 && f.modo === 'gerar' && (
+        <div className="fe-previa">
+          <div className="label mb-2">Próximos lançamentos que serão gerados</div>
+          <div className="flex flex-wrap gap-1.5">
+            {previa.map(d => <span key={d} className="badge badge-slate">{fmtDate(d)}</span>)}
+            <span className="text-xs t-mute self-center">…até 12 meses à frente</span>
+          </div>
+        </div>
+      )}
+
+      <div className="flex gap-2 pt-2">
+        <button className="btn btn-ghost flex-1" onClick={onCancel}>Cancelar</button>
+        <button className="btn btn-primary flex-1" onClick={() => onSave(f)} disabled={!podeSalvar}>
+          {f.id ? 'Salvar alterações' : 'Criar recorrência'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function FinanceiroEmpresa({ data, setData }) {
-  const { finEmpresa, veiculos, linhas, contratos } = data;
+  const { finEmpresa, veiculos, linhas, contratos, recorrencias = [] } = data;
   const [openForm, setOpenForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [filtroTipo, setFiltroTipo] = useState('todos');
@@ -1102,11 +1386,9 @@ function FinanceiroEmpresa({ data, setData }) {
 
     nota = Math.max(0, Math.min(100, Math.round(nota)));
 
-    let nivel, cor;
-    if (nota >= 80) { nivel = 'Excelente'; cor = '#16A34A'; }
-    else if (nota >= 60) { nivel = 'Boa'; cor = '#0EA5E9'; }
-    else if (nota >= 40) { nivel = 'Atenção'; cor = '#D97706'; }
-    else { nivel = 'Crítica'; cor = '#DC2626'; }
+    const faixa = SAUDE_FAIXAS.find(f => nota >= f.min && nota <= f.max) || SAUDE_FAIXAS[0];
+    const nivel = faixa.label;
+    const cor = faixa.cor;
 
     // Sugestões automáticas com base nos fatores negativos
     const sugestoes = [];
@@ -1116,17 +1398,44 @@ function FinanceiroEmpresa({ data, setData }) {
     if (resumo.aPagar > resumo.aReceber) sugestoes.push('Renegocie prazos de pagamento para aliviar o caixa.');
     if (sugestoes.length === 0) sugestoes.push('Continue assim! Mantenha o controle de vencimentos em dia.');
 
-    return { nota, nivel, cor, fatores, sugestoes, totalVencido, vencidas: vencidas.length };
+    // Resumo inteligente — uma frase que resume a situação
+    let resumoTxt;
+    if (nota >= 86) resumoTxt = 'Seu fluxo de caixa está saudável e a operação é lucrativa.';
+    else if (nota >= 71) resumoTxt = 'Sua empresa está no caminho certo. Mantenha o controle das despesas.';
+    else if (nota >= 51) resumoTxt = 'Situação estável, mas há pontos a melhorar nos indicadores.';
+    else if (nota >= 31) resumoTxt = 'Atenção: os custos estão acima do ideal para a receita atual.';
+    else resumoTxt = 'Situação crítica. Priorize entradas e regularize as contas vencidas.';
+
+    return { nota, nivel, cor, faixa, resumoTxt, fatores, sugestoes, totalVencido, vencidas: vencidas.length };
   }, [resumo, m, finEmpresa]);
 
   // Série de fluxo de caixa (reaproveita reportSeries) + saldo acumulado
   const fluxo = useMemo(() => {
     const serie = reportSeries(finEmpresa.filter(x => effStatus(x) !== 'cancelado'), periodo);
     let acumulado = 0;
-    return serie.map(b => {
+    const dados = serie.map(b => {
       acumulado += b.lucro;
       return { label: b.label, entradas: b.receita, saidas: b.custo, saldo: acumulado };
     });
+
+    // Métricas derivadas (apenas leitura da série — não altera nenhum cálculo)
+    const totalEnt = dados.reduce((a, b) => a + b.entradas, 0);
+    const totalSai = dados.reduce((a, b) => a + b.saidas, 0);
+    const saldoPeriodo = totalEnt - totalSai;
+    const n = dados.length || 1;
+    const melhorDia = dados.reduce((best, b) => b.entradas > (best?.entradas || 0) ? b : best, null);
+    const maiorGastoDia = dados.reduce((worst, b) => b.saidas > (worst?.saidas || 0) ? b : worst, null);
+    const mediaDiaria = saldoPeriodo / n;
+    const saldoMedio = dados.reduce((a, b) => a + b.saldo, 0) / n;
+
+    // Variação vs período anterior (mesma lógica de pctChange já usada no app)
+    const { prevStart, prevEnd } = periodRange(periodo);
+    const prev = finEmpresa.filter(x => effStatus(x) !== 'cancelado' && inRange(x.data, prevStart, prevEnd));
+    const prevSaldo = prev.filter(x => x.tipo === 'entrada').reduce((a, b) => a + b.valor, 0)
+                    - prev.filter(x => x.tipo === 'saida').reduce((a, b) => a + b.valor, 0);
+    const delta = pctChange(saldoPeriodo, prevSaldo);
+
+    return { dados, saldoPeriodo, delta, melhorDia, maiorGastoDia, mediaDiaria, saldoMedio };
   }, [finEmpresa, periodo]);
 
   // Despesas por categoria (rosca) — reaproveita groupByCat
@@ -1151,6 +1460,116 @@ function FinanceiroEmpresa({ data, setData }) {
       .sort((a, b) => (a.data || '').localeCompare(b.data || ''))
       .slice(0, 6);
   }, [finEmpresa]);
+
+  // Calendário financeiro — mês visível
+  const hojeISO = todayISO();
+  const [calRef, setCalRef] = useState(() => { const d = new Date(); return { ano: d.getFullYear(), mes: d.getMonth() }; });
+  const [diaSel, setDiaSel] = useState(null); // 'YYYY-MM-DD' clicado
+
+  const calDados = useMemo(() => {
+    const { ano, mes } = calRef;
+    // agrega por dia do mês visível
+    const porDia = {}; // 'YYYY-MM-DD' -> { entrada, saida, temVenc, temVencido }
+    finEmpresa.forEach(x => {
+      if (effStatus(x) === 'cancelado') return;
+      const data = x.data || '';
+      const d = new Date(data + 'T00:00:00');
+      if (d.getFullYear() !== ano || d.getMonth() !== mes) return;
+      const cur = porDia[data] || { entrada: 0, saida: 0, temVenc: false, temVencido: false };
+      const st = effStatus(x);
+      if (x.tipo === 'entrada') cur.entrada += x.valor; else cur.saida += x.valor;
+      if (st === 'pendente') cur.temVenc = true;
+      if (st === 'vencido') cur.temVencido = true;
+      porDia[data] = cur;
+    });
+    // monta a grade (semanas x 7 dias), começando no domingo
+    const primeiro = new Date(ano, mes, 1);
+    const inicioSemana = primeiro.getDay(); // 0=domingo
+    const diasNoMes = new Date(ano, mes + 1, 0).getDate();
+    const celulas = [];
+    for (let i = 0; i < inicioSemana; i++) celulas.push(null);
+    for (let dia = 1; dia <= diasNoMes; dia++) {
+      const iso = `${ano}-${String(mes + 1).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
+      celulas.push({ dia, iso, ...(porDia[iso] || { entrada: 0, saida: 0, temVenc: false, temVencido: false }) });
+    }
+    while (celulas.length % 7 !== 0) celulas.push(null);
+    return celulas;
+  }, [finEmpresa, calRef]);
+
+  const mudarMes = (delta) => setCalRef(prev => {
+    let m = prev.mes + delta, a = prev.ano;
+    if (m < 0) { m = 11; a--; } if (m > 11) { m = 0; a++; }
+    return { ano: a, mes: m };
+  });
+
+  // ---------- RECORRÊNCIAS ----------
+  const [recDrawer, setRecDrawer] = useState(null); // 'saida' | 'entrada' | null → lista
+  const [recForm, setRecForm] = useState(null);     // objeto em edição ou {} pra nova
+  const [recDel, setRecDel] = useState(null);
+
+  const recResumo = useMemo(() => {
+    const calc = (tipo) => {
+      const lista = recorrencias.filter(r => r.tipo === tipo && r.status === 'ativa');
+      const totalMensal = lista.reduce((a, r) => {
+        const f = freqInfo(r.frequencia);
+        // normaliza pra valor mensal aproximado (só pra exibição do resumo)
+        const v = Number(r.valor) || 0;
+        if (f.meses) return a + v / f.meses;
+        if (f.dias) return a + v * (30 / f.dias);
+        return a + v;
+      }, 0);
+      // próximo vencimento: menor data futura entre os lançamentos gerados
+      const futuros = finEmpresa
+        .filter(x => x.recorrenciaId && lista.some(r => r.id === x.recorrenciaId) && x.data >= hojeISO && effStatus(x) !== 'pago')
+        .sort((a, b) => a.data.localeCompare(b.data));
+      return { qtd: lista.length, totalMensal, proximo: futuros[0]?.data || null };
+    };
+    return { saida: calc('saida'), entrada: calc('entrada') };
+  }, [recorrencias, finEmpresa, hojeISO]);
+
+  // Salva a recorrência e gera os lançamentos futuros (até 12 meses à frente)
+  const salvarRecorrencia = (rec) => {
+    const horizonte = new Date();
+    horizonte.setMonth(horizonte.getMonth() + 12);
+    const ateISO = horizonte.toISOString().slice(0, 10);
+    const isEdit = !!rec.id;
+    const registro = {
+      ...rec,
+      id: rec.id || uid(),
+      status: rec.status || 'ativa',
+      criadoEm: rec.criadoEm || new Date().toISOString(),
+      atualizadoEm: new Date().toISOString(),
+    };
+    setData(d => {
+      const recs = isEdit
+        ? (d.recorrencias || []).map(r => r.id === registro.id ? registro : r)
+        : [...(d.recorrencias || []), registro];
+      // gera os lançamentos que faltam (não duplica os existentes)
+      const novos = lancamentosFaltantes(registro, d.finEmpresa, ateISO);
+      return { ...d, recorrencias: recs, finEmpresa: [...d.finEmpresa, ...novos] };
+    });
+    setRecForm(null);
+    setToast(isEdit ? 'Recorrência atualizada' : 'Recorrência criada — lançamentos gerados');
+  };
+
+  const mudarStatusRec = (id, novo) => {
+    setData(d => ({ ...d, recorrencias: (d.recorrencias || []).map(r => r.id === id ? { ...r, status: novo, atualizadoEm: new Date().toISOString() } : r) }));
+    setToast(novo === 'ativa' ? 'Recorrência reativada' : novo === 'pausada' ? 'Recorrência pausada' : 'Recorrência encerrada');
+  };
+
+  // Exclui a recorrência. escopo: 'somente' (mantém lançamentos) | 'futuros' (remove os não pagos futuros)
+  const excluirRecorrencia = (rec, escopo) => {
+    setData(d => {
+      const recs = (d.recorrencias || []).filter(r => r.id !== rec.id);
+      let fin = d.finEmpresa;
+      if (escopo === 'futuros') {
+        fin = fin.filter(x => !(x.recorrenciaId === rec.id && x.data >= hojeISO && effStatus(x) !== 'pago'));
+      }
+      return { ...d, recorrencias: recs, finEmpresa: fin };
+    });
+    setRecDel(null);
+    setToast('Recorrência excluída');
+  };
 
   const filtered = useMemo(() => {
     const { start, end } = periodRange(periodo);
@@ -1243,36 +1662,64 @@ function FinanceiroEmpresa({ data, setData }) {
           <div className="fe-card-val mono t-green">{fmtBRL(resumo.recorrente)}</div>
           <div className="fe-card-sub">Prevista no mês</div>
         </div>
+      </div>
 
-        {/* Card de Saúde Financeira */}
-        <div className="fe-saude fade-in">
-          <div className="fe-saude-head">
-            <Sparkles size={13} style={{ color: saude.cor }} />
-            <span className="fe-saude-titulo">Saúde financeira</span>
-          </div>
-          <div className="fe-saude-body">
-            <div className="fe-saude-ring" style={{ '--pct': `${saude.nota}%`, '--cor': saude.cor }}>
-              <div className="fe-saude-nota">
-                <span className="mono">{saude.nota}</span>
-                <small>/100</small>
-              </div>
+      {/* Saúde Financeira — velocímetro premium */}
+      <div className="card p-5 fe-gauge-card fade-in">
+        <div className="fe-gauge-head">
+          <h3 className="display h-card t-ink">Saúde Financeira</h3>
+          <p className="text-sm t-soft">Avaliação geral da empresa</p>
+        </div>
+
+        <GaugeSaude nota={saude.nota} faixa={saude.faixa} />
+
+        {/* Legenda das faixas */}
+        <div className="fe-gauge-legend">
+          {SAUDE_FAIXAS.map(f => (
+            <div key={f.label} className={`fe-gauge-leg ${saude.faixa.label === f.label ? 'on' : ''}`}>
+              <span className="fe-gauge-leg-dot" style={{ background: f.cor }} />
+              <span className="fe-gauge-leg-faixa mono">{f.min}-{f.max}</span>
+              <span className="fe-gauge-leg-lbl">{f.label}</span>
             </div>
-            <div className="fe-saude-nivel" style={{ color: saude.cor }}>{saude.nivel}</div>
-          </div>
-          <button className="fe-saude-btn" onClick={() => setSaudeOpen(true)}>Ver detalhes <ChevronRight size={13} /></button>
+          ))}
+        </div>
+
+        {/* Resumo inteligente */}
+        <div className="fe-gauge-resumo" style={{ borderColor: saude.cor + '33', background: saude.cor + '0D' }}>
+          <span className="fe-gauge-resumo-ico" style={{ background: saude.cor }}>
+            {saude.faixa.icone === 'check' ? <TrendingUp size={15} /> : saude.faixa.icone === 'alert' ? <AlertTriangle size={15} /> : <TrendingDown size={15} />}
+          </span>
+          <p className="fe-gauge-resumo-txt">{saude.resumoTxt}</p>
+          <button className="fe-saude-btn" onClick={() => setSaudeOpen(true)} style={{ flexShrink: 0 }}>
+            Ver detalhes <ChevronRight size={13} />
+          </button>
         </div>
       </div>
 
       {/* Fluxo de caixa + Despesas por categoria */}
       <div className="fe-mid-grid">
         <div className="card p-4 sm:p-5">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="display h-card t-ink">Fluxo de caixa</h3>
-            <span className="text-xs t-mute">entradas · saídas · saldo acumulado</span>
+          {/* Cabeçalho: saldo do período + variação */}
+          <div className="fe-flux-head">
+            <div>
+              <h3 className="display h-card t-ink">Fluxo de Caixa</h3>
+              <div className="fe-flux-lbl">Saldo do período</div>
+              <div className="fe-flux-saldo-row">
+                <span className={`fe-flux-saldo mono ${fluxo.saldoPeriodo >= 0 ? '' : 't-red'}`}>{fmtBRL(fluxo.saldoPeriodo)}</span>
+                {Number.isFinite(fluxo.delta) && fluxo.delta !== 0 && (
+                  <span className={`fe-flux-delta ${fluxo.delta >= 0 ? 'up' : 'down'}`}>
+                    {fluxo.delta >= 0 ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
+                    {fluxo.delta >= 0 ? '+' : ''}{fluxo.delta.toFixed(0)}%
+                  </span>
+                )}
+              </div>
+            </div>
+            <span className="text-xs t-mute fe-flux-leg">entradas · saídas · saldo acumulado</span>
           </div>
-          <div style={{ height: 260 }}>
+
+          <div style={{ height: 240 }}>
             <ResponsiveContainer>
-              <ComposedChart data={fluxo} margin={{ top: 6, right: 4, left: -18, bottom: 0 }}>
+              <ComposedChart data={fluxo.dados} margin={{ top: 6, right: 4, left: -18, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F3" vertical={false} />
                 <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
                 <YAxis tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
@@ -1282,6 +1729,38 @@ function FinanceiroEmpresa({ data, setData }) {
                 <Line type="monotone" dataKey="saldo" name="Saldo acumulado" stroke="var(--color-primary)" strokeWidth={2.5} dot={false} />
               </ComposedChart>
             </ResponsiveContainer>
+          </div>
+
+          {/* Mini-métricas do período */}
+          <div className="fe-flux-stats">
+            <div className="fe-flux-stat">
+              <span className="fe-flux-stat-ico" style={{ background: '#DCFCE7', color: '#16A34A' }}><ArrowUpRight size={13} /></span>
+              <div className="min-w-0">
+                <div className="fe-flux-stat-lbl">Melhor dia</div>
+                <div className="fe-flux-stat-val mono t-green">{fmtBRL(fluxo.melhorDia?.entradas || 0)}</div>
+              </div>
+            </div>
+            <div className="fe-flux-stat">
+              <span className="fe-flux-stat-ico" style={{ background: '#FEE2E2', color: '#DC2626' }}><ArrowDownRight size={13} /></span>
+              <div className="min-w-0">
+                <div className="fe-flux-stat-lbl">Maior gasto</div>
+                <div className="fe-flux-stat-val mono t-red">{fmtBRL(fluxo.maiorGastoDia?.saidas || 0)}</div>
+              </div>
+            </div>
+            <div className="fe-flux-stat">
+              <span className="fe-flux-stat-ico" style={{ background: '#EFF4FF', color: 'var(--color-primary)' }}><TrendingUp size={13} /></span>
+              <div className="min-w-0">
+                <div className="fe-flux-stat-lbl">Média diária</div>
+                <div className={`fe-flux-stat-val mono ${fluxo.mediaDiaria >= 0 ? 't-ink' : 't-red'}`}>{fmtBRL(fluxo.mediaDiaria)}</div>
+              </div>
+            </div>
+            <div className="fe-flux-stat">
+              <span className="fe-flux-stat-ico" style={{ background: '#F3F4F6', color: '#6B7280' }}><Activity size={13} /></span>
+              <div className="min-w-0">
+                <div className="fe-flux-stat-lbl">Saldo médio</div>
+                <div className={`fe-flux-stat-val mono ${fluxo.saldoMedio >= 0 ? 't-ink' : 't-red'}`}>{fmtBRL(fluxo.saldoMedio)}</div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1354,6 +1833,80 @@ function FinanceiroEmpresa({ data, setData }) {
             })}
           </div>
         )}
+      </div>
+
+      {/* Recorrências — cards compactos */}
+      <div className="fe-rec-grid">
+        {[
+          { tipo: 'saida', titulo: 'Despesas recorrentes', ico: TrendingDown, cor: '#DC2626', lblTotal: 'Total mensal', r: recResumo.saida },
+          { tipo: 'entrada', titulo: 'Receitas recorrentes', ico: TrendingUp, cor: '#16A34A', lblTotal: 'Receita prevista', r: recResumo.entrada },
+        ].map(({ tipo, titulo, ico: Ico, cor, lblTotal, r }) => (
+          <div key={tipo} className="card p-4 sm:p-5">
+            <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="fe-rec-ico" style={{ background: cor }}><Ico size={15} /></span>
+                <h3 className="display h-card t-ink">{titulo}</h3>
+              </div>
+              <button className="fe-link-btn" onClick={() => setRecDrawer(tipo)}>Ver recorrências</button>
+            </div>
+            <div className="fe-rec-metrics">
+              <div>
+                <div className="fe-rec-m-lbl">Quantidade</div>
+                <div className="fe-rec-m-val mono">{r.qtd}</div>
+              </div>
+              <div>
+                <div className="fe-rec-m-lbl">{lblTotal}</div>
+                <div className="fe-rec-m-val mono" style={{ color: cor }}>{fmtBRL(r.totalMensal)}</div>
+              </div>
+              <div>
+                <div className="fe-rec-m-lbl">Próximo</div>
+                <div className="fe-rec-m-val" style={{ fontSize: 14 }}>{r.proximo ? fmtDate(r.proximo) : '—'}</div>
+              </div>
+            </div>
+            <button className="btn btn-primary w-full mt-3" onClick={() => setRecForm({ tipo })}>
+              <Plus size={15} /> Nova recorrência
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* Calendário financeiro */}
+      <div className="card p-4 sm:p-5">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h3 className="display h-card t-ink">Calendário financeiro</h3>
+          <div className="fe-cal-nav">
+            <button onClick={() => mudarMes(-1)} className="fe-cal-navbtn" aria-label="Mês anterior"><ChevronRight size={16} style={{ transform: 'rotate(180deg)' }} /></button>
+            <span className="fe-cal-mes">{['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][calRef.mes]} {calRef.ano}</span>
+            <button onClick={() => mudarMes(1)} className="fe-cal-navbtn" aria-label="Próximo mês"><ChevronRight size={16} /></button>
+            <button onClick={() => { const d = new Date(); setCalRef({ ano: d.getFullYear(), mes: d.getMonth() }); }} className="fe-cal-hoje">Hoje</button>
+          </div>
+        </div>
+        <div className="fe-cal-grid">
+          {['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'].map(d => <div key={d} className="fe-cal-wd">{d}</div>)}
+          {calDados.map((c, i) => {
+            if (!c) return <div key={i} className="fe-cal-cell empty" />;
+            const hoje = c.iso === hojeISO;
+            const temMov = c.entrada > 0 || c.saida > 0;
+            return (
+              <button key={i} className={`fe-cal-cell ${hoje ? 'hoje' : ''} ${temMov || c.temVenc || c.temVencido ? 'ativo' : ''}`}
+                onClick={() => temMov || c.temVenc || c.temVencido ? setDiaSel(c.iso) : null}>
+                <span className="fe-cal-dia">{c.dia}</span>
+                <span className="fe-cal-dots">
+                  {c.entrada > 0 && <span className="fe-cal-dot" style={{ background: '#16A34A' }} />}
+                  {c.saida > 0 && <span className="fe-cal-dot" style={{ background: '#DC2626' }} />}
+                  {c.temVenc && <span className="fe-cal-dot" style={{ background: '#D97706' }} />}
+                  {c.temVencido && <span className="fe-cal-dot" style={{ background: '#7C3AED' }} />}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="fe-cal-legend">
+          <span><span className="fe-cal-dot" style={{ background: '#16A34A' }} /> Entrada</span>
+          <span><span className="fe-cal-dot" style={{ background: '#DC2626' }} /> Saída</span>
+          <span><span className="fe-cal-dot" style={{ background: '#D97706' }} /> Vencimento</span>
+          <span><span className="fe-cal-dot" style={{ background: '#7C3AED' }} /> Vencido</span>
+        </div>
       </div>
 
       {/* Resumo inteligente */}
@@ -1476,6 +2029,125 @@ function FinanceiroEmpresa({ data, setData }) {
           </div>
         )}
       </div>
+
+      {/* Drawer: lista de recorrências */}
+      <Modal open={!!recDrawer} onClose={() => setRecDrawer(null)} title={recDrawer === 'entrada' ? 'Receitas recorrentes' : 'Despesas recorrentes'} wide>
+        {recDrawer && (() => {
+          const lista = recorrencias.filter(r => r.tipo === recDrawer)
+            .sort((a, b) => (a.status === 'ativa' ? -1 : 1) - (b.status === 'ativa' ? -1 : 1));
+          return (
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-sm t-soft">{lista.length} recorrência(s)</span>
+                <button className="btn btn-primary" onClick={() => { setRecForm({ tipo: recDrawer }); setRecDrawer(null); }}>
+                  <Plus size={15} /> Nova
+                </button>
+              </div>
+              {lista.length === 0 ? <EmptyState icon={Receipt} title="Nenhuma recorrência cadastrada ainda." /> : (
+                <div className="space-y-2" style={{ maxHeight: 420, overflowY: 'auto' }}>
+                  {lista.map(r => {
+                    const st = REC_STATUS.find(s => s.k === r.status) || REC_STATUS[0];
+                    const gerados = finEmpresa.filter(x => x.recorrenciaId === r.id);
+                    const pagos = gerados.filter(x => effStatus(x) === 'pago').length;
+                    const restantes = Number(r.parcelas) > 0 ? Math.max(0, Number(r.parcelas) - pagos) : null;
+                    const prox = gerados.filter(x => x.data >= hojeISO && effStatus(x) !== 'pago').sort((a, b) => a.data.localeCompare(b.data))[0];
+                    return (
+                      <div key={r.id} className="fe-rec-row">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-semibold t-ink truncate">{r.descricao}</span>
+                            <Badge tone={st.tone}>{st.label}</Badge>
+                            {r.modo === 'lembrar' && <span className="badge badge-slate">só lembrete</span>}
+                          </div>
+                          <div className="text-xs t-soft mt-0.5">
+                            {r.categoria} · {freqInfo(r.frequencia).label}
+                            {r.diaVencimento ? ` · dia ${r.diaVencimento}` : ''}
+                            {prox ? ` · próx. ${fmtDate(prox.data)}` : ''}
+                            {restantes !== null ? ` · ${restantes} parcela(s) restante(s)` : ''}
+                          </div>
+                        </div>
+                        <div className="mono text-sm font-semibold" style={{ flexShrink: 0, color: r.tipo === 'entrada' ? '#16A34A' : '#DC2626' }}>
+                          {fmtBRL(r.valor)}
+                        </div>
+                        <div className="fe-rec-actions">
+                          <button className="ibtn" title="Editar" onClick={() => { setRecForm(r); setRecDrawer(null); }}><Pencil size={14} /></button>
+                          {r.status === 'ativa' && <button className="ibtn" title="Pausar" onClick={() => mudarStatusRec(r.id, 'pausada')}><Clock size={14} /></button>}
+                          {r.status === 'pausada' && <button className="ibtn" title="Reativar" onClick={() => mudarStatusRec(r.id, 'ativa')}><Check size={14} /></button>}
+                          {r.status !== 'encerrada' && <button className="ibtn" title="Encerrar" onClick={() => mudarStatusRec(r.id, 'encerrada')}><X size={14} /></button>}
+                          <button className="ibtn ibtn-del" title="Excluir" onClick={() => { setRecDel(r); setRecDrawer(null); }}><Trash2 size={14} /></button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* Formulário de recorrência */}
+      <Modal open={!!recForm} onClose={() => setRecForm(null)} title={recForm?.id ? 'Editar recorrência' : 'Nova recorrência'} wide>
+        {recForm && <RecorrenciaForm inicial={recForm} config={data.config} onSave={salvarRecorrencia} onCancel={() => setRecForm(null)} />}
+      </Modal>
+
+      {/* Confirmação de exclusão de recorrência */}
+      <Modal open={!!recDel} onClose={() => setRecDel(null)} title="Excluir recorrência">
+        {recDel && (
+          <div className="space-y-4">
+            <p className="text-sm t-ink">Excluir <b>{recDel.descricao}</b>? Escolha o que fazer com os lançamentos já gerados:</p>
+            <div className="space-y-2">
+              <button className="fe-del-op" onClick={() => excluirRecorrencia(recDel, 'somente')}>
+                <div className="font-semibold text-sm t-ink">Excluir só a recorrência</div>
+                <div className="text-xs t-soft">Os lançamentos já criados continuam no financeiro.</div>
+              </button>
+              <button className="fe-del-op danger" onClick={() => excluirRecorrencia(recDel, 'futuros')}>
+                <div className="font-semibold text-sm" style={{ color: '#DC2626' }}>Excluir a recorrência e os lançamentos futuros</div>
+                <div className="text-xs t-soft">Remove os lançamentos ainda não pagos daqui pra frente. Os pagos são preservados.</div>
+              </button>
+            </div>
+            <button className="btn btn-ghost w-full" onClick={() => setRecDel(null)}>Cancelar</button>
+          </div>
+        )}
+      </Modal>
+
+      {/* Detalhes do dia (calendário) */}
+      <Modal open={!!diaSel} onClose={() => setDiaSel(null)} title={diaSel ? `Movimentações · ${fmtDate(diaSel)}` : ''} wide>
+        {diaSel && (() => {
+          const itens = finEmpresa
+            .filter(x => x.data === diaSel && effStatus(x) !== 'cancelado')
+            .sort((a, b) => (b.valor || 0) - (a.valor || 0));
+          const entradas = itens.filter(x => x.tipo === 'entrada').reduce((a, b) => a + b.valor, 0);
+          const saidas = itens.filter(x => x.tipo === 'saida').reduce((a, b) => a + b.valor, 0);
+          return (
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="metric-box"><div className="text-xs t-soft">Entradas</div><div className="text-sm font-semibold t-green mono">{fmtBRL(entradas)}</div></div>
+                <div className="metric-box"><div className="text-xs t-soft">Saídas</div><div className="text-sm font-semibold t-red mono">{fmtBRL(saidas)}</div></div>
+                <div className="metric-box"><div className="text-xs t-soft">Saldo do dia</div><div className={`text-sm font-semibold mono ${entradas - saidas >= 0 ? 't-ink' : 't-red'}`}>{fmtBRL(entradas - saidas)}</div></div>
+              </div>
+              {itens.length === 0 ? <EmptyState icon={Calendar} title="Nada neste dia." /> : (
+                <div className="space-y-1.5" style={{ maxHeight: 360, overflowY: 'auto' }}>
+                  {itens.map(x => {
+                    const isE = x.tipo === 'entrada';
+                    const sb = statusBadge(x);
+                    return (
+                      <div key={x.id} className="fe-cat-item">
+                        <div className={`pill ${isE ? 'pill-green' : 'pill-red'}`} style={{ flexShrink: 0 }}>{isE ? <ArrowUpRight size={15} /> : <ArrowDownRight size={15} />}</div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium t-ink truncate">{x.descricao}</div>
+                          <div className="text-xs t-soft">{x.categoria} · <Badge tone={sb.tone}>{sb.label}</Badge></div>
+                        </div>
+                        <span className={`mono text-sm font-semibold ${isE ? 't-green' : 't-red'}`} style={{ flexShrink: 0 }}>{isE ? '+ ' : '− '}{fmtBRL(x.valor)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Modal>
 
       {/* Lançamentos de uma categoria (ao clicar na rosca) */}
       <Modal open={!!catSel} onClose={() => setCatSel(null)} title={catSel ? `Despesas · ${catSel}` : ''} wide>
@@ -3934,6 +4606,33 @@ function AppInner() {
         .acc-head-chev{ color:#9CA3AF; flex-shrink:0; transition:transform .22s; }
         .acc-head.open .acc-head-chev{ transform:rotate(180deg); }
         .acc-body{ padding:4px 18px 20px; animation:accOpen .24s ease; }
+
+        /* Móveis e itens personalizados */
+        .mv-table{ display:flex; flex-direction:column; gap:7px; }
+        .mv-head{ display:grid; grid-template-columns:1.6fr 1fr 1fr 34px; gap:10px; font-size:10.5px; font-weight:600; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; padding:0 2px; }
+        .mv-row{ display:grid; grid-template-columns:1.6fr 1fr 1fr 34px; gap:10px; align-items:center; }
+        @media(max-width:640px){
+          .mv-head{ display:none; }
+          .mv-row{ grid-template-columns:1fr 1fr; gap:8px; padding:10px; background:#F9FAFB; border-radius:10px; }
+          .mv-row > :first-child{ grid-column:1 / -1; }
+        }
+        .sc-list{ display:flex; flex-direction:column; gap:8px; }
+        .sc-row{ display:grid; grid-template-columns:1.6fr 90px 1fr 34px; gap:10px; align-items:center; }
+        @media(max-width:640px){
+          .sc-row{ grid-template-columns:1fr 1fr; padding:10px; background:#F9FAFB; border-radius:10px; }
+          .sc-row > :first-child{ grid-column:1 / -1; }
+        }
+        .mat-card-custom{ border-style:dashed; border-color:#C7D2FE; background:#F8FAFF; }
+        .cust-head{ display:flex; align-items:center; gap:6px; margin-bottom:8px; }
+        .cust-nome{ flex:1; min-width:0; border:0; background:transparent; font-family:inherit; font-size:12.5px; font-weight:600; color:#374151; outline:none; border-bottom:1px dashed #C7D2FE; padding:2px 0; }
+        .cust-nome:focus{ border-bottom-color:var(--color-primary); }
+        .cust-del{ background:none; border:0; color:#9CA3AF; cursor:pointer; padding:2px; flex-shrink:0; }
+        .cust-del:hover{ color:#DC2626; }
+        /* linha de móvel no wizard */
+        .mv-cot-row{ display:flex; align-items:center; gap:10px; padding:9px 11px; border-radius:9px; transition:background .1s; flex-wrap:wrap; }
+        .mv-cot-row:hover{ background:#F9FAFB; }
+        .mv-cot-checks{ display:flex; gap:11px; flex-shrink:0; }
+        .mv-cot-checks .cot-check{ font-size:12px; }
         @keyframes accOpen{ from{ opacity:0; transform:translateY(-6px); } to{ opacity:1; transform:none; } }
 
         /* Aparência — seletor de paletas */
@@ -4032,8 +4731,30 @@ function AppInner() {
         .btn-sm{ padding:6px 12px !important; font-size:13px !important; }
         .pf-tile{ padding:13px 14px !important; min-height:84px; display:flex; flex-direction:column; transition:transform .25s ease, box-shadow .25s ease; will-change:transform; }
 
+        /* Anti-duplicidade na importação */
+        .dup-banner{ background:linear-gradient(135deg,#F0FDF4,#DCFCE7); border:1px solid #86EFAC; border-radius:14px; padding:14px; margin-bottom:16px; }
+        .dup-head{ display:flex; align-items:flex-start; gap:11px; margin-bottom:11px; }
+        .dup-ico{ width:32px; height:32px; border-radius:9px; background:#16A34A; color:#fff; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .dup-titulo{ font-size:14px; font-weight:700; color:#14532D; }
+        .dup-sub{ font-size:12.5px; color:#166534; margin-top:2px; }
+        .dup-list{ display:flex; flex-direction:column; gap:6px; }
+        .dup-item{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 11px; background:rgba(255,255,255,.75); border-radius:9px; flex-wrap:wrap; }
+        .dup-match{ display:flex; align-items:center; gap:7px; flex:1; min-width:0; }
+        .dup-extrato{ font-size:12.5px; color:#6B7280; max-width:42%; }
+        .dup-seta{ color:#16A34A; flex-shrink:0; }
+        .dup-existente{ font-size:12.5px; font-weight:600; color:#0B1324; display:flex; align-items:center; gap:5px; min-width:0; }
+        .dup-tag{ padding:1px 6px; border-radius:99px; background:#DBEAFE; color:#1E40AF; font-size:9.5px; font-weight:600; white-space:nowrap; }
+        .dup-right{ display:flex; align-items:center; gap:9px; flex-shrink:0; }
+        .dup-conf{ padding:2px 7px; border-radius:99px; font-size:10px; font-weight:600; }
+        .dup-conf.alta{ background:#DCFCE7; color:#15803D; }
+        .dup-conf.media{ background:#FEF3C7; color:#B45309; }
+        .dup-desfazer{ font-size:11px; font-weight:600; color:#6B7280; background:none; border:0; cursor:pointer; font-family:inherit; text-decoration:underline; }
+        .dup-desfazer:hover{ color:#0B1324; }
+        .imp-row-match{ background:#F0FDF4; border-radius:9px; }
+        .imp-baixa-tag{ margin-left:7px; padding:1px 7px; border-radius:99px; background:#DCFCE7; color:#15803D; font-size:9.5px; font-weight:600; white-space:nowrap; }
+
         /* Financeiro Empresa — cards principais premium */
-        .fe-cards-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:14px; }
+        .fe-cards-grid{ display:grid; grid-template-columns:repeat(5,1fr); gap:14px; }
         @media(max-width:1200px){ .fe-cards-grid{ grid-template-columns:repeat(3,1fr); } }
         @media(max-width:720px){ .fe-cards-grid{ grid-template-columns:repeat(2,1fr); } }
         .fe-card{ background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; padding:15px; box-shadow:0 1px 3px rgba(11,19,36,.04); transition:transform .18s, box-shadow .18s; }
@@ -4043,19 +4764,42 @@ function AppInner() {
         .fe-card-val{ font-size:19px; font-weight:700; color:var(--color-text); letter-spacing:-.02em; margin-top:3px; line-height:1.1; }
         .fe-card-sub{ font-size:11px; color:#9CA3AF; margin-top:3px; }
 
-        /* Card Saúde Financeira */
-        .fe-saude{ background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; padding:15px; box-shadow:0 1px 3px rgba(11,19,36,.04); display:flex; flex-direction:column; align-items:center; }
-        .fe-saude-head{ display:flex; align-items:center; gap:5px; align-self:flex-start; }
-        .fe-saude-titulo{ font-size:11px; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:.03em; font-weight:600; }
-        .fe-saude-body{ display:flex; flex-direction:column; align-items:center; margin:6px 0; }
+        /* Saúde Financeira — velocímetro */
+        .fe-gauge-card{ transition:transform .2s, box-shadow .2s; }
+        .fe-gauge-card:hover{ transform:translateY(-2px); box-shadow:0 14px 32px rgba(11,19,36,.08); }
+        .fe-gauge-head{ margin-bottom:4px; }
+        .gauge-wrap{ position:relative; max-width:340px; margin:0 auto; }
+        .gauge-svg{ width:100%; height:auto; display:block; overflow:visible; }
+        .gauge-tick{ font-size:10px; fill:#9CA3AF; font-family:'Geist Mono',ui-monospace,monospace; }
+        .gauge-center{ position:absolute; left:0; right:0; bottom:6px; display:flex; flex-direction:column; align-items:center; gap:2px; pointer-events:none; }
+        .gauge-badge{ width:26px; height:26px; border-radius:99px; display:flex; align-items:center; justify-content:center; color:#fff; margin-bottom:2px; animation:gaugePop .5s ease both; }
+        @keyframes gaugePop{ from{ transform:scale(.6); opacity:0; } to{ transform:scale(1); opacity:1; } }
+        .gauge-status{ font-size:13.5px; font-weight:700; }
+        .gauge-nota{ display:flex; align-items:baseline; gap:1px; }
+        .gauge-nota b{ font-size:38px; font-weight:700; color:#0B1324; letter-spacing:-.02em; line-height:1; }
+        .gauge-nota small{ font-size:12px; color:#9CA3AF; }
+        .fe-gauge-legend{ display:flex; flex-wrap:wrap; justify-content:center; gap:6px; margin-top:16px; }
+        .fe-gauge-leg{ display:flex; align-items:center; gap:5px; padding:5px 10px; border-radius:99px; background:#F6F7F9; transition:background .2s, transform .2s; }
+        .fe-gauge-leg.on{ background:#0B13240D; transform:scale(1.04); box-shadow:0 0 0 1.5px currentColor inset; }
+        .fe-gauge-leg-dot{ width:8px; height:8px; border-radius:99px; flex-shrink:0; }
+        .fe-gauge-leg-faixa{ font-size:10.5px; color:#9CA3AF; }
+        .fe-gauge-leg-lbl{ font-size:11.5px; font-weight:600; color:#374151; }
+        .fe-gauge-resumo{ display:flex; align-items:center; gap:11px; margin-top:16px; padding:13px 15px; border:1px solid; border-radius:12px; flex-wrap:wrap; }
+        .fe-gauge-resumo-ico{ width:30px; height:30px; border-radius:9px; display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
+        .fe-gauge-resumo-txt{ flex:1; min-width:160px; font-size:13.5px; color:#0B1324; font-weight:500; }
+        .fe-saude-btn{ display:inline-flex; align-items:center; gap:3px; font-size:12.5px; font-weight:600; color:var(--color-primary); background:none; border:0; cursor:pointer; font-family:inherit; }
+        .fe-saude-btn:hover{ text-decoration:underline; }
+        @media(max-width:520px){
+          .gauge-nota b{ font-size:32px; }
+          .fe-gauge-leg-faixa{ display:none; }
+          .fe-gauge-legend{ gap:5px; }
+        }
+        /* anel usado no painel de detalhes */
         .fe-saude-ring{ position:relative; width:74px; height:74px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:conic-gradient(var(--cor) var(--pct), #EFF1F4 0); }
         .fe-saude-ring::before{ content:''; position:absolute; width:58px; height:58px; border-radius:50%; background:var(--color-surface); }
         .fe-saude-nota{ position:relative; z-index:1; display:flex; align-items:baseline; gap:1px; }
         .fe-saude-nota span{ font-size:22px; font-weight:700; color:var(--color-text); }
         .fe-saude-nota small{ font-size:10px; color:#9CA3AF; }
-        .fe-saude-nivel{ font-size:13px; font-weight:700; margin-top:5px; }
-        .fe-saude-btn{ margin-top:8px; display:inline-flex; align-items:center; gap:3px; font-size:12px; font-weight:600; color:var(--color-primary); background:none; border:0; cursor:pointer; font-family:inherit; }
-        .fe-saude-btn:hover{ text-decoration:underline; }
         .fe-saude-ring-lg{ width:96px; height:96px; flex-shrink:0; }
         .fe-saude-ring-lg::before{ width:76px; height:76px; }
         .fe-saude-ring-lg .fe-saude-nota span{ font-size:28px; }
@@ -4069,6 +4813,22 @@ function AppInner() {
         /* Fluxo + categorias grid */
         .fe-mid-grid{ display:grid; grid-template-columns:1.5fr 1fr; gap:16px; }
         @media(max-width:1000px){ .fe-mid-grid{ grid-template-columns:1fr; } }
+
+        /* Cabeçalho e métricas do fluxo de caixa */
+        .fe-flux-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:10px; flex-wrap:wrap; }
+        .fe-flux-lbl{ font-size:11px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; font-weight:600; margin-top:6px; }
+        .fe-flux-saldo-row{ display:flex; align-items:center; gap:9px; margin-top:2px; }
+        .fe-flux-saldo{ font-size:23px; font-weight:700; color:#0B1324; letter-spacing:-.02em; line-height:1.1; }
+        .fe-flux-delta{ display:inline-flex; align-items:center; gap:2px; padding:2px 8px; border-radius:99px; font-size:11.5px; font-weight:700; }
+        .fe-flux-delta.up{ background:#DCFCE7; color:#16A34A; }
+        .fe-flux-delta.down{ background:#FEE2E2; color:#DC2626; }
+        .fe-flux-leg{ margin-top:4px; }
+        .fe-flux-stats{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:14px; padding-top:14px; border-top:1px solid #F1F2F4; }
+        @media(max-width:640px){ .fe-flux-stats{ grid-template-columns:repeat(2,1fr); } .fe-flux-leg{ display:none; } }
+        .fe-flux-stat{ display:flex; align-items:center; gap:8px; min-width:0; }
+        .fe-flux-stat-ico{ width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .fe-flux-stat-lbl{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.02em; white-space:nowrap; }
+        .fe-flux-stat-val{ font-size:14px; font-weight:700; line-height:1.2; }
         /* Rosca de categorias */
         .fe-donut-wrap{ display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
         .fe-donut{ position:relative; width:180px; height:180px; flex-shrink:0; margin:0 auto; }
@@ -4093,6 +4853,47 @@ function AppInner() {
         .fe-link-btn{ font-size:12.5px; font-weight:600; color:var(--color-primary); background:none; border:0; cursor:pointer; font-family:inherit; }
         .fe-link-btn:hover{ text-decoration:underline; }
         .fe-cat-item{ display:flex; align-items:center; gap:12px; padding:9px 11px; border-radius:9px; background:#F9FAFB; }
+
+        /* Recorrências */
+        .fe-rec-grid{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+        @media(max-width:820px){ .fe-rec-grid{ grid-template-columns:1fr; } }
+        .fe-rec-ico{ width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
+        .fe-rec-metrics{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+        .fe-rec-m-lbl{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
+        .fe-rec-m-val{ font-size:18px; font-weight:700; color:#0B1324; margin-top:2px; line-height:1.15; }
+        .fe-rec-row{ display:flex; align-items:center; gap:12px; padding:11px 12px; border:1px solid #EFF0F2; border-radius:11px; background:#fff; transition:border-color .14s; }
+        .fe-rec-row:hover{ border-color:#E0E3E8; }
+        .fe-rec-actions{ display:flex; gap:1px; flex-shrink:0; }
+        .fe-previa{ background:#F8FAFC; border:1px solid #EEF1F5; border-radius:11px; padding:12px; }
+        .fe-del-op{ width:100%; text-align:left; padding:12px 14px; border:1px solid #E4E7EC; border-radius:11px; background:#fff; cursor:pointer; font-family:inherit; transition:border-color .14s, background .14s; }
+        .fe-del-op:hover{ border-color:var(--color-primary); background:#FAFBFF; }
+        .fe-del-op.danger:hover{ border-color:#DC2626; background:#FEF2F2; }
+
+        /* Calendário financeiro */
+        .fe-cal-nav{ display:flex; align-items:center; gap:8px; }
+        .fe-cal-navbtn{ width:30px; height:30px; border-radius:8px; border:1px solid #E4E7EC; background:#fff; color:#374151; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .14s; }
+        .fe-cal-navbtn:hover{ background:#F3F4F6; }
+        .fe-cal-mes{ font-size:14px; font-weight:600; color:#0B1324; min-width:130px; text-align:center; }
+        .fe-cal-hoje{ padding:6px 12px; border-radius:8px; border:1px solid #E4E7EC; background:#fff; font-family:inherit; font-size:12.5px; font-weight:600; color:var(--color-primary); cursor:pointer; transition:background .14s; }
+        .fe-cal-hoje:hover{ background:#F3F4F6; }
+        .fe-cal-grid{ display:grid; grid-template-columns:repeat(7,1fr); gap:5px; }
+        .fe-cal-wd{ text-align:center; font-size:10.5px; font-weight:600; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; padding:4px 0; }
+        .fe-cal-cell{ aspect-ratio:1; border:1px solid #EFF0F2; border-radius:9px; background:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; font-family:inherit; cursor:default; padding:2px; transition:border-color .14s, background .14s, transform .12s; }
+        .fe-cal-cell.empty{ border:0; background:transparent; }
+        .fe-cal-cell.ativo{ cursor:pointer; }
+        .fe-cal-cell.ativo:hover{ border-color:var(--color-primary); background:#FAFBFF; transform:translateY(-1px); }
+        .fe-cal-cell.hoje{ border-color:var(--color-primary); box-shadow:0 0 0 1.5px var(--color-primary) inset; }
+        .fe-cal-dia{ font-size:13px; font-weight:600; color:#374151; }
+        .fe-cal-cell.hoje .fe-cal-dia{ color:var(--color-primary); font-weight:700; }
+        .fe-cal-dots{ display:flex; gap:2.5px; height:6px; align-items:center; }
+        .fe-cal-dot{ width:6px; height:6px; border-radius:99px; display:inline-block; flex-shrink:0; }
+        .fe-cal-legend{ display:flex; flex-wrap:wrap; gap:14px; margin-top:14px; padding-top:12px; border-top:1px solid #F1F2F4; }
+        .fe-cal-legend span{ display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:#6B7280; }
+        @media(max-width:640px){
+          .fe-cal-grid{ gap:3px; }
+          .fe-cal-dia{ font-size:11.5px; }
+          .fe-cal-cell{ border-radius:7px; }
+        }
         .pf-tile:hover{ transform:translateY(-4px); box-shadow:0 8px 16px rgba(11,19,36,.07),0 22px 50px rgba(11,19,36,.10); }
         .pf-tile:active{ transform:scale(.985); }
         .pf-tile-head{ display:flex; align-items:center; justify-content:space-between; gap:6px; min-height:18px; }
@@ -4383,6 +5184,76 @@ function AppInner() {
 // ============================================================
 const BANCOS_IMP = ['Itaú', 'Cora', 'BTG Pactual', 'Santander', 'Bradesco', 'Banco do Brasil', 'Caixa', 'Sicoob', 'Sicredi', 'Inter', 'Nubank', 'C6 Bank', 'Safra', 'Original', 'Outro'];
 
+// ============================================================
+// CONCILIAÇÃO POR CORRESPONDÊNCIA (anti-duplicidade)
+// ============================================================
+// Quando a pessoa importa o extrato, um pagamento que já existe no sistema
+// (ex.: gerado por uma despesa recorrente, ou lançado à mão) NÃO deve virar
+// um lançamento novo — deve dar BAIXA no que já existe.
+// Aqui detectamos essas correspondências antes de importar.
+
+// Normaliza texto pra comparação (sem acento, maiúsculas, sem ruído de banco)
+function normalizarDesc(s) {
+  return (s || '')
+    .toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\b(PAGAMENTO|PAGTO|PGTO|DEBITO|DEB|CREDITO|CRED|TED|DOC|PIX|BOLETO|TRANSFERENCIA|TRANSF|COMPRA|CARTAO)\b/g, ' ')
+    .replace(/[^A-Z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Similaridade simples: quantas palavras significativas as duas descrições compartilham
+function similaridade(a, b) {
+  const pa = normalizarDesc(a).split(' ').filter(w => w.length >= 3);
+  const pb = normalizarDesc(b).split(' ').filter(w => w.length >= 3);
+  if (pa.length === 0 || pb.length === 0) return 0;
+  const setB = new Set(pb);
+  const comuns = pa.filter(w => setB.has(w)).length;
+  return comuns / Math.min(pa.length, pb.length);
+}
+
+// Diferença de dias entre duas datas ISO
+function diffDias(isoA, isoB) {
+  const a = new Date(isoA + 'T00:00:00');
+  const b = new Date(isoB + 'T00:00:00');
+  return Math.abs(Math.round((a - b) / 86400000));
+}
+
+/**
+ * Procura, entre os lançamentos existentes em aberto, um que corresponda
+ * à linha do extrato. Casa por: mesmo tipo + valor exato + data próxima
+ * (janela de dias) + descrição parecida OU mesma categoria.
+ * Retorna { lancamento, confianca } ou null.
+ */
+function acharCorrespondente(linha, existentes, janelaDias = 5) {
+  const candidatos = existentes.filter(x => {
+    if (x.tipo !== linha.tipo) return false;
+    const st = effStatus(x);
+    if (st !== 'pendente' && st !== 'vencido') return false;   // só o que está em aberto
+    if (Math.abs((x.valor || 0) - (linha.valor || 0)) > 0.01) return false; // valor exato
+    if (!x.data || !linha.data) return false;
+    return diffDias(x.data, linha.data) <= janelaDias;
+  });
+  if (candidatos.length === 0) return null;
+
+  // Escolhe o de maior similaridade de descrição; desempata pela data mais próxima
+  let melhor = null, melhorScore = -1;
+  candidatos.forEach(x => {
+    const sim = similaridade(x.descricao, linha.descricao);
+    const proximidade = 1 - (diffDias(x.data, linha.data) / (janelaDias + 1));
+    const score = sim * 0.75 + proximidade * 0.25;
+    if (score > melhorScore) { melhorScore = score; melhor = x; }
+  });
+
+  // Confiança: alta se a descrição bate bem; média se só valor+data batem
+  const sim = similaridade(melhor.descricao, linha.descricao);
+  let confianca = 'media';
+  if (sim >= 0.5) confianca = 'alta';
+  else if (melhor.recorrenciaId) confianca = 'alta'; // recorrência com valor e data batendo é forte indício
+  return { lancamento: melhor, confianca, similaridade: sim };
+}
+
 function Importacao({ data, setData }) {
   const [banco, setBanco] = useState('Itaú');
   const [competencia, setCompetencia] = useState(currentMonth());
@@ -4396,6 +5267,21 @@ function Importacao({ data, setData }) {
   const totalPreview = preview.reduce((a, b) => a + (b.tipo === 'entrada' ? b.valor : -b.valor), 0);
   const entradas = preview.filter(x => x.tipo === 'entrada').reduce((a, b) => a + b.valor, 0);
   const saidas = preview.filter(x => x.tipo === 'saida').reduce((a, b) => a + b.valor, 0);
+
+  // Detecta linhas do extrato que correspondem a lançamentos JÁ existentes em aberto
+  // (recorrências geradas ou lançamentos manuais). Evita duplicar o mesmo pagamento.
+  const [ignorados, setIgnorados] = useState({}); // idx -> true (usuário optou por importar como novo)
+  const correspondencias = useMemo(() => {
+    const usados = new Set();
+    return preview.map((linha, idx) => {
+      const disponiveis = (data.finEmpresa || []).filter(x => !usados.has(x.id));
+      const match = acharCorrespondente(linha, disponiveis);
+      if (match) usados.add(match.lancamento.id);
+      return match ? { idx, linha, ...match } : null;
+    }).filter(Boolean).filter(c => !ignorados[c.idx]);
+  }, [preview, data.finEmpresa, ignorados]);
+
+  const idxComMatch = useMemo(() => new Set(correspondencias.map(c => c.idx)), [correspondencias]);
 
   const [importLog, setImportLog] = useState([]);
 
@@ -4484,44 +5370,65 @@ function Importacao({ data, setData }) {
   const confirmarImport = () => {
     if (preview.length === 0) return;
     const memoria = data.config?.categoryMemory || {};
-    const novos = preview.map(x => {
-      // Se houver memória para essa descrição, usa a categoria memorizada;
-      // caso contrário, tenta descobrir por palavras-chave; senão, mantém o
-      // que o parser retornou.
-      const sug = suggestCategoria(x.descricao, x.tipo, memoria);
-      const categoriaFinal = sug ? sug.categoria : (x.categoria || 'Outros');
-      return {
-        id: uid(),
-        data: x.data || todayISO(),
-        tipo: x.tipo,
-        categoria: categoriaFinal,
-        descricao: x.descricao,
-        valor: x.valor,
-        cliente: x.cliente || '',
-        forma: source === 'boleto' ? 'Boleto' : source === 'xml' ? 'Boleto' : 'Transferência',
-        veiculoId: '',
-        linhaId: '',
-        contratoId: '',
-        obs: source === 'ofx' ? `Importado de OFX (${x.banco || banco})`
-           : source === 'csv' ? `Importado de CSV (${x.banco || banco})`
-           : source === 'xlsx' ? `Importado de Excel (${x.banco || banco})`
-           : source === 'xml' ? `${x.tipoDoc === 'cte' ? 'CT-e' : 'NF-e'} ${x.numero || ''}${x.emitNome ? ' · ' + x.emitNome : ''}`
-           : `Boleto · ${x.linhaDigitavel || ''}`,
-        status: source === 'boleto' || source === 'xml' ? 'pendente' : 'pago',
-        vencimento: x.vencimento || '',
-        dataPagamento: source === 'boleto' || source === 'xml' ? '' : x.data,
-        recorrente: false,
-        statusConc: source === 'boleto' || source === 'xml' ? 'manual' : 'pendente',
-        fitid: x.fitid || '',
-      };
-    });
-    setData(d => ({ ...d, finEmpresa: [...(d.finEmpresa || []), ...novos] }));
+
+    // Linhas que correspondem a lançamentos existentes → dão BAIXA (não duplicam)
+    const baixas = new Map(); // idLancamentoExistente -> dataPagamento
+    correspondencias.forEach(c => baixas.set(c.lancamento.id, c.linha.data || todayISO()));
+
+    // Só as linhas SEM correspondência viram lançamentos novos
+    const novos = preview
+      .filter((_, idx) => !idxComMatch.has(idx))
+      .map(x => {
+        const sug = suggestCategoria(x.descricao, x.tipo, memoria);
+        const categoriaFinal = sug ? sug.categoria : (x.categoria || 'Outros');
+        return {
+          id: uid(),
+          data: x.data || todayISO(),
+          tipo: x.tipo,
+          categoria: categoriaFinal,
+          descricao: x.descricao,
+          valor: x.valor,
+          cliente: x.cliente || '',
+          forma: source === 'boleto' ? 'Boleto' : source === 'xml' ? 'Boleto' : 'Transferência',
+          veiculoId: '',
+          linhaId: '',
+          contratoId: '',
+          obs: source === 'ofx' ? `Importado de OFX (${x.banco || banco})`
+             : source === 'csv' ? `Importado de CSV (${x.banco || banco})`
+             : source === 'xlsx' ? `Importado de Excel (${x.banco || banco})`
+             : source === 'xml' ? `${x.tipoDoc === 'cte' ? 'CT-e' : 'NF-e'} ${x.numero || ''}${x.emitNome ? ' · ' + x.emitNome : ''}`
+             : `Boleto · ${x.linhaDigitavel || ''}`,
+          status: source === 'boleto' || source === 'xml' ? 'pendente' : 'pago',
+          vencimento: x.vencimento || '',
+          dataPagamento: source === 'boleto' || source === 'xml' ? '' : x.data,
+          recorrente: false,
+          statusConc: source === 'boleto' || source === 'xml' ? 'manual' : 'pendente',
+          fitid: x.fitid || '',
+        };
+      });
+
+    const qtdBaixas = baixas.size;
+    setData(d => ({
+      ...d,
+      finEmpresa: [
+        // dá baixa nos que já existiam: marca como pago + conciliado
+        ...(d.finEmpresa || []).map(x => baixas.has(x.id)
+          ? { ...x, status: 'pago', dataPagamento: baixas.get(x.id), statusConc: 'conciliado' }
+          : x),
+        ...novos,
+      ],
+    }));
     setPreview([]);
+    setIgnorados({});
     setLinhaDig('');
     setSource('');
     setImportLog([]);
     if (fileRef.current) fileRef.current.value = '';
-    setToast(`${novos.length} lançamento(s) importados para o Financeiro`);
+    setToast(
+      qtdBaixas > 0
+        ? `${novos.length} novo(s) importado(s) · ${qtdBaixas} baixa(s) em lançamentos existentes`
+        : `${novos.length} lançamento(s) importados para o Financeiro`
+    );
   };
 
   return (
@@ -4612,6 +5519,45 @@ function Importacao({ data, setData }) {
             <span className="badge badge-slate">{preview.length} {preview.length === 1 ? 'lançamento' : 'lançamentos'}</span>
           </div>
 
+          {/* Anti-duplicidade: lançamentos que já existem no sistema */}
+          {correspondencias.length > 0 && (
+            <div className="dup-banner">
+              <div className="dup-head">
+                <span className="dup-ico"><Check size={17} /></span>
+                <div className="flex-1 min-w-0">
+                  <div className="dup-titulo">
+                    {correspondencias.length} {correspondencias.length === 1 ? 'pagamento já existe' : 'pagamentos já existem'} no sistema
+                  </div>
+                  <div className="dup-sub">
+                    Em vez de duplicar, vamos <b>dar baixa</b> nesses lançamentos (marcar como pagos e conciliados).
+                  </div>
+                </div>
+              </div>
+              <div className="dup-list">
+                {correspondencias.map(c => (
+                  <div key={c.idx} className="dup-item">
+                    <div className="dup-match">
+                      <span className="dup-extrato truncate">{c.linha.descricao}</span>
+                      <ChevronRight size={13} className="dup-seta" />
+                      <span className="dup-existente truncate">
+                        {c.lancamento.descricao}
+                        {c.lancamento.recorrenciaId && <span className="dup-tag">recorrente</span>}
+                      </span>
+                    </div>
+                    <div className="dup-right">
+                      <span className="mono text-sm font-semibold t-ink">{fmtBRL(c.linha.valor)}</span>
+                      <span className={`dup-conf ${c.confianca}`}>{c.confianca === 'alta' ? 'alta' : 'média'}</span>
+                      <button className="dup-desfazer" title="Importar como lançamento novo (não dar baixa)"
+                        onClick={() => setIgnorados(prev => ({ ...prev, [c.idx]: true }))}>
+                        Importar assim mesmo
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-3 gap-3 mb-4">
             <div className="metric-box">
               <div className="text-xs t-soft">Entradas</div>
@@ -4628,30 +5574,40 @@ function Importacao({ data, setData }) {
           </div>
 
           <div className="imp-preview">
-            {preview.map((x, i) => (
-              <div key={i} className="imp-row">
-                <div className={`pill ${x.tipo === 'entrada' ? 'pill-green' : 'pill-red'}`} style={{ flexShrink: 0 }}>
-                  {x.tipo === 'entrada' ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium t-ink truncate">{x.descricao}</div>
-                  <div className="text-xs t-soft mt-0.5 flex flex-wrap gap-1.5">
-                    <span>{fmtDate(x.data)}</span>
-                    <span>·</span>
-                    <span>{x.categoria}</span>
-                    {x.banco && <><span>·</span><span>{x.banco}</span></>}
+            {preview.map((x, i) => {
+              const temMatch = idxComMatch.has(i);
+              return (
+                <div key={i} className={`imp-row ${temMatch ? 'imp-row-match' : ''}`}>
+                  <div className={`pill ${x.tipo === 'entrada' ? 'pill-green' : 'pill-red'}`} style={{ flexShrink: 0 }}>
+                    {x.tipo === 'entrada' ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium t-ink truncate">
+                      {x.descricao}
+                      {temMatch && <span className="imp-baixa-tag">dará baixa</span>}
+                    </div>
+                    <div className="text-xs t-soft mt-0.5 flex flex-wrap gap-1.5">
+                      <span>{fmtDate(x.data)}</span>
+                      <span>·</span>
+                      <span>{x.categoria}</span>
+                      {x.banco && <><span>·</span><span>{x.banco}</span></>}
+                    </div>
+                  </div>
+                  <div className={`mono text-sm font-semibold ${x.tipo === 'entrada' ? 't-green' : 't-red'}`} style={{ flexShrink: 0 }}>
+                    {x.tipo === 'entrada' ? '+ ' : '− '}{fmtBRL(x.valor)}
                   </div>
                 </div>
-                <div className={`mono text-sm font-semibold ${x.tipo === 'entrada' ? 't-green' : 't-red'}`} style={{ flexShrink: 0 }}>
-                  {x.tipo === 'entrada' ? '+ ' : '− '}{fmtBRL(x.valor)}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="flex gap-2 mt-4 justify-end flex-wrap">
-            <button className="btn btn-ghost" onClick={() => { setPreview([]); setSource(''); setImportLog([]); if (fileRef.current) fileRef.current.value = ''; }}>Descartar</button>
-            <button className="btn btn-primary" onClick={confirmarImport}>Importar {preview.length} {preview.length === 1 ? 'lançamento' : 'lançamentos'} → Financeiro</button>
+            <button className="btn btn-ghost" onClick={() => { setPreview([]); setIgnorados({}); setSource(''); setImportLog([]); if (fileRef.current) fileRef.current.value = ''; }}>Descartar</button>
+            <button className="btn btn-primary" onClick={confirmarImport}>
+              {correspondencias.length > 0
+                ? `Importar ${preview.length - correspondencias.length} novo(s) + ${correspondencias.length} baixa(s)`
+                : `Importar ${preview.length} ${preview.length === 1 ? 'lançamento' : 'lançamentos'} → Financeiro`}
+            </button>
           </div>
         </div>
       )}
@@ -4705,6 +5661,26 @@ const TABELA_MUDANCAS_DEFAULT = {
     papelao: 5,
   },
   margemLucro: 30, // % sobre o custo, sugestão de lucro
+
+  // ---- NOVO: móveis com preço próprio de montagem/desmontagem ----
+  // Cada móvel tem seu valor, porque desmontar um guarda-roupa de 6 portas
+  // dá muito mais trabalho que uma mesinha de canto.
+  moveis: [
+    { id: 'mv_gr6', nome: 'Guarda-roupa 6 portas', desmontagem: 120, montagem: 150 },
+    { id: 'mv_gr3', nome: 'Guarda-roupa 3 portas', desmontagem: 70, montagem: 90 },
+    { id: 'mv_gr2', nome: 'Guarda-roupa 2 portas', desmontagem: 50, montagem: 65 },
+    { id: 'mv_cama', nome: 'Cama box casal', desmontagem: 40, montagem: 50 },
+    { id: 'mv_camas', nome: 'Cama solteiro', desmontagem: 30, montagem: 40 },
+    { id: 'mv_mesa', nome: 'Mesa de jantar', desmontagem: 50, montagem: 60 },
+    { id: 'mv_berco', nome: 'Berço', desmontagem: 45, montagem: 55 },
+    { id: 'mv_rack', nome: 'Rack / painel de TV', desmontagem: 40, montagem: 50 },
+    { id: 'mv_escr', nome: 'Escrivaninha', desmontagem: 35, montagem: 45 },
+    { id: 'mv_estante', nome: 'Estante', desmontagem: 40, montagem: 50 },
+  ],
+  // ---- NOVO: serviços extras personalizados (ex.: cabideiro, piano, cofre) ----
+  servicosCustom: [],   // [{ id, nome, preco, unidade }]
+  // ---- NOVO: materiais personalizados (ex.: manta térmica, caixa de TV) ----
+  materiaisCustom: [],  // [{ id, nome, preco }]
 };
 
 // Catálogo de itens de mudança (contadores) e materiais para os wizards.
@@ -4734,6 +5710,10 @@ function getTabelaMudancas(config = {}) {
     escadaSubida: { ...TABELA_MUDANCAS_DEFAULT.escadaSubida, ...(t.escadaSubida || {}) },
     escadaDescida: { ...TABELA_MUDANCAS_DEFAULT.escadaDescida, ...(t.escadaDescida || {}) },
     materiais: { ...TABELA_MUDANCAS_DEFAULT.materiais, ...(t.materiais || {}) },
+    // Arrays novos: se a empresa ainda não tem, usa o padrão; se tem, respeita o dela
+    moveis: Array.isArray(t.moveis) ? t.moveis : TABELA_MUDANCAS_DEFAULT.moveis,
+    servicosCustom: Array.isArray(t.servicosCustom) ? t.servicosCustom : [],
+    materiaisCustom: Array.isArray(t.materiaisCustom) ? t.materiaisCustom : [],
   };
 }
 
@@ -4820,6 +5800,41 @@ function calcularOrcamento(cot, tabela) {
   if (icamento > 0) linhas.push({ label: 'Içamento', valor: icamento });
   if (horaParada > 0) linhas.push({ label: `Hora parada (${cot.horasParada}h)`, valor: horaParada });
 
+  // 4b) NOVO — Montagem/desmontagem POR MÓVEL (cada móvel tem seu preço).
+  //     Coexiste com o contador genérico acima: cotações antigas continuam
+  //     calculando igual; as novas podem usar os dois.
+  let vMoveis = 0;
+  const moveisDetalhe = [];
+  const moveisSel = cot.moveis || {}; // { idMovel: { qtd, desmontar, montar } }
+  (t.moveis || []).forEach(mv => {
+    const sel = moveisSel[mv.id];
+    if (!sel) return;
+    const qtd = Number(sel.qtd) || 0;
+    if (qtd <= 0) return;
+    if (sel.desmontar) {
+      const v = qtd * (Number(mv.desmontagem) || 0);
+      if (v > 0) { vMoveis += v; moveisDetalhe.push({ label: `Desmontagem — ${mv.nome} × ${qtd}`, valor: v }); }
+    }
+    if (sel.montar) {
+      const v = qtd * (Number(mv.montagem) || 0);
+      if (v > 0) { vMoveis += v; moveisDetalhe.push({ label: `Montagem — ${mv.nome} × ${qtd}`, valor: v }); }
+    }
+  });
+  moveisDetalhe.forEach(l => linhas.push(l));
+
+  // 4c) NOVO — Serviços extras personalizados (ex.: cabideiro, piano, cofre)
+  let vServCustom = 0;
+  const servCustomSel = cot.servicosCustom || {}; // { idServico: qtd }
+  (t.servicosCustom || []).forEach(s => {
+    const qtd = Number(servCustomSel[s.id]) || 0;
+    if (qtd <= 0) return;
+    const v = qtd * (Number(s.preco) || 0);
+    if (v > 0) {
+      vServCustom += v;
+      linhas.push({ label: `${s.nome} × ${qtd}${s.unidade ? ' ' + s.unidade : ''}`, valor: v });
+    }
+  });
+
   // 5) Materiais
   let vMateriais = 0;
   const matDetalhe = [];
@@ -4832,7 +5847,20 @@ function calcularOrcamento(cot, tabela) {
     }
   });
 
-  const subtotalServicos = vKm + vAjud + vSubida + vDescida + desmont + mont + embMovel + embMiud + icamento + horaParada;
+  // 5b) NOVO — Materiais personalizados
+  const matCustomSel = cot.materiaisCustom || {}; // { idMaterial: qtd }
+  (t.materiaisCustom || []).forEach(mc => {
+    const qtd = Number(matCustomSel[mc.id]) || 0;
+    if (qtd <= 0) return;
+    const v = qtd * (Number(mc.preco) || 0);
+    if (v > 0) {
+      vMateriais += v;
+      matDetalhe.push({ label: `${mc.nome} × ${qtd}`, valor: v });
+    }
+  });
+
+  const subtotalServicos = vKm + vAjud + vSubida + vDescida + desmont + mont + embMovel + embMiud
+                         + icamento + horaParada + vMoveis + vServCustom;
   let subtotal = subtotalServicos + vMateriais;
 
   // Valor mínimo do frete
@@ -4874,6 +5902,9 @@ function novaCotacaoVazia() {
     desmontagemQtd: 0, montagemQtd: 0,
     embalagemMovelQtd: 0, embalagemMiudezaQtd: 0,
     icamento: false, horasParada: 0,
+    moveis: {},           // { idMovel: { qtd, desmontar, montar } }
+    servicosCustom: {},   // { idServico: qtd }
+    materiaisCustom: {},  // { idMaterial: qtd }
     // passo 4 — materiais
     materiais: {},
     // resumo
@@ -4909,6 +5940,36 @@ function NovaCotacao({ data, setData, setToast, onSalvou, editItem }) {
       if (novo === 0) delete materiais[k];
       else materiais[k] = novo;
       return { ...prev, materiais };
+    });
+  };
+  // Móvel: { qtd, desmontar, montar }
+  const setMovel = (id, patch) => {
+    setCot(prev => {
+      const moveis = { ...(prev.moveis || {}) };
+      const atual = moveis[id] || { qtd: 0, desmontar: false, montar: false };
+      const novo = { ...atual, ...patch };
+      // se marcou desmontar/montar e a qtd está zerada, assume 1
+      if ((novo.desmontar || novo.montar) && (!novo.qtd || novo.qtd <= 0)) novo.qtd = 1;
+      // se zerou tudo, remove
+      if ((!novo.desmontar && !novo.montar) || novo.qtd <= 0) delete moveis[id];
+      else moveis[id] = novo;
+      return { ...prev, moveis };
+    });
+  };
+  const setServCustom = (id, delta) => {
+    setCot(prev => {
+      const sc = { ...(prev.servicosCustom || {}) };
+      const novo = Math.max(0, (sc[id] || 0) + delta);
+      if (novo === 0) delete sc[id]; else sc[id] = novo;
+      return { ...prev, servicosCustom: sc };
+    });
+  };
+  const setMatCustom = (id, delta) => {
+    setCot(prev => {
+      const mc = { ...(prev.materiaisCustom || {}) };
+      const novo = Math.max(0, (mc[id] || 0) + delta);
+      if (novo === 0) delete mc[id]; else mc[id] = novo;
+      return { ...prev, materiaisCustom: mc };
     });
   };
   const addItemCustom = () => {
@@ -5087,6 +6148,55 @@ function NovaCotacao({ data, setData, setToast, onSalvou, editItem }) {
                 <label className="cot-check"><input type="checkbox" checked={cot.icamento} onChange={(e) => upd({ icamento: e.target.checked })} /> Içamento necessário ({fmtBRL(tabela.icamento)})</label>
                 <Field label="Horas paradas / espera"><input type="number" min="0" className="inp mono" value={cot.horasParada} onChange={(e) => upd({ horasParada: parseInt(e.target.value) || 0 })} /></Field>
               </div>
+
+              {/* Móveis — montagem/desmontagem por tipo */}
+              {(tabela.moveis || []).length > 0 && (
+                <div className="cot-andar-box">
+                  <div className="text-sm font-semibold t-ink mb-1">Montagem e desmontagem por móvel</div>
+                  <p className="text-xs t-soft mb-3">Marque o que precisa em cada móvel. O preço vem da tabela.</p>
+                  <div className="cot-item-list">
+                    {(tabela.moveis || []).filter(mv => mv.nome).map(mv => {
+                      const sel = (cot.moveis || {})[mv.id] || { qtd: 0, desmontar: false, montar: false };
+                      return (
+                        <div key={mv.id} className="mv-cot-row">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm t-ink truncate">{mv.nome}</div>
+                            <div className="text-xs t-mute mono">desm. {fmtBRL(mv.desmontagem)} · mont. {fmtBRL(mv.montagem)}</div>
+                          </div>
+                          <div className="mv-cot-checks">
+                            <label className="cot-check" title="Desmontar">
+                              <input type="checkbox" checked={!!sel.desmontar} onChange={(e) => setMovel(mv.id, { desmontar: e.target.checked })} /> Desm.
+                            </label>
+                            <label className="cot-check" title="Montar">
+                              <input type="checkbox" checked={!!sel.montar} onChange={(e) => setMovel(mv.id, { montar: e.target.checked })} /> Mont.
+                            </label>
+                          </div>
+                          <Counter value={sel.qtd} onMinus={() => setMovel(mv.id, { qtd: Math.max(0, (sel.qtd || 0) - 1) })} onPlus={() => setMovel(mv.id, { qtd: (sel.qtd || 0) + 1 })} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Serviços personalizados da empresa */}
+              {(tabela.servicosCustom || []).filter(s => s.nome).length > 0 && (
+                <div className="cot-andar-box">
+                  <div className="text-sm font-semibold t-ink mb-2">Serviços da empresa</div>
+                  <div className="cot-item-list">
+                    {(tabela.servicosCustom || []).filter(s => s.nome).map(s => (
+                      <div key={s.id} className="cot-item-row">
+                        <span className="text-sm t-ink">{s.nome} <span className="t-mute text-xs mono">{fmtBRL(s.preco)}{s.unidade ? `/${s.unidade}` : ''}</span></span>
+                        <Counter
+                          value={(cot.servicosCustom || {})[s.id]}
+                          onMinus={() => setServCustom(s.id, -1)}
+                          onPlus={() => setServCustom(s.id, 1)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -5100,6 +6210,17 @@ function NovaCotacao({ data, setData, setToast, onSalvou, editItem }) {
                   <div key={k} className="cot-item-row">
                     <span className="text-sm t-ink">{MATERIAIS_LABEL[k]} <span className="t-mute text-xs mono">{fmtBRL(tabela.materiais[k])}</span></span>
                     <Counter value={cot.materiais[k]} onMinus={() => setMaterial(k, -1)} onPlus={() => setMaterial(k, 1)} />
+                  </div>
+                ))}
+                {/* materiais personalizados */}
+                {(tabela.materiaisCustom || []).filter(mc => mc.nome).map(mc => (
+                  <div key={mc.id} className="cot-item-row">
+                    <span className="text-sm t-ink">{mc.nome} <span className="t-mute text-xs mono">{fmtBRL(mc.preco)}</span></span>
+                    <Counter
+                      value={(cot.materiaisCustom || {})[mc.id]}
+                      onMinus={() => setMatCustom(mc.id, -1)}
+                      onPlus={() => setMatCustom(mc.id, 1)}
+                    />
                   </div>
                 ))}
               </div>
@@ -5692,6 +6813,48 @@ function TabelaPrecos({ data, setData, setToast }) {
   const updEscadaD = (patch) => { setT(prev => ({ ...prev, escadaDescida: { ...prev.escadaDescida, ...patch } })); setDirty(true); };
   const updMat = (patch) => { setT(prev => ({ ...prev, materiais: { ...prev.materiais, ...patch } })); setDirty(true); };
 
+  // --- Móveis (montagem/desmontagem por tipo) ---
+  const updMovel = (id, patch) => {
+    setT(prev => ({ ...prev, moveis: (prev.moveis || []).map(m => m.id === id ? { ...m, ...patch } : m) }));
+    setDirty(true);
+  };
+  const addMovel = () => {
+    setT(prev => ({ ...prev, moveis: [...(prev.moveis || []), { id: uid(), nome: '', desmontagem: 0, montagem: 0 }] }));
+    setDirty(true);
+  };
+  const delMovel = (id) => {
+    setT(prev => ({ ...prev, moveis: (prev.moveis || []).filter(m => m.id !== id) }));
+    setDirty(true);
+  };
+
+  // --- Serviços personalizados ---
+  const updServ = (id, patch) => {
+    setT(prev => ({ ...prev, servicosCustom: (prev.servicosCustom || []).map(s => s.id === id ? { ...s, ...patch } : s) }));
+    setDirty(true);
+  };
+  const addServ = () => {
+    setT(prev => ({ ...prev, servicosCustom: [...(prev.servicosCustom || []), { id: uid(), nome: '', preco: 0, unidade: 'un' }] }));
+    setDirty(true);
+  };
+  const delServ = (id) => {
+    setT(prev => ({ ...prev, servicosCustom: (prev.servicosCustom || []).filter(s => s.id !== id) }));
+    setDirty(true);
+  };
+
+  // --- Materiais personalizados ---
+  const updMatC = (id, patch) => {
+    setT(prev => ({ ...prev, materiaisCustom: (prev.materiaisCustom || []).map(m => m.id === id ? { ...m, ...patch } : m) }));
+    setDirty(true);
+  };
+  const addMatC = () => {
+    setT(prev => ({ ...prev, materiaisCustom: [...(prev.materiaisCustom || []), { id: uid(), nome: '', preco: 0 }] }));
+    setDirty(true);
+  };
+  const delMatC = (id) => {
+    setT(prev => ({ ...prev, materiaisCustom: (prev.materiaisCustom || []).filter(m => m.id !== id) }));
+    setDirty(true);
+  };
+
   const salvar = () => {
     setData(d => ({ ...d, config: { ...(d.config || {}), tabelaMudancas: t } }));
     setDirty(false);
@@ -5782,7 +6945,93 @@ function TabelaPrecos({ data, setData, setToast }) {
                   <MoneyInput value={t.materiais[k]} onChange={(v) => updMat({ [k]: v })} disabled={disabled} />
                 </div>
               ))}
+              {/* materiais personalizados da empresa */}
+              {(t.materiaisCustom || []).map(mc => (
+                <div key={mc.id} className="mat-card mat-card-custom">
+                  <div className="cust-head">
+                    <input className="cust-nome" value={mc.nome} disabled={disabled} placeholder="Nome do material"
+                      onChange={(e) => updMatC(mc.id, { nome: e.target.value })} />
+                    {isOwner && <button className="cust-del" onClick={() => delMatC(mc.id)} title="Remover"><Trash2 size={13} /></button>}
+                  </div>
+                  <MoneyInput value={mc.preco} onChange={(v) => updMatC(mc.id, { preco: v })} disabled={disabled} />
+                </div>
+              ))}
             </div>
+            {isOwner && (
+              <button className="btn btn-ghost mt-3" onClick={addMatC}>
+                <Plus size={15} /> Adicionar material
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Seção Móveis — montagem/desmontagem por tipo */}
+      <div className="acc-card">
+        <AccHead secao="moveis" titulo="Móveis — montagem e desmontagem" sub="Preço próprio por tipo de móvel" icon={Wrench} cor="#EA580C" />
+        {aberta === 'moveis' && (
+          <div className="acc-body">
+            <p className="text-sm t-soft mb-3">
+              Cada móvel tem seu preço, porque desmontar um guarda-roupa de 6 portas dá muito mais trabalho que uma mesinha.
+            </p>
+            <div className="mv-table">
+              <div className="mv-head">
+                <span>Móvel</span>
+                <span>Desmontagem</span>
+                <span>Montagem</span>
+                <span />
+              </div>
+              {(t.moveis || []).map(mv => (
+                <div key={mv.id} className="mv-row">
+                  <input className="inp" value={mv.nome} disabled={disabled} placeholder="Nome do móvel"
+                    onChange={(e) => updMovel(mv.id, { nome: e.target.value })} />
+                  <MoneyInput value={mv.desmontagem} onChange={(v) => updMovel(mv.id, { desmontagem: v })} disabled={disabled} />
+                  <MoneyInput value={mv.montagem} onChange={(v) => updMovel(mv.id, { montagem: v })} disabled={disabled} />
+                  {isOwner
+                    ? <button className="ibtn ibtn-del" onClick={() => delMovel(mv.id)} title="Remover"><Trash2 size={14} /></button>
+                    : <span />}
+                </div>
+              ))}
+            </div>
+            {isOwner && (
+              <button className="btn btn-ghost mt-3" onClick={addMovel}>
+                <Plus size={15} /> Adicionar móvel
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Seção Serviços personalizados */}
+      <div className="acc-card">
+        <AccHead secao="custom" titulo="Serviços personalizados" sub="Cabideiro, piano, cofre, o que a empresa cobrar" icon={Sparkles} cor="#2563EB" />
+        {aberta === 'custom' && (
+          <div className="acc-body">
+            <p className="text-sm t-soft mb-3">
+              Serviços próprios da sua empresa que não estão na lista padrão. Eles aparecem no assistente de cotação com contador.
+            </p>
+            {(t.servicosCustom || []).length === 0 && (
+              <p className="text-sm t-mute mb-3">Nenhum serviço personalizado ainda. Ex.: "Cabideiro", "Transporte de piano", "Desmontagem de cofre".</p>
+            )}
+            <div className="sc-list">
+              {(t.servicosCustom || []).map(s => (
+                <div key={s.id} className="sc-row">
+                  <input className="inp" value={s.nome} disabled={disabled} placeholder="Nome do serviço"
+                    onChange={(e) => updServ(s.id, { nome: e.target.value })} />
+                  <input className="inp" value={s.unidade || ''} disabled={disabled} placeholder="un."
+                    onChange={(e) => updServ(s.id, { unidade: e.target.value })} style={{ maxWidth: 90 }} />
+                  <MoneyInput value={s.preco} onChange={(v) => updServ(s.id, { preco: v })} disabled={disabled} />
+                  {isOwner
+                    ? <button className="ibtn ibtn-del" onClick={() => delServ(s.id)} title="Remover"><Trash2 size={14} /></button>
+                    : <span />}
+                </div>
+              ))}
+            </div>
+            {isOwner && (
+              <button className="btn btn-ghost mt-3" onClick={addServ}>
+                <Plus size={15} /> Adicionar serviço
+              </button>
+            )}
           </div>
         )}
       </div>
