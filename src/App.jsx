@@ -1313,6 +1313,13 @@ function FinanceiroEmpresa({ data, setData }) {
   const [delTarget, setDelTarget] = useState(null);
   const [saudeOpen, setSaudeOpen] = useState(false);
   const lancRef = useRef(null);
+  const [filtroCard, setFiltroCard] = useState(null); // caixa | aReceber | aPagar | lucro | recorrente
+  const clicarCard = (chave) => {
+    setFiltroCard(prev => prev === chave ? null : chave);
+    setFiltroTipo('todos');
+    setExpandTx(true);
+    setTimeout(() => lancRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+  };
   const [dismissConc, setDismissConc] = useState(false);
   const [dismissSaldo, setDismissSaldo] = useState(false);
   const irParaLancamentos = (tipo = 'todos') => {
@@ -1580,11 +1587,27 @@ function FinanceiroEmpresa({ data, setData }) {
 
   const filtered = useMemo(() => {
     const { start, end } = periodRange(periodo);
-    return finEmpresa
-      .filter(x => filtroTipo === 'todos' || x.tipo === filtroTipo)
-      .filter(x => inRange(x.data, start, end) || effStatus(x) === 'pendente' || effStatus(x) === 'vencido')
+    let arr = finEmpresa.filter(x => filtroTipo === 'todos' || x.tipo === filtroTipo);
+
+    // Filtro vindo do clique nos cards do topo
+    if (filtroCard === 'aReceber') {
+      arr = arr.filter(x => x.tipo === 'entrada' && ['pendente', 'vencido'].includes(effStatus(x)));
+    } else if (filtroCard === 'aPagar') {
+      arr = arr.filter(x => x.tipo === 'saida' && ['pendente', 'vencido'].includes(effStatus(x)));
+    } else if (filtroCard === 'caixa') {
+      arr = arr.filter(x => effStatus(x) === 'pago');
+    } else if (filtroCard === 'recorrente') {
+      arr = arr.filter(x => x.recorrente || x.recorrenciaId);
+    } else if (filtroCard === 'lucro') {
+      arr = arr.filter(x => effStatus(x) !== 'cancelado' && inRange(x.data, start, end));
+    }
+
+    return arr
+      .filter(x => filtroCard
+        ? true // quando um card filtra, ele já define o escopo
+        : (inRange(x.data, start, end) || effStatus(x) === 'pendente' || effStatus(x) === 'vencido'))
       .sort((a, b) => b.data.localeCompare(a.data));
-  }, [finEmpresa, filtroTipo, periodo]);
+  }, [finEmpresa, filtroTipo, periodo, filtroCard]);
 
   const handleSave = (item) => { const msg = editing ? 'Lançamento atualizado com sucesso' : 'Lançamento salvo com sucesso'; setData(d => ({ ...d, finEmpresa: editing ? d.finEmpresa.map(x => x.id === editing.id ? { ...item, id: editing.id } : x) : [...d.finEmpresa, { ...item, id: uid() }] })); setOpenForm(false); setEditing(null); setToast(msg); };
   const handleDelete = (id) => { const item = finEmpresa.find(x => x.id === id); if (item) setDelTarget(item); };
@@ -1599,6 +1622,25 @@ function FinanceiroEmpresa({ data, setData }) {
 
   // Detecta lançamentos que na verdade são linhas de saldo importadas por engano
   const linhasSaldo = useMemo(() => finEmpresa.filter(x => isLinhaSaldo(x.descricao)), [finEmpresa]);
+
+  // Mudanças já confirmadas que ainda NÃO viraram conta a receber
+  // (ex.: foram confirmadas antes desta função existir)
+  const mudancasSemLancamento = useMemo(() => {
+    const comLanc = new Set(finEmpresa.filter(x => x.mudancaId).map(x => x.mudancaId));
+    return (data.mudancas || []).filter(m =>
+      MUD_STATUS_FATURAVEL.includes(m.status) && !comLanc.has(m.id) && (m.valorTotal || 0) > 0
+    );
+  }, [data.mudancas, finEmpresa]);
+
+  const lancarMudancasPendentes = () => {
+    const qtd = mudancasSemLancamento.length;
+    setData(d => {
+      let fin = d.finEmpresa || [];
+      mudancasSemLancamento.forEach(m => { fin = sincronizarFinanceiroMudanca(m, fin); });
+      return { ...d, finEmpresa: fin };
+    });
+    setToast(`${qtd} serviço(s) lançado(s) como conta a receber`);
+  };
   const removerLinhasSaldo = () => {
     if (linhasSaldo.length === 0) return;
     const ids = new Set(linhasSaldo.map(x => x.id));
@@ -1608,6 +1650,22 @@ function FinanceiroEmpresa({ data, setData }) {
 
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {mudancasSemLancamento.length > 0 && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#EFF6FF,#DBEAFE)', borderColor: '#93C5FD' }}>
+          <div className="conc-banner-ico" style={{ background: 'var(--color-primary)' }}><Package size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">
+              <b>{mudancasSemLancamento.length}</b> {mudancasSemLancamento.length === 1 ? 'serviço de mudança confirmado' : 'serviços de mudança confirmados'} fora do Financeiro
+            </div>
+            <div className="conc-banner-sub" style={{ color: '#1E3A8A' }}>
+              Total de {fmtBRL(mudancasSemLancamento.reduce((a, b) => a + (b.valorTotal || 0), 0))} que ainda não está em "A receber". Clique para lançar.
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={lancarMudancasPendentes} style={{ flexShrink: 0 }}>
+            <Check size={14} /> Lançar {mudancasSemLancamento.length}
+          </button>
+        </div>
+      )}
       {linhasSaldo.length > 0 && !dismissSaldo && (
         <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FEF2F2,#FEE2E2)', borderColor: '#FCA5A5' }}>
           <div className="conc-banner-ico" style={{ background: '#B4234B' }}><AlertTriangle size={20} /></div>
@@ -1645,43 +1703,55 @@ function FinanceiroEmpresa({ data, setData }) {
 
       {/* Cards principais premium + Saúde Financeira */}
       <div className="fe-cards-grid">
-        <div className="fe-card fade-in">
+        <button className={`fe-card fade-in ${filtroCard === 'caixa' ? 'on' : ''}`} onClick={() => clicarCard('caixa')}>
           <div className="fe-card-ico" style={{ background: 'var(--color-primary)', opacity: .92 }}><Wallet size={17} /></div>
           <div className="fe-card-lbl">Saldo em caixa</div>
           <div className={`fe-card-val mono ${resumo.saldo >= 0 ? '' : 't-red'}`}>{fmtBRL(resumo.saldo)}</div>
-          <div className="fe-card-sub">Entradas − saídas pagas</div>
-        </div>
-        <div className="fe-card fade-in">
+          <div className="fe-card-sub">{filtroCard === 'caixa' ? 'filtrando ✓' : 'Entradas − saídas pagas'}</div>
+        </button>
+        <button className={`fe-card fade-in ${filtroCard === 'aReceber' ? 'on' : ''}`} onClick={() => clicarCard('aReceber')}>
           <div className="fe-card-ico" style={{ background: '#16A34A' }}><ArrowDownRight size={17} /></div>
           <div className="fe-card-lbl">A receber</div>
           <div className="fe-card-val mono t-green">{fmtBRL(resumo.aReceber)}</div>
-          <div className="fe-card-sub">Títulos em aberto</div>
-        </div>
-        <div className="fe-card fade-in">
+          <div className="fe-card-sub">{filtroCard === 'aReceber' ? 'filtrando ✓' : 'Títulos em aberto'}</div>
+        </button>
+        <button className={`fe-card fade-in ${filtroCard === 'aPagar' ? 'on' : ''}`} onClick={() => clicarCard('aPagar')}>
           <div className="fe-card-ico" style={{ background: '#DC2626' }}><ArrowUpRight size={17} /></div>
           <div className="fe-card-lbl">A pagar</div>
           <div className="fe-card-val mono t-red">{fmtBRL(resumo.aPagar)}</div>
-          <div className="fe-card-sub">Contas em aberto</div>
-        </div>
-        <div className="fe-card fade-in">
+          <div className="fe-card-sub">{filtroCard === 'aPagar' ? 'filtrando ✓' : 'Contas em aberto'}</div>
+        </button>
+        <button className={`fe-card fade-in ${filtroCard === 'lucro' ? 'on' : ''}`} onClick={() => clicarCard('lucro')}>
           <div className="fe-card-ico" style={{ background: 'var(--color-accent)' }}><Activity size={17} /></div>
           <div className="fe-card-lbl">Lucro do período</div>
           <div className={`fe-card-val mono ${m.lucro >= 0 ? '' : 't-red'}`}>{fmtBRL(m.lucro)}</div>
-          <div className="fe-card-sub">Margem: {m.margem.toFixed(0)}%</div>
-        </div>
-        <div className="fe-card fade-in">
+          <div className="fe-card-sub">{filtroCard === 'lucro' ? 'filtrando ✓' : `Margem: ${m.margem.toFixed(0)}%`}</div>
+        </button>
+        <button className={`fe-card fade-in ${filtroCard === 'recorrente' ? 'on' : ''}`} onClick={() => clicarCard('recorrente')}>
           <div className="fe-card-ico" style={{ background: '#0EA5E9' }}><TrendingUp size={17} /></div>
           <div className="fe-card-lbl">Receita recorrente</div>
           <div className="fe-card-val mono t-green">{fmtBRL(resumo.recorrente)}</div>
-          <div className="fe-card-sub">Prevista no mês</div>
-        </div>
-        <div className="fe-card fade-in">
+          <div className="fe-card-sub">{filtroCard === 'recorrente' ? 'filtrando ✓' : 'Prevista no mês'}</div>
+        </button>
+        <button className="fe-card fade-in" onClick={() => setSaudeOpen(true)}>
           <div className="fe-card-ico" style={{ background: '#7C3AED' }}><Percent size={17} /></div>
           <div className="fe-card-lbl">Margem líquida</div>
           <div className={`fe-card-val mono ${m.margem >= 0 ? '' : 't-red'}`}>{m.margem.toFixed(1)}%</div>
-          <div className="fe-card-sub">Lucro sobre receita</div>
-        </div>
+          <div className="fe-card-sub">Ver saúde financeira ›</div>
+        </button>
       </div>
+
+      {filtroCard && (
+        <div className="orc-filtro-ativo">
+          <span>Mostrando: <b>{
+            filtroCard === 'aReceber' ? 'Contas a receber' :
+            filtroCard === 'aPagar' ? 'Contas a pagar' :
+            filtroCard === 'caixa' ? 'Lançamentos pagos' :
+            filtroCard === 'recorrente' ? 'Recorrentes' : 'Lançamentos do período'
+          }</b> · {filtered.length} lançamento(s)</span>
+          <button onClick={() => setFiltroCard(null)} className="orc-filtro-limpar"><X size={13} /> Limpar</button>
+        </div>
+      )}
 
       {/* Saúde Financeira — velocímetro premium */}
       <div className="card p-5 fe-gauge-card fade-in">
@@ -4780,8 +4850,11 @@ function AppInner() {
         .fe-cards-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:14px; }
         @media(max-width:1280px){ .fe-cards-grid{ grid-template-columns:repeat(3,1fr); } }
         @media(max-width:720px){ .fe-cards-grid{ grid-template-columns:repeat(2,1fr); } }
-        .fe-card{ background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; padding:15px; box-shadow:0 1px 3px rgba(11,19,36,.04); transition:transform .18s, box-shadow .18s; }
+        .fe-card{ background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; padding:15px; box-shadow:0 1px 3px rgba(11,19,36,.04); transition:transform .18s, box-shadow .18s, border-color .18s; text-align:left; font-family:inherit; cursor:pointer; display:block; width:100%; }
         .fe-card:hover{ transform:translateY(-3px); box-shadow:0 12px 28px rgba(11,19,36,.09); }
+        .fe-card:active{ transform:translateY(-1px) scale(.99); }
+        .fe-card.on{ border-color:var(--color-primary); box-shadow:0 0 0 2px var(--color-primary), 0 12px 28px rgba(11,19,36,.1); }
+        .fe-card.on .fe-card-sub{ color:var(--color-primary); font-weight:600; }
         .fe-card-ico{ width:34px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#fff; margin-bottom:11px; }
         .fe-card-lbl{ font-size:11.5px; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:.03em; font-weight:600; }
         .fe-card-val{ font-size:19px; font-weight:700; color:var(--color-text); letter-spacing:-.02em; margin-top:3px; line-height:1.1; }
