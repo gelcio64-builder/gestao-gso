@@ -4595,6 +4595,20 @@ function AppInner() {
         .fin-resumo-l{ font-size:11px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
         .fin-resumo-v{ font-size:17px; font-weight:700; color:#0B1324; margin-top:4px; }
 
+        /* Vínculo Mudanças → Financeiro */
+        .mud-fin-card{ display:flex; align-items:center; gap:11px; padding:13px 15px; border:1px solid; border-radius:12px; flex-wrap:wrap; }
+        .mud-fin-card.pendente{ background:#FFFBEB; border-color:#FDE68A; }
+        .mud-fin-card.pago{ background:#F0FDF4; border-color:#86EFAC; }
+        .mud-fin-card.aviso{ background:#F8FAFC; border-color:#E4E7EC; }
+        .mud-fin-ico{ width:30px; height:30px; border-radius:9px; display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
+        .mud-fin-card.pendente .mud-fin-ico{ background:#D97706; }
+        .mud-fin-card.pago .mud-fin-ico{ background:#16A34A; }
+        .mud-fin-card.aviso .mud-fin-ico{ background:#9CA3AF; }
+        .mud-fin-titulo{ font-size:14px; font-weight:700; color:#0B1324; }
+        .mud-fin-sub{ font-size:12px; color:#6B7280; margin-top:1px; }
+        .mud-fin-btn{ display:inline-flex; align-items:center; gap:5px; padding:8px 13px; border-radius:9px; background:#16A34A; color:#fff; border:0; font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer; flex-shrink:0; transition:transform .14s, box-shadow .14s; }
+        .mud-fin-btn:hover{ transform:translateY(-1px); box-shadow:0 6px 14px rgba(22,163,74,.3); }
+
         /* Config de preços — grid 2 colunas */
         .preco-grid{ display:grid; grid-template-columns:1fr 1fr; gap:14px 16px; }
         @media(max-width:560px){ .preco-grid{ grid-template-columns:1fr; } }
@@ -5999,18 +6013,21 @@ function NovaCotacao({ data, setData, setToast, onSalvou, editItem }) {
     const registro = {
       ...cot,
       id: editItem?.id || uid(),
-      status: statusFinal,
+      // Ao editar, preserva o status atual (não rebaixa um serviço confirmado p/ orçamento)
+      status: editItem?.status || statusFinal,
       valorTotal: calc.total,
       lucroEstimado: calc.lucroEstimado,
       criadoEm: editItem?.criadoEm || new Date().toISOString(),
       atualizadoEm: new Date().toISOString(),
     };
-    setData(d => ({
-      ...d,
-      mudancas: editItem
+    setData(d => {
+      const mudancas = editItem
         ? (d.mudancas || []).map(x => x.id === editItem.id ? registro : x)
-        : [...(d.mudancas || []), registro],
-    }));
+        : [...(d.mudancas || []), registro];
+      // Se já é faturável (ex.: editou uma cotação confirmada), atualiza o lançamento
+      const finEmpresa = sincronizarFinanceiroMudanca(registro, d.finEmpresa || []);
+      return { ...d, mudancas, finEmpresa };
+    });
     setToast(editItem ? 'Cotação atualizada' : 'Cotação salva');
     onSalvou?.(registro);
   };
@@ -6305,6 +6322,71 @@ function NovaCotacao({ data, setData, setToast, onSalvou, editItem }) {
 }
 
 // Status do fluxo de serviço de mudança
+// ============================================================
+// PONTE MUDANÇAS → FINANCEIRO
+// ============================================================
+// Quando uma cotação é CONFIRMADA (cliente aprovou), ela vira uma conta a
+// receber no Financeiro Empresa — status "pendente". Quando o cliente pagar,
+// o lançamento é marcado como pago (pelo Financeiro ou pelo detalhe da cotação).
+// O lançamento carrega mudancaId, o que evita duplicidade e permite atualizar.
+
+// A partir de qual status o serviço vira conta a receber
+const MUD_STATUS_FATURAVEL = ['confirmado', 'agendado', 'andamento', 'concluido'];
+
+function lancamentoDaMudanca(cot) {
+  const rota = [cot.origem, cot.destino].filter(Boolean).join(' → ');
+  return {
+    id: uid(),
+    mudancaId: cot.id,
+    tipo: 'entrada',
+    categoria: 'Serviço Avulso',
+    descricao: `${cot.tipoServico || 'Mudança'} — ${cot.clienteNome || 'Cliente'}${rota ? ` (${rota})` : ''}`,
+    valor: Number(cot.valorTotal) || 0,
+    data: cot.dataPrevista || todayISO(),
+    vencimento: cot.dataPrevista || todayISO(),
+    status: 'pendente',
+    dataPagamento: '',
+    cliente: cot.clienteNome || '',
+    forma: '',
+    veiculoId: '', linhaId: '', contratoId: '',
+    obs: 'Gerado automaticamente pelo módulo Mudanças',
+    recorrente: false,
+    statusConc: 'manual',
+    criadoEm: new Date().toISOString(),
+  };
+}
+
+/**
+ * Sincroniza uma cotação com o Financeiro. Devolve a nova lista de finEmpresa.
+ * Regras:
+ *  - status faturável e sem lançamento  → cria (pendente)
+ *  - status faturável e já tem lançamento não pago → atualiza valor/data/descrição
+ *  - status cancelado/orçamento e lançamento não pago → remove
+ *  - lançamento já PAGO nunca é alterado nem removido (protege o histórico)
+ */
+function sincronizarFinanceiroMudanca(cot, finEmpresa) {
+  const existente = (finEmpresa || []).find(x => x.mudancaId === cot.id);
+  const faturavel = MUD_STATUS_FATURAVEL.includes(cot.status);
+
+  // Já foi pago: não mexe (histórico é sagrado)
+  if (existente && effStatus(existente) === 'pago') return finEmpresa;
+
+  if (faturavel) {
+    if (existente) {
+      // atualiza o pendente com os dados atuais da cotação
+      const novo = lancamentoDaMudanca(cot);
+      return finEmpresa.map(x => x.mudancaId === cot.id
+        ? { ...x, valor: novo.valor, data: novo.data, vencimento: novo.vencimento, descricao: novo.descricao, cliente: novo.cliente }
+        : x);
+    }
+    return [...(finEmpresa || []), lancamentoDaMudanca(cot)];
+  }
+
+  // Não é faturável (voltou pra orçamento, ou foi cancelado) → remove o pendente
+  if (existente) return finEmpresa.filter(x => x.mudancaId !== cot.id);
+  return finEmpresa;
+}
+
 const MUD_STATUS = [
   { k: 'orcamento', label: 'Orçamento', tone: 'slate', cor: '#CA8A04', bg: '#FEF9C3' },
   { k: 'aguardando', label: 'Aguardando aprovação', tone: 'orange', cor: '#EA580C', bg: '#FFEDD5' },
@@ -6441,12 +6523,26 @@ function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
   }, [mudancas, filtroStatus, kpiFiltro, busca]);
 
   const mudarStatus = (id, novo) => {
-    setData(d => ({ ...d, mudancas: (d.mudancas || []).map(m => m.id === id ? { ...m, status: novo, atualizadoEm: new Date().toISOString() } : m) }));
-    setToast(`Status: ${mudStatusInfo(novo).label}`);
+    setData(d => {
+      const mudancas = (d.mudancas || []).map(m => m.id === id ? { ...m, status: novo, atualizadoEm: new Date().toISOString() } : m);
+      const cot = mudancas.find(m => m.id === id);
+      // Sincroniza com o Financeiro: confirmado→conta a receber, cancelado→remove pendente
+      const finEmpresa = cot ? sincronizarFinanceiroMudanca(cot, d.finEmpresa || []) : d.finEmpresa;
+      return { ...d, mudancas, finEmpresa };
+    });
+    const info = mudStatusInfo(novo);
+    // Avisa quando o serviço virou conta a receber
+    if (novo === 'confirmado') setToast('Confirmado — lançado no Financeiro como conta a receber');
+    else setToast(`Status: ${info.label}`);
   };
   const confirmDelete = () => {
     if (delTarget) {
-      setData(d => ({ ...d, mudancas: (d.mudancas || []).filter(m => m.id !== delTarget.id) }));
+      setData(d => {
+        const mudancas = (d.mudancas || []).filter(m => m.id !== delTarget.id);
+        // Remove o lançamento pendente vinculado (mas preserva se já foi pago)
+        const finEmpresa = (d.finEmpresa || []).filter(x => !(x.mudancaId === delTarget.id && effStatus(x) !== 'pago'));
+        return { ...d, mudancas, finEmpresa };
+      });
       setToast('Registro excluído'); setDelTarget(null);
     }
   };
@@ -6566,7 +6662,7 @@ function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
 
       {/* Modal de detalhes */}
       <Modal open={!!detalhe} onClose={() => setDetalhe(null)} title="Detalhes da cotação" wide>
-        {detalhe && <DetalheCotacao cot={detalhe} data={data} onMudarStatus={(novo) => { mudarStatus(detalhe.id, novo); setDetalhe({ ...detalhe, status: novo }); }} />}
+        {detalhe && <DetalheCotacao cot={detalhe} data={data} setData={setData} setToast={setToast} onMudarStatus={(novo) => { mudarStatus(detalhe.id, novo); setDetalhe({ ...detalhe, status: novo }); }} />}
       </Modal>
 
       <ConfirmModal item={delTarget} title="Excluir cotação" message={delTarget ? `Excluir a cotação de "${delTarget.clienteNome || 'cliente'}"?` : ''} onCancel={() => setDelTarget(null)} onConfirm={confirmDelete} />
@@ -6574,7 +6670,7 @@ function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
   );
 }
 
-function DetalheCotacao({ cot, data, onMudarStatus }) {
+function DetalheCotacao({ cot, data, setData, setToast, onMudarStatus }) {
   const tabela = getTabelaMudancas(data.config);
   const calc = useMemo(() => calcularOrcamento(cot, tabela), [cot, tabela]);
   const st = mudStatusInfo(cot.status);
@@ -6630,6 +6726,20 @@ function DetalheCotacao({ cot, data, onMudarStatus }) {
 
   // Custos = total menos o lucro estimado (sem mudar nenhum cálculo, só derivando pra exibir)
   const custos = Math.max(0, calc.total - (calc.lucroEstimado || 0));
+
+  // Vínculo com o Financeiro: existe lançamento gerado por esta mudança?
+  const lancFin = (data.finEmpresa || []).find(x => x.mudancaId === cot.id);
+  const lancPago = lancFin && effStatus(lancFin) === 'pago';
+  const marcarRecebido = () => {
+    if (!lancFin) return;
+    setData(d => ({
+      ...d,
+      finEmpresa: (d.finEmpresa || []).map(x => x.id === lancFin.id
+        ? { ...x, status: 'pago', dataPagamento: todayISO() }
+        : x),
+    }));
+    setToast?.('Pagamento registrado no Financeiro');
+  };
   const margemPct = calc.total > 0 ? Math.round((calc.lucroEstimado / calc.total) * 100) : 0;
 
   return (
@@ -6713,6 +6823,38 @@ function DetalheCotacao({ cot, data, onMudarStatus }) {
           <div className="fin-resumo-v mono">{margemPct}%</div>
         </div>
       </div>
+
+      {/* Vínculo com o Financeiro */}
+      {lancFin ? (
+        <div className={`mud-fin-card ${lancPago ? 'pago' : 'pendente'}`}>
+          <span className="mud-fin-ico">
+            {lancPago ? <Check size={16} /> : <Clock size={16} />}
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="mud-fin-titulo">
+              {lancPago ? 'Recebido' : 'A receber'} · <span className="mono">{fmtBRL(lancFin.valor)}</span>
+            </div>
+            <div className="mud-fin-sub">
+              {lancPago
+                ? `Pago em ${fmtDate(lancFin.dataPagamento || lancFin.data)} — já está no caixa.`
+                : `Lançado no Financeiro com vencimento em ${fmtDate(lancFin.data)}.`}
+            </div>
+          </div>
+          {!lancPago && (
+            <button className="mud-fin-btn" onClick={marcarRecebido}>
+              <Check size={14} /> Marcar como recebido
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="mud-fin-card aviso">
+          <span className="mud-fin-ico"><CircleAlert size={16} /></span>
+          <div className="flex-1 min-w-0">
+            <div className="mud-fin-titulo">Ainda não está no Financeiro</div>
+            <div className="mud-fin-sub">Ao marcar como <b>Confirmado</b>, o valor entra automaticamente como conta a receber.</div>
+          </div>
+        </div>
+      )}
 
       {/* Composição detalhada */}
       <div>
