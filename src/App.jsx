@@ -1160,47 +1160,46 @@ function GaugeSaude({ nota, faixa }) {
     return () => cancelAnimationFrame(raf);
   }, [nota, reduzir]);
 
-  const W = 300, H = 178;
-  const cx = W / 2, cy = 152, r = 112;
+  const W = 300, H = 190;
+  const cx = W / 2, cy = 158, r = 112;
   const ang = gaugeAngle(anim);
-  const ponta = polar(cx, cy, r - 24, ang);
-
-  const Ico = faixa.icone === 'check' ? Check : faixa.icone === 'alert' ? AlertTriangle : X;
+  // ponteiro curto: para bem antes do centro do texto
+  const ponta = polar(cx, cy, r - 46, ang);
+  const base = polar(cx, cy, 14, ang + 180); // pequena cauda oposta
 
   return (
     <div className="gauge-wrap">
       <svg viewBox={`0 0 ${W} ${H}`} className="gauge-svg" role="img"
         aria-label={`Saúde financeira: ${nota} de 100 — ${faixa.label}`}>
         {/* trilha de fundo */}
-        <path d={arcPath(cx, cy, r, 0, 100)} fill="none" stroke="#EFF1F4" strokeWidth="20" strokeLinecap="round" />
+        <path d={arcPath(cx, cy, r, 0, 100)} fill="none" stroke="#EFF1F4" strokeWidth="18" strokeLinecap="round" />
         {/* faixas coloridas */}
         {SAUDE_FAIXAS.map((f, i) => (
           <path key={i}
             d={arcPath(cx, cy, r, f.min, f.max)}
-            fill="none" stroke={f.cor} strokeWidth="20"
+            fill="none" stroke={f.cor} strokeWidth="18"
             strokeLinecap={i === 0 || i === SAUDE_FAIXAS.length - 1 ? 'round' : 'butt'}
-            opacity={nota >= f.min && nota <= f.max ? 1 : 0.32}
+            opacity={nota >= f.min && nota <= f.max ? 1 : 0.28}
             style={{ transition: 'opacity .5s ease' }}
           />
         ))}
         {/* marcas 0 e 100 */}
-        <text x={cx - r - 2} y={cy + 16} className="gauge-tick">0</text>
-        <text x={cx + r + 2} y={cy + 16} className="gauge-tick" textAnchor="end">100</text>
-        {/* ponteiro */}
-        <line x1={cx} y1={cy} x2={ponta.x} y2={ponta.y}
-          stroke="#0B1324" strokeWidth="3.5" strokeLinecap="round" />
-        <circle cx={cx} cy={cy} r="8" fill="#0B1324" />
-        <circle cx={cx} cy={cy} r="3.5" fill="#fff" />
-      </svg>
+        <text x={cx - r} y={cy + 20} className="gauge-tick" textAnchor="middle">0</text>
+        <text x={cx + r} y={cy + 20} className="gauge-tick" textAnchor="middle">100</text>
 
-      {/* centro: ícone + status + nota */}
-      <div className="gauge-center">
-        <span className="gauge-badge" style={{ background: faixa.cor }}><Ico size={13} /></span>
-        <span className="gauge-status" style={{ color: faixa.cor }}>{faixa.label}</span>
-        <span className="gauge-nota">
-          <b className="mono">{Math.round(anim)}</b><small>/100</small>
-        </span>
-      </div>
+        {/* conteúdo central — dentro do arco, acima do pivô */}
+        <g className="gauge-txt">
+          <text x={cx} y={cy - 62} textAnchor="middle" className="gauge-svg-status" fill={faixa.cor}>{faixa.label}</text>
+          <text x={cx} y={cy - 24} textAnchor="middle" className="gauge-svg-nota">{Math.round(anim)}</text>
+          <text x={cx} y={cy - 24} textAnchor="middle" className="gauge-svg-max" dx="34">/100</text>
+        </g>
+
+        {/* ponteiro curto (não cobre o número) */}
+        <line x1={base.x} y1={base.y} x2={ponta.x} y2={ponta.y}
+          stroke="#0B1324" strokeWidth="3" strokeLinecap="round" />
+        <circle cx={cx} cy={cy} r="7" fill="#0B1324" />
+        <circle cx={cx} cy={cy} r="3" fill="#fff" />
+      </svg>
     </div>
   );
 }
@@ -1313,6 +1312,14 @@ function FinanceiroEmpresa({ data, setData }) {
   const [expandTx, setExpandTx] = useState(false);
   const [delTarget, setDelTarget] = useState(null);
   const [saudeOpen, setSaudeOpen] = useState(false);
+  const lancRef = useRef(null);
+  const [dismissConc, setDismissConc] = useState(false);
+  const [dismissSaldo, setDismissSaldo] = useState(false);
+  const irParaLancamentos = (tipo = 'todos') => {
+    setFiltroTipo(tipo);
+    setExpandTx(true);
+    setTimeout(() => lancRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+  };
   const [toast, setToast] = useState('');
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2500); return () => clearTimeout(t); }, [toast]);
 
@@ -1601,7 +1608,7 @@ function FinanceiroEmpresa({ data, setData }) {
 
   return (
     <div className="p-4 sm:p-7 space-y-5">
-      {linhasSaldo.length > 0 && (
+      {linhasSaldo.length > 0 && !dismissSaldo && (
         <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FEF2F2,#FEE2E2)', borderColor: '#FCA5A5' }}>
           <div className="conc-banner-ico" style={{ background: '#B4234B' }}><AlertTriangle size={20} /></div>
           <div className="flex-1 min-w-0">
@@ -1611,9 +1618,12 @@ function FinanceiroEmpresa({ data, setData }) {
           <button className="btn btn-danger" onClick={removerLinhasSaldo} style={{ flexShrink: 0 }}>
             <Trash2 size={14} /> Remover {linhasSaldo.length}
           </button>
+          <button className="conc-fechar" onClick={() => setDismissSaldo(true)} title="Fechar aviso" aria-label="Fechar aviso">
+            <X size={16} />
+          </button>
         </div>
       )}
-      {pendentesConc.length > 0 && (
+      {pendentesConc.length > 0 && !dismissConc && (
         <div className="conc-banner">
           <div className="conc-banner-ico"><CircleAlert size={20} /></div>
           <div className="flex-1 min-w-0">
@@ -1622,6 +1632,9 @@ function FinanceiroEmpresa({ data, setData }) {
           </div>
           <button className="btn btn-primary" onClick={conciliarTodos} style={{ flexShrink: 0 }}>
             <Check size={14} /> Conciliar todos
+          </button>
+          <button className="conc-fechar" onClick={() => setDismissConc(true)} title="Fechar lembrete" aria-label="Fechar lembrete">
+            <X size={16} />
           </button>
         </div>
       )}
@@ -1661,6 +1674,12 @@ function FinanceiroEmpresa({ data, setData }) {
           <div className="fe-card-lbl">Receita recorrente</div>
           <div className="fe-card-val mono t-green">{fmtBRL(resumo.recorrente)}</div>
           <div className="fe-card-sub">Prevista no mês</div>
+        </div>
+        <div className="fe-card fade-in">
+          <div className="fe-card-ico" style={{ background: '#7C3AED' }}><Percent size={17} /></div>
+          <div className="fe-card-lbl">Margem líquida</div>
+          <div className={`fe-card-val mono ${m.margem >= 0 ? '' : 't-red'}`}>{m.margem.toFixed(1)}%</div>
+          <div className="fe-card-sub">Lucro sobre receita</div>
         </div>
       </div>
 
@@ -1714,21 +1733,33 @@ function FinanceiroEmpresa({ data, setData }) {
                 )}
               </div>
             </div>
-            <span className="text-xs t-mute fe-flux-leg">entradas · saídas · saldo acumulado</span>
+            <span className="text-xs t-mute fe-flux-leg">no período selecionado</span>
           </div>
 
-          <div style={{ height: 240 }}>
+          <div style={{ height: 250 }}>
             <ResponsiveContainer>
-              <ComposedChart data={fluxo.dados} margin={{ top: 6, right: 4, left: -18, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#EEF0F3" vertical={false} />
-                <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
-                <Tooltip formatter={(v) => fmtBRL(v)} contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 12 }} />
-                <Bar dataKey="entradas" name="Entradas" fill="#16A34A" radius={[4, 4, 0, 0]} maxBarSize={20} />
-                <Bar dataKey="saidas" name="Saídas" fill="#DC2626" radius={[4, 4, 0, 0]} maxBarSize={20} />
-                <Line type="monotone" dataKey="saldo" name="Saldo acumulado" stroke="var(--color-primary)" strokeWidth={2.5} dot={false} />
+              <ComposedChart data={fluxo.dados} margin={{ top: 8, right: 6, left: -20, bottom: 0 }} barGap={2}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F3F5" vertical={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false} interval="preserveStartEnd" minTickGap={18} />
+                {/* eixo das barras (entradas/saídas) */}
+                <YAxis yAxisId="mov" tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false}
+                  tickFormatter={(v) => v === 0 ? '0' : `${(v / 1000).toFixed(0)}k`} />
+                {/* eixo próprio do saldo acumulado — evita que a linha esmague as barras */}
+                <YAxis yAxisId="saldo" orientation="right" hide />
+                <Tooltip formatter={(v, n) => [fmtBRL(v), n]} contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 12 }}
+                  cursor={{ fill: 'rgba(11,19,36,.04)' }} />
+                <Bar yAxisId="mov" dataKey="entradas" name="Entradas" fill="#16A34A" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                <Bar yAxisId="mov" dataKey="saidas" name="Saídas" fill="#DC2626" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                <Line yAxisId="saldo" type="linear" dataKey="saldo" name="Saldo acumulado"
+                  stroke="var(--color-primary)" strokeWidth={2} strokeDasharray="4 3"
+                  dot={{ r: 2, fill: 'var(--color-primary)', strokeWidth: 0 }} activeDot={{ r: 4 }} />
               </ComposedChart>
             </ResponsiveContainer>
+          </div>
+          <div className="fe-flux-legenda">
+            <span><i style={{ background: '#16A34A' }} /> Entradas</span>
+            <span><i style={{ background: '#DC2626' }} /> Saídas</span>
+            <span><i className="dash" style={{ background: 'var(--color-primary)' }} /> Saldo acumulado</span>
           </div>
 
           {/* Mini-métricas do período */}
@@ -1773,15 +1804,24 @@ function FinanceiroEmpresa({ data, setData }) {
               <div className="fe-donut">
                 <ResponsiveContainer>
                   <PieChart>
-                    <Pie data={despCategorias.arr} dataKey="valor" nameKey="nome" cx="50%" cy="50%" innerRadius={52} outerRadius={78} paddingAngle={2} stroke="none">
-                      {despCategorias.arr.map((c, i) => <Cell key={i} fill={c.cor} style={{ cursor: 'pointer' }} onClick={() => setCatSel(c.nome)} />)}
+                    <Pie
+                      data={despCategorias.arr} dataKey="valor" nameKey="nome"
+                      cx="50%" cy="50%" innerRadius={62} outerRadius={84} paddingAngle={2} stroke="none"
+                      isAnimationActive={false}
+                      onClick={(_, index) => {
+                        const cat = despCategorias.arr[index]?.nome;
+                        if (cat) setCatSel(cat);
+                      }}
+                      style={{ cursor: 'pointer', outline: 'none' }}
+                    >
+                      {despCategorias.arr.map((c, i) => <Cell key={`${c.nome}-${i}`} fill={c.cor} style={{ cursor: 'pointer', outline: 'none' }} />)}
                     </Pie>
                     <Tooltip formatter={(v) => fmtBRL(v)} contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 12 }} />
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="fe-donut-center">
-                  <span className="text-xs t-soft">Total</span>
-                  <span className="mono font-bold t-ink">{fmtBRL(despCategorias.total)}</span>
+                  <span className="fe-donut-lbl">Total</span>
+                  <span className="fe-donut-val mono">{fmtBRL(despCategorias.total)}</span>
                 </div>
               </div>
               <div className="fe-donut-legend">
@@ -1803,7 +1843,7 @@ function FinanceiroEmpresa({ data, setData }) {
       <div className="card p-4 sm:p-5">
         <div className="flex items-center justify-between mb-3">
           <h3 className="display h-card t-ink">Próximos vencimentos</h3>
-          <button className="fe-link-btn" onClick={() => { setFiltroTipo('todos'); setExpandTx(true); }}>Ver todos</button>
+          <button className="fe-link-btn" onClick={() => irParaLancamentos('todos')}>Ver todos</button>
         </div>
         {vencimentos.length === 0 ? (
           <EmptyState icon={Check} title="Nenhuma conta em aberto. Tudo em dia!" />
@@ -1909,39 +1949,8 @@ function FinanceiroEmpresa({ data, setData }) {
         </div>
       </div>
 
-      {/* Resumo inteligente */}
-      <div>
-        <div className="flex items-center gap-2 mb-3"><Wallet size={15} className="t-soft" /><h3 className="display h-card t-ink">Resumo Financeiro</h3></div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 sm:gap-3">
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">Saldo atual</span></div>
-            <div className={`pf-tile-val mono ${resumo.saldo >= 0 ? 't-ink' : 't-red'}`}>{fmtBRL(resumo.saldo)}</div>
-          </div>
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">A receber</span></div>
-            <div className="pf-tile-val mono t-green">{fmtBRL(resumo.aReceber)}</div>
-          </div>
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">A pagar</span></div>
-            <div className="pf-tile-val mono t-red">{fmtBRL(resumo.aPagar)}</div>
-          </div>
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">Despesas do mês</span></div>
-            <div className="pf-tile-val mono t-red">{fmtBRL(resumo.despMes)}</div>
-          </div>
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">Receita recorrente</span></div>
-            <div className="pf-tile-val mono t-green">{fmtBRL(resumo.recorrente)}</div>
-          </div>
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">Margem líquida</span></div>
-            <div className={`pf-tile-val mono ${m.margem >= 0 ? 't-ink' : 't-red'}`}>{m.margem.toFixed(1)}%</div>
-          </div>
-        </div>
-      </div>
-
       {/* Lista */}
-      <div className="card">
+      <div className="card" ref={lancRef}>
         <div className="p-4 list-head">
           <div className="flex items-center gap-2 mb-3">
             <h3 className="display h-card t-ink">Lançamentos</h3>
@@ -2158,7 +2167,7 @@ function FinanceiroEmpresa({ data, setData }) {
             .sort((a, b) => (b.data || '').localeCompare(a.data || ''));
           const total = itens.reduce((a, b) => a + b.valor, 0);
           return (
-            <div className="space-y-3">
+            <div className="space-y-3" key={catSel}>
               <div className="flex items-center justify-between">
                 <span className="text-sm t-soft">{itens.length} lançamento(s)</span>
                 <span className="mono font-bold t-red">{fmtBRL(total)}</span>
@@ -4754,8 +4763,8 @@ function AppInner() {
         .imp-baixa-tag{ margin-left:7px; padding:1px 7px; border-radius:99px; background:#DCFCE7; color:#15803D; font-size:9.5px; font-weight:600; white-space:nowrap; }
 
         /* Financeiro Empresa — cards principais premium */
-        .fe-cards-grid{ display:grid; grid-template-columns:repeat(5,1fr); gap:14px; }
-        @media(max-width:1200px){ .fe-cards-grid{ grid-template-columns:repeat(3,1fr); } }
+        .fe-cards-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:14px; }
+        @media(max-width:1280px){ .fe-cards-grid{ grid-template-columns:repeat(3,1fr); } }
         @media(max-width:720px){ .fe-cards-grid{ grid-template-columns:repeat(2,1fr); } }
         .fe-card{ background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; padding:15px; box-shadow:0 1px 3px rgba(11,19,36,.04); transition:transform .18s, box-shadow .18s; }
         .fe-card:hover{ transform:translateY(-3px); box-shadow:0 12px 28px rgba(11,19,36,.09); }
@@ -4767,18 +4776,14 @@ function AppInner() {
         /* Saúde Financeira — velocímetro */
         .fe-gauge-card{ transition:transform .2s, box-shadow .2s; }
         .fe-gauge-card:hover{ transform:translateY(-2px); box-shadow:0 14px 32px rgba(11,19,36,.08); }
-        .fe-gauge-head{ margin-bottom:4px; }
-        .gauge-wrap{ position:relative; max-width:340px; margin:0 auto; }
+        .fe-gauge-head{ margin-bottom:8px; }
+        .gauge-wrap{ max-width:330px; margin:0 auto; }
         .gauge-svg{ width:100%; height:auto; display:block; overflow:visible; }
         .gauge-tick{ font-size:10px; fill:#9CA3AF; font-family:'Geist Mono',ui-monospace,monospace; }
-        .gauge-center{ position:absolute; left:0; right:0; bottom:6px; display:flex; flex-direction:column; align-items:center; gap:2px; pointer-events:none; }
-        .gauge-badge{ width:26px; height:26px; border-radius:99px; display:flex; align-items:center; justify-content:center; color:#fff; margin-bottom:2px; animation:gaugePop .5s ease both; }
-        @keyframes gaugePop{ from{ transform:scale(.6); opacity:0; } to{ transform:scale(1); opacity:1; } }
-        .gauge-status{ font-size:13.5px; font-weight:700; }
-        .gauge-nota{ display:flex; align-items:baseline; gap:1px; }
-        .gauge-nota b{ font-size:38px; font-weight:700; color:#0B1324; letter-spacing:-.02em; line-height:1; }
-        .gauge-nota small{ font-size:12px; color:#9CA3AF; }
-        .fe-gauge-legend{ display:flex; flex-wrap:wrap; justify-content:center; gap:6px; margin-top:16px; }
+        .gauge-svg-status{ font-size:14px; font-weight:700; font-family:'Geist',system-ui,sans-serif; }
+        .gauge-svg-nota{ font-size:40px; font-weight:700; fill:#0B1324; font-family:'Geist Mono',ui-monospace,monospace; letter-spacing:-.02em; }
+        .gauge-svg-max{ font-size:12px; fill:#9CA3AF; font-family:'Geist',system-ui,sans-serif; }
+        .fe-gauge-legend{ display:flex; flex-wrap:wrap; justify-content:center; gap:6px; margin-top:10px; }
         .fe-gauge-leg{ display:flex; align-items:center; gap:5px; padding:5px 10px; border-radius:99px; background:#F6F7F9; transition:background .2s, transform .2s; }
         .fe-gauge-leg.on{ background:#0B13240D; transform:scale(1.04); box-shadow:0 0 0 1.5px currentColor inset; }
         .fe-gauge-leg-dot{ width:8px; height:8px; border-radius:99px; flex-shrink:0; }
@@ -4790,10 +4795,19 @@ function AppInner() {
         .fe-saude-btn{ display:inline-flex; align-items:center; gap:3px; font-size:12.5px; font-weight:600; color:var(--color-primary); background:none; border:0; cursor:pointer; font-family:inherit; }
         .fe-saude-btn:hover{ text-decoration:underline; }
         @media(max-width:520px){
-          .gauge-nota b{ font-size:32px; }
           .fe-gauge-leg-faixa{ display:none; }
           .fe-gauge-legend{ gap:5px; }
         }
+
+        /* Botão fechar dos banners */
+        .conc-fechar{ width:28px; height:28px; border-radius:8px; border:0; background:rgba(255,255,255,.6); color:#6B7280; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; transition:background .14s, color .14s; }
+        .conc-fechar:hover{ background:#fff; color:#0B1324; }
+
+        /* Legenda do fluxo de caixa */
+        .fe-flux-legenda{ display:flex; flex-wrap:wrap; gap:14px; justify-content:center; margin-top:10px; }
+        .fe-flux-legenda span{ display:inline-flex; align-items:center; gap:6px; font-size:11.5px; color:#6B7280; }
+        .fe-flux-legenda i{ width:11px; height:3px; border-radius:2px; display:inline-block; }
+        .fe-flux-legenda i.dash{ background:repeating-linear-gradient(90deg,currentColor 0 4px,transparent 4px 7px) !important; height:2px; }
         /* anel usado no painel de detalhes */
         .fe-saude-ring{ position:relative; width:74px; height:74px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:conic-gradient(var(--cor) var(--pct), #EFF1F4 0); }
         .fe-saude-ring::before{ content:''; position:absolute; width:58px; height:58px; border-radius:50%; background:var(--color-surface); }
@@ -4831,8 +4845,10 @@ function AppInner() {
         .fe-flux-stat-val{ font-size:14px; font-weight:700; line-height:1.2; }
         /* Rosca de categorias */
         .fe-donut-wrap{ display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
-        .fe-donut{ position:relative; width:180px; height:180px; flex-shrink:0; margin:0 auto; }
+        .fe-donut{ position:relative; width:190px; height:190px; flex-shrink:0; margin:0 auto; }
         .fe-donut-center{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; pointer-events:none; }
+        .fe-donut-lbl{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.04em; }
+        .fe-donut-val{ font-size:14px; font-weight:700; color:#0B1324; line-height:1.2; max-width:104px; text-align:center; word-break:break-word; }
         .fe-donut-legend{ flex:1; min-width:180px; display:flex; flex-direction:column; gap:4px; }
         .fe-leg-item{ display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:5px 7px; border-radius:8px; background:none; border:0; cursor:pointer; font-family:inherit; text-align:left; transition:background .14s; }
         .fe-leg-item:hover{ background:#F6F7F9; }
