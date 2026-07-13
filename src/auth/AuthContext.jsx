@@ -28,11 +28,12 @@ export function AuthProvider({ children }) {
   const [company, setCompany] = useState(null);
   const [modulosPermitidos, setModulosPermitidos] = useState(null); // null = sem restrição
   const [loading, setLoading] = useState(true);
+  const [role, setRole] = useState(null); // 'owner' | 'socio' | 'member'
 
   useEffect(() => {
     return onAuthStateChanged(auth, async (u) => {
       try {
-        if (!u) { setUser(null); setProfile(null); setCompany(null); setModulosPermitidos(null); setLoading(false); return; }
+        if (!u) { setUser(null); setProfile(null); setCompany(null); setModulosPermitidos(null); setRole(null); setLoading(false); return; }
         setUser({ uid: u.uid, email: u.email, displayName: u.displayName });
         const profSnap = await getDoc(doc(fdb, 'users', u.uid));
         if (profSnap.exists()) {
@@ -48,8 +49,10 @@ export function AuthProvider({ children }) {
               const memRef = doc(fdb, 'companies', prof.companyId, 'members', u.uid);
               const memSnap = await getDoc(memRef);
               if (memSnap.exists()) {
-                const modulos = memSnap.data().modulosPermitidos;
+                const md = memSnap.data();
+                const modulos = md.modulosPermitidos;
                 setModulosPermitidos(modulos === undefined ? null : modulos);
+                setRole(comp.ownerUid === u.uid ? 'owner' : (md.role || 'member'));
               } else {
                 // Backwards compat: create the member doc from profile
                 const isOwner = comp.ownerUid === u.uid;
@@ -61,6 +64,7 @@ export function AuthProvider({ children }) {
                   joinedAt: serverTimestamp(),
                 });
                 setModulosPermitidos(null);
+                setRole(isOwner ? 'owner' : 'member');
               }
             } else {
               setModulosPermitidos(null);
@@ -80,6 +84,11 @@ export function AuthProvider({ children }) {
   }, []);
 
   const isOwner = !!(user && company && user.uid === company.ownerUid);
+  // Papéis: dono (tudo), sócio (visão de negócio), funcionário (só o liberado)
+  const papel = isOwner ? 'owner' : (role || 'member');
+  const isSocio = papel === 'socio';
+  // Quem enxerga o negócio inteiro (dono e sócio)
+  const isGestor = isOwner || isSocio;
 
   async function signup({ nome, email, senha, empresaNome, codigoEmpresa }) {
     try {
@@ -150,7 +159,7 @@ export function AuthProvider({ children }) {
   const logout = () => signOut(auth);
 
   return (
-    <AuthContext.Provider value={{ user, profile, company, modulosPermitidos, isOwner, loading, signup, login, resetPassword, logout }}>
+    <AuthContext.Provider value={{ user, profile, company, modulosPermitidos, isOwner, papel, isSocio, isGestor, loading, signup, login, resetPassword, logout }}>
       {children}
     </AuthContext.Provider>
   );

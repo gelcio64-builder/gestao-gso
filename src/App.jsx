@@ -26,6 +26,8 @@ import { parseXLSX } from './importers/xlsx';
 import { parseXML } from './importers/xml';
 import { scanImage, extractBoletoLinha, extractVencimentoDate, extractValues, extractDates } from './ocr/scanner';
 import { gerarOrcamentoPDF } from './pdf/orcamento';
+import { gerarRelatorioPDF } from './pdf/relatorio';
+import { REGIMES, getRegime, getParamsFiscais, calcularFiscal, alertasFiscais, checklistFiscal, calendarioFiscal, FAIXAS_LIMITE } from './fiscal/engine';
 
 /* ============================================================
    GESTÃO GSO — v2.1
@@ -499,6 +501,7 @@ const NAV = [
   { key: 'wms', label: 'Armazém (WMS)', icon: Home },
   { key: 'documentos', label: 'Documentos', icon: FolderOpen },
   { key: 'mudancas', label: 'Mudanças', icon: Package },
+  { key: 'fiscal', label: 'Painel Fiscal', icon: Receipt },
   { key: 'relatorios', label: 'Relatórios', icon: BarChart3 },
   { key: 'importacao', label: 'Importação', icon: ArrowDownRight },
   { key: 'config', label: 'Configurações', icon: Settings },
@@ -761,6 +764,8 @@ function Dashboard({ data }) {
 // FINANCEIRO EMPRESA
 // ============================================================
 const PERIODOS = [{ k: 'hoje', label: 'Hoje' }, { k: '7d', label: '7 dias' }, { k: '30d', label: '30 dias' }, { k: 'mes', label: 'Mês' }, { k: 'ano', label: 'Ano' }];
+// Relatórios tem períodos mais longos (trimestre/semestre) além dos padrão
+const PERIODOS_REL = [{ k: '30d', label: '30 dias' }, { k: 'mes', label: 'Mês' }, { k: 'trimestre', label: 'Trimestre' }, { k: 'semestre', label: 'Semestre' }, { k: 'ano', label: 'Ano' }];
 
 function periodRange(period) {
   const end = new Date(); end.setHours(23, 59, 59, 999);
@@ -768,12 +773,18 @@ function periodRange(period) {
   if (period === '7d') start.setDate(start.getDate() - 6);
   else if (period === '30d') start.setDate(start.getDate() - 29);
   else if (period === 'mes') start = new Date(start.getFullYear(), start.getMonth(), 1);
+  else if (period === 'trimestre') start = new Date(start.getFullYear(), start.getMonth() - 2, 1);
+  else if (period === 'semestre') start = new Date(start.getFullYear(), start.getMonth() - 5, 1);
   else if (period === 'ano') start = new Date(start.getFullYear(), 0, 1);
   const span = end - start;
   const prevEnd = new Date(start.getTime() - 1);
   const prevStart = new Date(start.getTime() - span - 1);
   return { start, end, prevStart, prevEnd };
 }
+const PERIODO_LABEL = {
+  '7d': 'Últimos 7 dias', '30d': 'Últimos 30 dias', mes: 'Mês atual',
+  trimestre: 'Trimestre', semestre: 'Semestre', ano: 'Ano atual',
+};
 const pctChange = (cur, prev) => (!prev ? (cur > 0 ? 100 : 0) : ((cur - prev) / prev) * 100);
 
 const STATUS_LANC = [
@@ -1308,7 +1319,7 @@ function RecorrenciaForm({ inicial, config, onSave, onCancel }) {
   );
 }
 
-function FinanceiroEmpresa({ data, setData }) {
+function FinanceiroEmpresa({ data, setData, onNav }) {
   const { finEmpresa, veiculos, linhas, contratos, recorrencias = [] } = data;
   const [openForm, setOpenForm] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -1318,6 +1329,13 @@ function FinanceiroEmpresa({ data, setData }) {
   const [delTarget, setDelTarget] = useState(null);
   const [saudeOpen, setSaudeOpen] = useState(false);
   const lancRef = useRef(null);
+  // Alertas fiscais críticos aparecem também no Financeiro
+  const fiscalResumo = useMemo(() => {
+    const p = getParamsFiscais(data.config);
+    const f = calcularFiscal(finEmpresa, p);
+    return { fiscal: f, criticos: alertasFiscais(f, finEmpresa).filter(a => a.nivel === 'critico') };
+  }, [data.config, finEmpresa]);
+  const [dismissFiscal, setDismissFiscal] = useState(false);
   const [filtroCard, setFiltroCard] = useState(null); // caixa | aReceber | aPagar | lucro | recorrente
   const clicarCard = (chave) => {
     setFiltroCard(prev => prev === chave ? null : chave);
@@ -1655,6 +1673,22 @@ function FinanceiroEmpresa({ data, setData }) {
 
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {fiscalResumo.criticos.length > 0 && !dismissFiscal && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FEF2F2,#FEE2E2)', borderColor: '#FCA5A5' }}>
+          <div className="conc-banner-ico" style={{ background: '#DC2626' }}><Receipt size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">Atenção fiscal</div>
+            <div className="conc-banner-sub" style={{ color: '#7F1D1D' }}>
+              {fiscalResumo.criticos[0].txt}
+              {fiscalResumo.criticos.length > 1 && ` (+${fiscalResumo.criticos.length - 1} alerta)`}
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={() => onNav?.('fiscal')} style={{ flexShrink: 0 }}>
+            Ver painel fiscal
+          </button>
+          <button className="conc-fechar" onClick={() => setDismissFiscal(true)} title="Fechar aviso"><X size={16} /></button>
+        </div>
+      )}
       {mudancasSemLancamento.length > 0 && (
         <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#EFF6FF,#DBEAFE)', borderColor: '#93C5FD' }}>
           <div className="conc-banner-ico" style={{ background: 'var(--color-primary)' }}><Package size={20} /></div>
@@ -1914,7 +1948,8 @@ function FinanceiroEmpresa({ data, setData }) {
         </div>
       </div>
 
-      {/* Próximos vencimentos */}
+      {/* Próximos vencimentos + Painel Fiscal */}
+      <div className="fe-venc-fiscal-grid">
       <div className="card p-4 sm:p-5">
         <div className="flex items-center justify-between mb-3">
           <h3 className="display h-card t-ink">Próximos vencimentos</h3>
@@ -1948,6 +1983,9 @@ function FinanceiroEmpresa({ data, setData }) {
             })}
           </div>
         )}
+      </div>
+
+      <FiscalWidget data={data} onAbrir={() => onNav?.('fiscal')} />
       </div>
 
       {/* Recorrências — cards compactos */}
@@ -2053,6 +2091,11 @@ function FinanceiroEmpresa({ data, setData }) {
                     <div className={`text-sm font-medium truncate ${canc ? 'tx-canc' : 't-ink'}`}>{x.descricao}</div>
                     <div className="text-xs t-soft mt-0.5 flex flex-wrap items-center gap-1.5">
                       <Badge tone={sb.tone}>{sb.label}</Badge>
+                      {x.abastecimentoId && (
+                        <span className="tag-abast" title="Também registrado no módulo Combustível">
+                          <Fuel size={10} /> Combustível
+                        </span>
+                      )}
                       <CategoryDropdown
                         lancamento={x}
                         config={data.config}
@@ -3155,14 +3198,36 @@ function Combustivel({ data, setData }) {
     return Array.from(map.values());
   }, [combustivel]);
 
-  const handleSave = (item) => { const msg = editing ? 'Abastecimento atualizado com sucesso' : 'Abastecimento salvo com sucesso'; setData(d => ({ ...d, combustivel: editing ? d.combustivel.map(x => x.id === editing.id ? { ...item, id: editing.id } : x) : [...d.combustivel, { ...item, id: uid() }] })); setOpenForm(false); setEditing(null); setToast(msg); };
+  const handleSave = (item) => {
+    const msg = editing ? 'Abastecimento atualizado com sucesso' : 'Abastecimento salvo com sucesso';
+    // Se os litros foram preenchidos, o registro deixa de ser "incompleto"
+    const completo = (Number(item.litros) || 0) > 0;
+    const final = { ...item, incompleto: completo ? false : (editing?.incompleto || false) };
+    setData(d => ({ ...d, combustivel: editing ? d.combustivel.map(x => x.id === editing.id ? { ...final, id: editing.id } : x) : [...d.combustivel, { ...final, id: uid() }] }));
+    setOpenForm(false); setEditing(null); setToast(msg);
+  };
   const [toast, setToast] = useToast();
   const [delTarget, setDelTarget] = useState(null);
   const handleDelete = (id) => { const item = combustivel.find(c => c.id === id); if (item) setDelTarget(item); };
   const confirmDelete = () => { if (delTarget) { setData(d => ({ ...d, combustivel: d.combustivel.filter(c => c.id !== delTarget.id) })); setToast('Abastecimento excluído com sucesso'); setDelTarget(null); } };
 
+  const incompletos = useMemo(() => (combustivel || []).filter(c => c.incompleto), [combustivel]);
+
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {incompletos.length > 0 && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FFFBEB,#FEF3C7)', borderColor: '#FDE68A' }}>
+          <div className="conc-banner-ico" style={{ background: '#D97706' }}><Fuel size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">
+              <b>{incompletos.length}</b> {incompletos.length === 1 ? 'abastecimento importado' : 'abastecimentos importados'} do extrato precisam ser completados
+            </div>
+            <div className="conc-banner-sub" style={{ color: '#92400E' }}>
+              Falta informar litros, veículo e quilometragem — sem isso o consumo (km/L) não é calculado. Clique no lápis para completar.
+            </div>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
         <div className="card card-hover p-4 sm:p-5" style={{ display: 'flex', flexDirection: 'column' }}>
           <div className="flex items-start justify-between gap-2">
@@ -3581,7 +3646,7 @@ function groupByCat(arr) {
 
 function reportSeries(base, periodo) {
   const { start, end } = periodRange(periodo);
-  const byMonth = periodo === 'ano';
+  const byMonth = periodo === 'ano' || periodo === 'trimestre' || periodo === 'semestre';
   const buckets = new Map();
   const cursor = new Date(start); cursor.setHours(0, 0, 0, 0);
   if (byMonth) {
@@ -3677,10 +3742,139 @@ function Relatorios({ data }) {
 
   const catOptions = useMemo(() => [...new Set([...CAT_FIN_EMPRESA.entrada, ...CAT_FIN_EMPRESA.saida])], []);
 
+  // ---------- Exportar relatório em PDF ----------
+  const [gerandoPDF, setGerandoPDF] = useState(false);
+  const [pdfOpen, setPdfOpen] = useState(false);
+
+  const exportarPDF = async (periodoPDF) => {
+    setGerandoPDF(true);
+    setPdfOpen(false);
+    try {
+      const { start, end, prevStart, prevEnd } = periodRange(periodoPDF);
+      // recalcula com o período escolhido (usa exatamente as mesmas funções da tela)
+      const baseP = finEmpresa.filter(x => { const d = new Date(x.data); return d >= start && d <= end && matchFilters(x); });
+      const prevP = finEmpresa.filter(x => { const d = new Date(x.data); return d >= prevStart && d <= prevEnd && matchFilters(x); });
+      const sumT = (arr, t) => arr.filter(x => x.tipo === t).reduce((a, b) => a + b.valor, 0);
+      const receita = sumT(baseP, 'entrada'), custo = sumT(baseP, 'saida'), lucro = receita - custo;
+      const pRec = sumT(prevP, 'entrada'), pCus = sumT(prevP, 'saida');
+      const resumoP = {
+        receita, custo, lucro,
+        margem: receita ? lucro / receita * 100 : 0,
+        gRec: pctChange(receita, pRec),
+        gCus: pctChange(custo, pCus),
+        gLuc: pctChange(lucro, pRec - pCus),
+      };
+      const rankingP = linhas.map(l => {
+        const vinc = baseP.filter(x => x.linhaId === l.id);
+        const rec = vinc.filter(x => x.tipo === 'entrada').reduce((a, b) => a + b.valor, 0);
+        const cus = vinc.filter(x => x.tipo === 'saida').reduce((a, b) => a + b.valor, 0);
+        return { nome: l.nome, receita: rec, custo: cus, lucro: rec - cus, margem: rec ? (rec - cus) / rec * 100 : 0, count: vinc.length };
+      }).filter(r => r.count > 0).sort((a, b) => b.lucro - a.lucro);
+
+      const recCatP = groupByCat(baseP.filter(x => x.tipo === 'entrada'));
+      const cusCatP = groupByCat(baseP.filter(x => x.tipo === 'saida'));
+
+      // indicadores operacionais do período
+      const combP = (data.combustivel || []).filter(c => { const d = new Date(c.data); return d >= start && d <= end; });
+      const litros = combP.reduce((a, b) => a + (Number(b.litros) || 0), 0);
+      const gastoComb = combP.reduce((a, b) => a + (Number(b.valor) || 0), 0);
+      const mudP = (data.mudancas || []).filter(m => m.status === 'concluido' && (() => { const d = new Date(m.dataPrevista); return d >= start && d <= end; })());
+      const vencidas = finEmpresa.filter(x => effStatus(x) === 'vencido');
+
+      const extras = {};
+      extras['Lançamentos no período'] = String(baseP.length);
+      if (gastoComb > 0) extras['Gasto com combustível'] = fmtBRL(gastoComb);
+      if (litros > 0) extras['Litros abastecidos'] = `${litros.toFixed(1)} L`;
+      if (mudP.length > 0) extras['Mudanças concluídas'] = `${mudP.length} (${fmtBRL(mudP.reduce((a, b) => a + (b.valorTotal || 0), 0))})`;
+      extras['Contas a receber em aberto'] = fmtBRL(finEmpresa.filter(x => x.tipo === 'entrada' && ['pendente', 'vencido'].includes(effStatus(x))).reduce((a, b) => a + b.valor, 0));
+      extras['Contas a pagar em aberto'] = fmtBRL(finEmpresa.filter(x => x.tipo === 'saida' && ['pendente', 'vencido'].includes(effStatus(x))).reduce((a, b) => a + b.valor, 0));
+      if (vencidas.length > 0) extras['Contas vencidas'] = `${vencidas.length} (${fmtBRL(vencidas.reduce((a, b) => a + b.valor, 0))})`;
+
+      // insights em texto
+      const insightsTxt = [];
+      const melhorP = rankingP[0];
+      const maisCaraP = [...rankingP].sort((a, b) => b.custo - a.custo)[0];
+      if (melhorP) insightsTxt.push(`${melhorP.nome} foi a operação mais lucrativa do período: ${fmtBRL(melhorP.lucro)} de lucro, com margem de ${melhorP.margem.toFixed(0)}%.`);
+      if (maisCaraP && maisCaraP.custo > 0) insightsTxt.push(`${maisCaraP.nome} concentrou o maior custo do período: ${fmtBRL(maisCaraP.custo)}.`);
+      const combCat = cusCatP.find(c => c.nome === 'Combustível')?.valor || 0;
+      if (custo > 0 && combCat > 0) insightsTxt.push(`Combustível representa ${(combCat / custo * 100).toFixed(0)}% de todos os custos do período.`);
+      if (cusCatP[0]) insightsTxt.push(`Maior categoria de despesa: ${cusCatP[0].nome}, somando ${fmtBRL(cusCatP[0].valor)}.`);
+      insightsTxt.push(`Receita ${resumoP.gRec >= 0 ? 'cresceu' : 'caiu'} ${Math.abs(resumoP.gRec).toFixed(0)}% em relação ao período anterior.`);
+      insightsTxt.push(
+        resumoP.margem >= 20 ? `Margem saudável de ${resumoP.margem.toFixed(1)}% — a operação está lucrativa.`
+        : resumoP.margem >= 0 ? `Margem de ${resumoP.margem.toFixed(1)}% — há espaço para reduzir custos ou reajustar preços.`
+        : `Atenção: a operação fechou o período no prejuízo (margem de ${resumoP.margem.toFixed(1)}%).`
+      );
+      if (vencidas.length > 0) insightsTxt.push(`Há ${vencidas.length} conta(s) vencida(s), totalizando ${fmtBRL(vencidas.reduce((a, b) => a + b.valor, 0))}. Regularize para melhorar o fluxo de caixa.`);
+
+      const cfg = data.config || {};
+      await gerarRelatorioPDF(
+        {
+          periodoLabel: PERIODO_LABEL[periodoPDF] || 'Período',
+          inicio: start, fim: end,
+          resumo: resumoP,
+          recCat: recCatP, cusCat: cusCatP,
+          ranking: rankingP,
+          extras, insights: insightsTxt,
+        },
+        {
+          nome: cfg.nomeEmpresa || 'Minha Empresa',
+          logoUrl: cfg.logoUrl || '',
+          cnpj: cfg.cnpj || '',
+          telefone: cfg.telefone || '',
+          cidade: cfg.cidade || '',
+          uf: cfg.uf || '',
+          corPrimaria: getPalette(cfg.paletteId || DEFAULT_PALETTE_ID).colors.primary,
+        }
+      );
+    } catch (e) {
+      console.error('[relatorio pdf]', e);
+      alert('Não consegui gerar o PDF. Tenta de novo.');
+    } finally {
+      setGerandoPDF(false);
+    }
+  };
+
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {/* Exportar relatório */}
+      <div className="rel-export">
+        <div className="min-w-0">
+          <h3 className="display h-card t-ink">Relatório executivo</h3>
+          <p className="text-sm t-soft">Gere um PDF completo com receitas, despesas, desempenho e análise do período.</p>
+        </div>
+        <button className="btn btn-primary" onClick={() => setPdfOpen(true)} disabled={gerandoPDF} style={{ flexShrink: 0 }}>
+          {gerandoPDF ? 'Gerando…' : <><FileSignature size={15} /> Gerar PDF</>}
+        </button>
+      </div>
+
+      {/* Modal: escolher o período do relatório */}
+      <Modal open={pdfOpen} onClose={() => setPdfOpen(false)} title="Gerar relatório em PDF">
+        <div className="space-y-3">
+          <p className="text-sm t-soft">Escolha o período que o relatório vai cobrir:</p>
+          <div className="rel-pdf-opts">
+            {[
+              { k: 'mes', label: 'Mensal', sub: 'Mês atual' },
+              { k: 'trimestre', label: 'Trimestral', sub: 'Últimos 3 meses' },
+              { k: 'semestre', label: 'Semestral', sub: 'Últimos 6 meses' },
+              { k: 'ano', label: 'Anual', sub: 'Ano corrente' },
+            ].map(o => (
+              <button key={o.k} className="rel-pdf-opt" onClick={() => exportarPDF(o.k)}>
+                <span className="rel-pdf-ico"><Calendar size={16} /></span>
+                <span className="min-w-0">
+                  <span className="rel-pdf-lbl">{o.label}</span>
+                  <span className="rel-pdf-sub">{o.sub}</span>
+                </span>
+                <ChevronRight size={15} className="t-mute" />
+              </button>
+            ))}
+          </div>
+          <p className="text-xs t-mute">O PDF sai com o logo e as cores da sua empresa.</p>
+        </div>
+      </Modal>
+
       {/* SEÇÃO 5 — Filtros */}
-      <div className="period-bar">{PERIODOS.map(p => <button key={p.k} onClick={() => setPeriodo(p.k)} className={`period-pill ${periodo === p.k ? 'on' : ''}`}>{p.label}</button>)}</div>
+      <div className="period-bar">{PERIODOS_REL.map(p => <button key={p.k} onClick={() => setPeriodo(p.k)} className={`period-pill ${periodo === p.k ? 'on' : ''}`}>{p.label}</button>)}</div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
         <select className="inp" value={fLinha} onChange={e => setFLinha(e.target.value)}><option value="todas">Todas as linhas</option>{linhas.map(l => <option key={l.id} value={l.id}>{l.nome}</option>)}</select>
         <select className="inp" value={fCategoria} onChange={e => setFCategoria(e.target.value)}><option value="todas">Todas categorias</option>{catOptions.map(c => <option key={c}>{c}</option>)}</select>
@@ -4348,6 +4542,7 @@ function AppInner() {
     wms: { t: 'Armazém (WMS)', s: 'Estoque, endereçamento e giro' },
     documentos: { t: 'Documentos', s: 'Organização e vencimentos' },
     mudancas: { t: 'Mudanças', s: 'Cotações, orçamentos e serviços' },
+    fiscal: { t: 'Painel Fiscal', s: 'Situação tributária da empresa' },
     relatorios: { t: 'Relatórios', s: 'Análises detalhadas com filtros' },
     importacao: { t: 'Importação', s: 'OFX, boleto e CSV com conciliação' },
     config: { t: 'Configurações', s: 'Empresa, preços médios, categorias' },
@@ -4858,6 +5053,126 @@ function AppInner() {
         .imp-row-match{ background:#F0FDF4; border-radius:9px; }
         .imp-baixa-tag{ margin-left:7px; padding:1px 7px; border-radius:99px; background:#DCFCE7; color:#15803D; font-size:9.5px; font-weight:600; white-space:nowrap; }
 
+        /* Abastecimentos detectados na importação */
+        .abast-banner{ background:linear-gradient(135deg,#FFFBEB,#FEF3C7); border:1px solid #FDE68A; border-radius:14px; padding:14px; margin-bottom:16px; }
+        .abast-toggle{ display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:#92400E; cursor:pointer; flex-shrink:0; }
+        .abast-toggle input{ width:16px; height:16px; accent-color:#D97706; }
+        .tag-abast{ display:inline-flex; align-items:center; gap:3px; padding:1px 7px; border-radius:99px; background:#FEF3C7; color:#B45309; font-size:10px; font-weight:600; white-space:nowrap; }
+
+        /* Exportar relatório em PDF */
+        .rel-export{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px 18px; background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; flex-wrap:wrap; box-shadow:0 1px 3px rgba(11,19,36,.04); }
+        .rel-pdf-opts{ display:flex; flex-direction:column; gap:8px; }
+        .rel-pdf-opt{ display:flex; align-items:center; gap:11px; padding:13px 14px; border:1px solid #E4E7EC; border-radius:12px; background:#fff; cursor:pointer; font-family:inherit; text-align:left; transition:border-color .14s, background .14s, transform .14s; }
+        .rel-pdf-opt:hover{ border-color:var(--color-primary); background:#FAFBFF; transform:translateY(-1px); }
+        .rel-pdf-ico{ width:34px; height:34px; border-radius:10px; background:rgba(var(--color-primary-rgb),.1); color:var(--color-primary); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .rel-pdf-lbl{ display:block; font-size:14px; font-weight:700; color:#0B1324; }
+        .rel-pdf-sub{ display:block; font-size:12px; color:#9CA3AF; margin-top:1px; }
+        .rel-pdf-opt > span:nth-child(2){ flex:1; min-width:0; }
+
+        /* Configuração fiscal */
+        .fiscal-aviso{ display:flex; gap:9px; padding:12px 14px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:11px; }
+        .fiscal-regimes{ display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:9px; }
+        .fiscal-regime{ position:relative; display:flex; flex-direction:column; gap:2px; padding:12px 13px; border:1.5px solid #E4E7EC; border-radius:11px; background:#fff; cursor:pointer; font-family:inherit; text-align:left; transition:border-color .15s, background .15s, transform .15s; }
+        .fiscal-regime:hover:not(:disabled){ border-color:#CBD5E1; transform:translateY(-1px); }
+        .fiscal-regime.on{ border-color:var(--color-primary); background:rgba(var(--color-primary-rgb),.04); }
+        .fiscal-regime:disabled{ cursor:default; opacity:.75; }
+        .fiscal-regime-nome{ font-size:13.5px; font-weight:700; color:#0B1324; }
+        .fiscal-regime-desc{ font-size:11px; color:#9CA3AF; line-height:1.3; }
+        .fiscal-regime-check{ position:absolute; top:10px; right:10px; color:var(--color-primary); }
+
+        /* ===== PAINEL FISCAL ===== */
+        .fis-head{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:18px 20px; background:var(--color-surface); border:1px solid #E4E7EC; border-left:4px solid var(--st); border-radius:16px; flex-wrap:wrap; box-shadow:0 1px 3px rgba(11,19,36,.04); }
+        .fis-head-titulo{ font-family:'Fraunces',Georgia,serif; font-size:20px; font-weight:600; color:#0B1324; }
+        .fis-regime{ padding:2px 9px; border-radius:99px; background:rgba(var(--color-primary-rgb),.1); color:var(--color-primary); font-size:11px; font-weight:700; }
+        .fis-head-sub{ font-size:13px; color:#6B7280; margin-top:2px; }
+        .fis-status{ display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:99px; color:#fff; font-size:13px; font-weight:700; flex-shrink:0; }
+        .fis-status-dot{ width:7px; height:7px; border-radius:99px; background:#fff; animation:pulse 2s infinite; }
+        @keyframes pulse{ 0%,100%{ opacity:1; } 50%{ opacity:.4; } }
+
+        .fis-grid-2{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+        @media(max-width:900px){ .fis-grid-2{ grid-template-columns:1fr; } }
+
+        /* Card limite */
+        .fis-pct{ font-size:26px; font-weight:700; letter-spacing:-.02em; }
+        .fis-limite-valores{ margin:6px 0 12px; }
+        .fis-limite-atual{ font-size:22px; font-weight:700; color:#0B1324; }
+        .fis-bar{ height:12px; background:#EFF1F4; border-radius:99px; overflow:hidden; position:relative; }
+        .fis-bar-fill{ height:100%; border-radius:99px; transition:width 1s cubic-bezier(.4,0,.2,1), background .4s; }
+        .fis-bar-legend{ position:relative; height:8px; margin-top:2px; }
+        .fis-bar-tick{ position:absolute; top:0; width:1px; height:5px; background:#D1D5DB; }
+
+        /* Projeção */
+        .fis-proj-metrics{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px; }
+        .fis-metric-l{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; font-weight:600; }
+        .fis-metric-v{ font-size:17px; font-weight:700; color:#0B1324; margin-top:2px; }
+        .fis-proj-box{ display:flex; align-items:flex-start; gap:9px; padding:12px 14px; border-radius:11px; font-size:13px; line-height:1.45; }
+        .fis-proj-box.ok{ background:#F0FDF4; border:1px solid #BBF7D0; color:#14532D; }
+        .fis-proj-box.alerta{ background:#FFFBEB; border:1px solid #FDE68A; color:#78350F; }
+
+        /* Obrigações (DAS / declaração) */
+        .fis-obr{ display:flex; align-items:center; gap:13px; }
+        .fis-obr-data{ width:52px; height:52px; border-radius:12px; background:#F4F6F8; display:flex; flex-direction:column; align-items:center; justify-content:center; flex-shrink:0; }
+        .fis-obr-dia{ font-size:19px; font-weight:700; color:#0B1324; line-height:1; }
+        .fis-obr-mes{ font-size:9.5px; color:#9CA3AF; text-transform:uppercase; margin-top:1px; }
+        .fis-obr-valor{ font-size:19px; font-weight:700; color:#0B1324; }
+
+        /* Timeline do calendário fiscal */
+        .fis-timeline{ display:flex; flex-direction:column; gap:2px; position:relative; }
+        .fis-tl-item{ display:flex; align-items:center; gap:12px; padding:11px 10px 11px 22px; border-radius:10px; position:relative; transition:background .12s; }
+        .fis-tl-item:hover{ background:#FAFBFC; }
+        .fis-tl-dot{ position:absolute; left:5px; width:9px; height:9px; border-radius:99px; background:#CBD5E1; }
+        .fis-tl-item.pendente .fis-tl-dot{ background:#D97706; }
+        .fis-tl-item.atrasado .fis-tl-dot, .fis-tl-item.atrasada .fis-tl-dot{ background:#DC2626; }
+        .fis-tl-item.pago .fis-tl-dot{ background:#16A34A; }
+        .fis-tl-data{ display:flex; flex-direction:column; align-items:center; width:34px; flex-shrink:0; }
+        .fis-tl-data span:first-child{ font-size:15px; font-weight:700; color:#0B1324; line-height:1; }
+        .fis-tl-data span:last-child{ font-size:9.5px; color:#9CA3AF; text-transform:uppercase; }
+        .fis-tl-titulo{ font-size:13.5px; font-weight:600; color:#0B1324; }
+        .fis-tl-sub{ font-size:11.5px; color:#9CA3AF; }
+        .fis-tl-right{ display:flex; align-items:center; gap:10px; flex-shrink:0; }
+        .fis-tl-dias{ padding:2px 9px; border-radius:99px; background:#F1F3F5; color:#6B7280; font-size:11px; font-weight:600; white-space:nowrap; }
+        .fis-tl-dias.urgente{ background:#FEF3C7; color:#B45309; }
+        .fis-tl-dias.atrasado{ background:#FEE2E2; color:#DC2626; }
+
+        /* Alertas */
+        .fis-alerta{ display:flex; align-items:flex-start; gap:10px; padding:11px 13px; border-radius:11px; line-height:1.45; }
+        .fis-alerta.critico{ background:#FEF2F2; border:1px solid #FECACA; color:#7F1D1D; }
+        .fis-alerta.alerta{ background:#FFFBEB; border:1px solid #FDE68A; color:#78350F; }
+        .fis-alerta.info{ background:#EFF6FF; border:1px solid #BFDBFE; color:#1E3A8A; }
+        .fis-alerta-ico{ width:24px; height:24px; border-radius:7px; display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; }
+        .fis-alerta.critico .fis-alerta-ico{ background:#DC2626; }
+        .fis-alerta.alerta .fis-alerta-ico{ background:#D97706; }
+        .fis-alerta.info .fis-alerta-ico{ background:#2563EB; }
+
+        /* Comparativo + checklist */
+        .fis-comp{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+        .fis-comp-item{ background:#F8F9FB; border-radius:11px; padding:12px 13px; }
+        .fis-check{ display:flex; align-items:center; gap:8px; }
+        .fis-check-ico{ width:18px; height:18px; border-radius:6px; display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; }
+        .fis-check-ico.ok{ background:#16A34A; }
+        .fis-check-ico.bad{ background:#DC2626; }
+
+        /* Widget fiscal no Financeiro */
+        .fe-venc-fiscal-grid{ display:grid; grid-template-columns:1.3fr 1fr; gap:16px; align-items:start; }
+        @media(max-width:1000px){ .fe-venc-fiscal-grid{ grid-template-columns:1fr; } }
+        .fis-widget{ display:flex; flex-direction:column; }
+        .fis-w-lbl{ font-size:11px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; font-weight:600; }
+        .fis-w-limite{ font-size:20px; font-weight:700; color:#0B1324; margin-top:2px; margin-bottom:14px; }
+        .fis-w-row{ display:flex; align-items:flex-end; justify-content:space-between; gap:10px; }
+        .fis-w-valor{ font-size:18px; font-weight:700; color:#0B1324; margin-top:2px; }
+        .fis-w-pct{ font-size:24px; font-weight:700; letter-spacing:-.02em; line-height:1; }
+        .fis-w-projecao{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:14px; padding:11px 13px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:11px; }
+        .fis-w-mes{ font-size:15px; font-weight:700; color:#78350F; text-transform:capitalize; margin-top:1px; }
+        .fis-w-obrigacoes{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:14px; }
+        @media(max-width:420px){ .fis-w-obrigacoes{ grid-template-columns:1fr; } }
+        .fis-w-obr{ display:flex; flex-direction:column; gap:2px; padding:12px; border:1px solid #EFF0F2; border-radius:11px; background:#FAFBFC; }
+        .fis-w-obr-titulo{ font-size:11.5px; font-weight:700; color:#0B1324; line-height:1.3; }
+        .fis-w-obr-sub{ font-size:10.5px; color:#9CA3AF; line-height:1.3; }
+        .fis-w-obr-data{ font-size:12px; color:#374151; font-weight:600; margin-top:2px; }
+        .fis-w-obr-valor{ font-size:14px; font-weight:700; color:#0B1324; margin-bottom:4px; }
+        .fis-w-link{ display:flex; align-items:center; justify-content:center; gap:4px; width:100%; margin-top:14px; padding:9px; border:0; background:none; color:var(--color-primary); font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer; border-radius:9px; transition:background .14s; }
+        .fis-w-link:hover{ background:rgba(var(--color-primary-rgb),.06); }
+
         /* Financeiro Empresa — cards principais premium */
         .fe-cards-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:14px; }
         @media(max-width:1280px){ .fe-cards-grid{ grid-template-columns:repeat(3,1fr); } }
@@ -5273,7 +5588,7 @@ function AppInner() {
           </div>
         ) : <>
           {route === 'dashboard' && <Dashboard data={data} />}
-          {route === 'finEmpresa' && <FinanceiroEmpresa data={data} setData={setData} />}
+          {route === 'finEmpresa' && <FinanceiroEmpresa data={data} setData={setData} onNav={setRoute} />}
           {route === 'linhas' && <Linhas data={data} setData={setData} />}
           {route === 'veiculos' && <Veiculos data={data} setData={setData} />}
           {route === 'combustivel' && <Combustivel data={data} setData={setData} />}
@@ -5285,6 +5600,7 @@ function AppInner() {
           {route === 'wms' && <ArmazemWMS data={data} setData={setData} />}
           {route === 'documentos' && <Documentos data={data} setData={setData} />}
           {route === 'mudancas' && <Mudancas data={data} setData={setData} />}
+          {route === 'fiscal' && <PainelFiscal data={data} setData={setData} />}
           {route === 'relatorios' && <Relatorios data={data} />}
           {route === 'importacao' && <Importacao data={data} setData={setData} />}
           {route === 'config' && <Configuracoes data={data} setData={setData} onRequestLogout={openLogout} />}
@@ -5370,6 +5686,50 @@ function acharCorrespondente(linha, existentes, janelaDias = 5) {
   return { lancamento: melhor, confianca, similaridade: sim };
 }
 
+// ============================================================
+// DETECÇÃO DE ABASTECIMENTO NO EXTRATO
+// ============================================================
+// Um abastecimento aparece no extrato como despesa (e continua lá — é um gasto
+// real). Mas ele também é um registro OPERACIONAL: serve pra calcular km/L,
+// custo por km e consumo por veículo. Aqui detectamos as compras em posto e
+// oferecemos criar também o registro no módulo Combustível.
+// Obs.: o módulo Combustível não entra na soma de despesas do Financeiro,
+// então não há risco de contar o gasto duas vezes.
+
+const REDES_COMBUSTIVEL = [
+  'IPIRANGA', 'SHELL', 'PETROBRAS', 'BR DISTRIBUIDORA', 'ALE', 'RAIZEN',
+  'TEXACO', 'ESSO', 'GASBARRA', 'RODOIL', 'CHARRUA', 'SIM REDE',
+];
+
+// Reconhece uma linha de extrato que é compra de combustível
+function isAbastecimento(descricao, categoria) {
+  const d = (descricao || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (categoria === 'Combustível') return true;
+  if (/\bPOSTO\b|\bAUTO\s*POSTO\b|\bCOMBUSTIVEL\b|\bABASTEC/.test(d)) return true;
+  return REDES_COMBUSTIVEL.some(r => d.includes(r));
+}
+
+// Extrai um nome de posto legível da descrição do banco
+function extrairPosto(descricao) {
+  let d = (descricao || '')
+    .toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    // tira ruído bancário
+    .replace(/\b(COMPRA|CARTAO|DEBITO|DEB|CREDITO|CRED|AUTOMATICO|AUT|PAGAMENTO|PAGTO|PGTO|PIX|TED|DOC|ELO|VISA|MASTER|MASTERCARD|TRANSFERENCIA)\b/g, ' ')
+    .replace(/\b(LTDA|ME|EIRELI|SA|S\/A|EPP|CIA|COM|COMERCIO|DERIVADOS|PETROLEO|COMBUSTIVEIS|DISTRIBUIDORA)\b/g, ' ')
+    .replace(/\d{2}\/\d{2}/g, ' ')     // datas coladas
+    .replace(/[^A-Z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!d) return 'Posto não identificado';
+  // Title Case
+  const titulo = d.toLowerCase().split(' ')
+    .filter(Boolean)
+    .map(w => w.length <= 2 ? w : w[0].toUpperCase() + w.slice(1))
+    .join(' ');
+  return titulo.charAt(0).toUpperCase() + titulo.slice(1);
+}
+
 function Importacao({ data, setData }) {
   const [banco, setBanco] = useState('Itaú');
   const [competencia, setCompetencia] = useState(currentMonth());
@@ -5398,6 +5758,15 @@ function Importacao({ data, setData }) {
   }, [preview, data.finEmpresa, ignorados]);
 
   const idxComMatch = useMemo(() => new Set(correspondencias.map(c => c.idx)), [correspondencias]);
+
+  // Abastecimentos detectados no extrato (viram também registro no módulo Combustível)
+  const [criarAbast, setCriarAbast] = useState(true);
+  const abastecimentos = useMemo(() => {
+    return preview
+      .map((linha, idx) => ({ idx, linha }))
+      .filter(({ linha }) => linha.tipo === 'saida' && isAbastecimento(linha.descricao, linha.categoria))
+      .map(({ idx, linha }) => ({ idx, linha, posto: extrairPosto(linha.descricao) }));
+  }, [preview]);
 
   const [importLog, setImportLog] = useState([]);
 
@@ -5492,11 +5861,26 @@ function Importacao({ data, setData }) {
     correspondencias.forEach(c => baixas.set(c.lancamento.id, c.linha.data || todayISO()));
 
     // Só as linhas SEM correspondência viram lançamentos novos
+    // Índice: qual linha do preview vira abastecimento (pra vincular os dois registros)
+    const abastPorIdx = new Map(abastecimentos.map(a => [a.idx, a]));
+    const idsAbast = new Map(); // idx -> id do registro de combustível
+
     const novos = preview
-      .filter((_, idx) => !idxComMatch.has(idx))
-      .map(x => {
+      .map((x, idx) => ({ x, idx }))
+      .filter(({ idx }) => !idxComMatch.has(idx))
+      .map(({ x, idx }) => {
         const sug = suggestCategoria(x.descricao, x.tipo, memoria);
-        const categoriaFinal = sug ? sug.categoria : (x.categoria || 'Outros');
+        let categoriaFinal = sug ? sug.categoria : (x.categoria || 'Outros');
+
+        // Se é abastecimento, garante a categoria certa e cria o vínculo
+        const ehAbast = criarAbast && abastPorIdx.has(idx);
+        let abastecimentoId = '';
+        if (ehAbast) {
+          categoriaFinal = 'Combustível';
+          abastecimentoId = uid();
+          idsAbast.set(idx, abastecimentoId);
+        }
+
         return {
           id: uid(),
           data: x.data || todayISO(),
@@ -5509,6 +5893,7 @@ function Importacao({ data, setData }) {
           veiculoId: '',
           linhaId: '',
           contratoId: '',
+          abastecimentoId, // vínculo com o módulo Combustível
           obs: source === 'ofx' ? `Importado de OFX (${x.banco || banco})`
              : source === 'csv' ? `Importado de CSV (${x.banco || banco})`
              : source === 'xlsx' ? `Importado de Excel (${x.banco || banco})`
@@ -5524,8 +5909,32 @@ function Importacao({ data, setData }) {
       });
 
     const qtdBaixas = baixas.size;
+
+    // Registros de abastecimento (módulo Combustível). Só o que o extrato sabe:
+    // data, posto e valor. Litros/veículo/km ficam em branco pra completar depois.
+    const novosAbast = criarAbast
+      ? abastecimentos
+          .filter(a => !idxComMatch.has(a.idx)) // se deu baixa, o gasto já existia
+          .map(a => ({
+            id: idsAbast.get(a.idx) || uid(), // mesmo id referenciado pelo lançamento
+            data: a.linha.data || todayISO(),
+            posto: a.posto,
+            valor: a.linha.valor,
+            litros: 0,
+            valorLitro: 0,
+            tipo: 'Diesel',
+            veiculoId: '',
+            motoristaId: '',
+            linhaId: '',
+            kmVeiculo: 0,
+            incompleto: true, // pendente de completar litros/veículo/km
+            obs: 'Importado do extrato bancário',
+          }))
+      : [];
+
     setData(d => ({
       ...d,
+      combustivel: [...(d.combustivel || []), ...novosAbast],
       finEmpresa: [
         // dá baixa nos que já existiam: marca como pago + conciliado
         ...(d.finEmpresa || []).map(x => baixas.has(x.id)
@@ -5541,9 +5950,11 @@ function Importacao({ data, setData }) {
     setImportLog([]);
     if (fileRef.current) fileRef.current.value = '';
     setToast(
-      qtdBaixas > 0
-        ? `${novos.length} novo(s) importado(s) · ${qtdBaixas} baixa(s) em lançamentos existentes`
-        : `${novos.length} lançamento(s) importados para o Financeiro`
+      [
+        `${novos.length} novo(s) importado(s)`,
+        qtdBaixas > 0 ? `${qtdBaixas} baixa(s)` : '',
+        novosAbast.length > 0 ? `${novosAbast.length} abastecimento(s)` : '',
+      ].filter(Boolean).join(' · ')
     );
   };
 
@@ -5671,6 +6082,44 @@ function Importacao({ data, setData }) {
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Abastecimentos detectados */}
+          {abastecimentos.length > 0 && (
+            <div className="abast-banner">
+              <div className="dup-head">
+                <span className="dup-ico" style={{ background: '#D97706' }}><Fuel size={17} /></span>
+                <div className="flex-1 min-w-0">
+                  <div className="dup-titulo" style={{ color: '#78350F' }}>
+                    {abastecimentos.length} {abastecimentos.length === 1 ? 'abastecimento detectado' : 'abastecimentos detectados'}
+                  </div>
+                  <div className="dup-sub" style={{ color: '#92400E' }}>
+                    A despesa continua no Financeiro. Quer também registrar no módulo <b>Combustível</b> (pra calcular km/L)?
+                  </div>
+                </div>
+                <label className="abast-toggle">
+                  <input type="checkbox" checked={criarAbast} onChange={(e) => setCriarAbast(e.target.checked)} />
+                  <span>Registrar</span>
+                </label>
+              </div>
+              {criarAbast && (
+                <div className="dup-list">
+                  {abastecimentos.map(a => (
+                    <div key={a.idx} className="dup-item">
+                      <div className="dup-match">
+                        <Fuel size={13} style={{ color: '#D97706', flexShrink: 0 }} />
+                        <span className="dup-existente truncate">{a.posto}</span>
+                        <span className="text-xs t-mute">{fmtDate(a.linha.data)}</span>
+                      </div>
+                      <span className="mono text-sm font-semibold t-ink">{fmtBRL(a.linha.valor)}</span>
+                    </div>
+                  ))}
+                  <p className="text-xs t-mute mt-1">
+                    Litros, veículo e quilometragem ficam em branco — complete no módulo Combustível para o cálculo de consumo.
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -7851,7 +8300,7 @@ function PapelBadge({ papel, size = 'sm' }) {
   );
 }
 
-function MembrosSection({ company }) {
+function MembrosSection({ company, embutido }) {
   const { user } = useAuth();
   const [membros, setMembros] = useState([]);
   const [saving, setSaving] = useState('');
@@ -7922,10 +8371,10 @@ function MembrosSection({ company }) {
   const MODULOS_EDITAVEIS = NAV.filter(n => n.key !== 'dashboard' && n.key !== 'config');
 
   return (
-    <div className="card p-5">
+    <div className={embutido ? '' : 'card p-5'}>
       <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
         <div>
-          <h3 className="display h-card t-ink mb-1">Membros da empresa</h3>
+          {!embutido && <h3 className="display h-card t-ink mb-1">Membros da empresa</h3>}
           <p className="text-sm t-soft" style={{ maxWidth: 520 }}>
             Controle quais módulos cada colaborador vê no menu. <b>Painel</b> e <b>Configurações</b> ficam sempre visíveis. O dono da empresa sempre vê tudo.
           </p>
@@ -8018,7 +8467,7 @@ function MembrosSection({ company }) {
   );
 }
 
-function AparenciaSection({ data, setData, isOwner }) {
+function AparenciaSection({ data, setData, isOwner, embutido }) {
   const atual = data.config?.paletteId || DEFAULT_PALETTE_ID;
   const [preview, setPreview] = useState(null); // paleta sendo pré-visualizada (hover/tap antes de salvar)
 
@@ -8038,11 +8487,13 @@ function AparenciaSection({ data, setData, isOwner }) {
   };
 
   return (
-    <div className="card p-5">
-      <div className="flex items-center gap-2 mb-1">
-        <Sparkles size={17} style={{ color: 'var(--color-primary)' }} />
-        <h3 className="display h-card t-ink">Aparência</h3>
-      </div>
+    <div className={embutido ? '' : 'card p-5'}>
+      {!embutido && (
+        <div className="flex items-center gap-2 mb-1">
+          <Sparkles size={17} style={{ color: 'var(--color-primary)' }} />
+          <h3 className="display h-card t-ink">Aparência</h3>
+        </div>
+      )}
       <p className="text-sm t-soft mb-4">
         Escolha a paleta de cores da sua empresa. A identidade visual é aplicada em todo o sistema — menu, botões, cabeçalhos e destaques.
         {!isOwner && ' Apenas o dono da empresa pode alterar.'}
@@ -8105,8 +8556,577 @@ function AparenciaSection({ data, setData, isOwner }) {
   );
 }
 
+// Seção recolhível das Configurações — clica no cabeçalho e abre o conteúdo.
+function CfgSecao({ id, aberta, onToggle, titulo, sub, icon: Icon, cor, children }) {
+  const open = aberta === id;
+  return (
+    <div className="acc-card">
+      <button className={`acc-head ${open ? 'open' : ''}`} onClick={() => onToggle(id)}>
+        <span className="acc-head-ico" style={{ background: `${cor}1A`, color: cor }}><Icon size={18} /></span>
+        <span className="acc-head-txt">
+          <span className="acc-head-titulo">{titulo}</span>
+          <span className="acc-head-sub">{sub}</span>
+        </span>
+        <ChevronDown size={18} className="acc-head-chev" />
+      </button>
+      {open && <div className="acc-body">{children}</div>}
+    </div>
+  );
+}
+
+function FiscalConfigSection({ data, setData, isOwner, embutido }) {
+  const p = getParamsFiscais(data.config);
+  const [f, setF] = useState({
+    regimeId: p.regimeId,
+    limiteAnual: p.limiteAnual,
+    valorImposto: p.valorImposto,
+    diaVencimento: p.diaVencimento,
+    declaracaoAnual: p.declaracaoAnual,
+    prazoDeclaracao: p.prazoDeclaracao,
+  });
+  const [dirty, setDirty] = useState(false);
+  const [salvo, setSalvo] = useState(false);
+
+  const upd = (patch) => { setF(prev => ({ ...prev, ...patch })); setDirty(true); setSalvo(false); };
+
+  // Ao trocar de regime, sugere os valores daquele regime (a pessoa pode ajustar)
+  const trocarRegime = (id) => {
+    const r = getRegime(id);
+    setF({
+      regimeId: id,
+      limiteAnual: r.limiteAnual,
+      valorImposto: r.valorImposto,
+      diaVencimento: r.diaVencimento,
+      declaracaoAnual: r.declaracaoAnual,
+      prazoDeclaracao: r.prazoDeclaracao,
+    });
+    setDirty(true); setSalvo(false);
+  };
+
+  const salvar = () => {
+    setData(d => ({
+      ...d,
+      config: {
+        ...(d.config || {}),
+        fiscal: { ...(d.config?.fiscal || {}), ...f },
+      },
+    }));
+    setDirty(false); setSalvo(true);
+  };
+
+  const [mesPrazo, diaPrazo] = String(f.prazoDeclaracao || '05-31').split('-');
+
+  return (
+    <div className={embutido ? '' : 'card p-5'}>
+      <div className="fiscal-aviso">
+        <AlertTriangle size={15} style={{ color: '#D97706', flexShrink: 0, marginTop: 1 }} />
+        <p className="text-xs" style={{ color: '#92400E' }}>
+          Os valores abaixo são <b>sugestões iniciais</b>. Limites, alíquotas e valores mudam por lei todo ano —
+          <b> confirme com seu contador</b> e ajuste aqui. O sistema não emite guias nem consulta a Receita Federal;
+          ele apenas acompanha os números com base nos seus lançamentos.
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <span className="label">Regime tributário</span>
+        <div className="fiscal-regimes">
+          {REGIMES.map(r => (
+            <button
+              key={r.id}
+              className={`fiscal-regime ${f.regimeId === r.id ? 'on' : ''}`}
+              onClick={() => isOwner && trocarRegime(r.id)}
+              disabled={!isOwner}
+            >
+              <span className="fiscal-regime-nome">{r.nome}</span>
+              <span className="fiscal-regime-desc">{r.descricao}</span>
+              {f.regimeId === r.id && <Check size={14} className="fiscal-regime-check" />}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
+        <Field label="Limite anual de faturamento (R$)">
+          <input type="number" step="0.01" min="0" className="inp mono" value={f.limiteAnual} disabled={!isOwner}
+            onChange={(e) => upd({ limiteAnual: e.target.value })} />
+        </Field>
+        <Field label="Valor do imposto mensal (R$)">
+          <input type="number" step="0.01" min="0" className="inp mono" value={f.valorImposto} disabled={!isOwner}
+            onChange={(e) => upd({ valorImposto: e.target.value })} />
+        </Field>
+        <Field label="Dia de vencimento do imposto">
+          <input type="number" min="1" max="31" className="inp mono" value={f.diaVencimento} disabled={!isOwner}
+            onChange={(e) => upd({ diaVencimento: e.target.value })} />
+        </Field>
+        <Field label="Nome da declaração anual">
+          <input className="inp" value={f.declaracaoAnual} disabled={!isOwner}
+            onChange={(e) => upd({ declaracaoAnual: e.target.value })} placeholder="Ex.: DASN-SIMEI" />
+        </Field>
+        <Field label="Prazo da declaração (mês)">
+          <select className="inp" value={mesPrazo} disabled={!isOwner}
+            onChange={(e) => upd({ prazoDeclaracao: `${e.target.value}-${diaPrazo}` })}>
+            {['01','02','03','04','05','06','07','08','09','10','11','12'].map((m, i) => (
+              <option key={m} value={m}>{MONTHS_PT[i]}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Prazo da declaração (dia)">
+          <input type="number" min="1" max="31" className="inp mono" value={diaPrazo} disabled={!isOwner}
+            onChange={(e) => upd({ prazoDeclaracao: `${mesPrazo}-${String(e.target.value).padStart(2, '0')}` })} />
+        </Field>
+      </div>
+
+      {isOwner && (
+        <div className="flex items-center gap-3 mt-4">
+          <button className="btn btn-primary" onClick={salvar}>Salvar configuração fiscal</button>
+          {dirty && <span className="text-xs t-orange">Alterações não salvas</span>}
+          {salvo && <span className="text-xs t-green">✓ Salvo</span>}
+        </div>
+      )}
+      {!isOwner && <p className="text-xs t-mute mt-3">Apenas o dono da empresa pode alterar a configuração fiscal.</p>}
+    </div>
+  );
+}
+
+// ============================================================
+// PAINEL FISCAL
+// ============================================================
+// Camada de leitura sobre os dados que já existem. Não altera cálculos do
+// Financeiro, não cria coleção nova, não consulta serviços externos.
+// Preparado para expansão futura (emissão de guia, consulta CNPJ, integração
+// com contador) — os pontos de extensão estão marcados com TODO.
+
+// Widget compacto do Painel Fiscal — aparece no Financeiro Empresa.
+// Resumo em 5 segundos: limite, projeção, próximo imposto e declaração.
+function FiscalWidget({ data, onAbrir }) {
+  const params = useMemo(() => getParamsFiscais(data.config), [data.config]);
+  const fiscal = useMemo(() => calcularFiscal(data.finEmpresa || [], params), [data.finEmpresa, params]);
+
+  return (
+    <div className="card p-5 fade-in fis-widget">
+      <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <h3 className="display h-card t-ink">Painel Fiscal</h3>
+          <span className="fis-regime">{params.regimeNome}</span>
+        </div>
+        <span className="status-chip" style={{ background: `${fiscal.statusGeral.cor}1A`, color: fiscal.statusGeral.cor }}>
+          <span className="status-dot" style={{ background: fiscal.statusGeral.cor }} />
+          {fiscal.statusGeral.label}
+        </span>
+      </div>
+
+      {fiscal.temLimite && (
+        <>
+          <div className="fis-w-lbl">Limite anual de faturamento</div>
+          <div className="fis-w-limite mono">{fmtBRL(fiscal.limiteAnual)}</div>
+
+          <div className="fis-w-row">
+            <div>
+              <div className="fis-w-lbl">Faturado até agora</div>
+              <div className="fis-w-valor mono">{fmtBRL(fiscal.faturamentoAno)}</div>
+            </div>
+            <div className="fis-w-pct mono" style={{ color: fiscal.faixa.cor }}>
+              {fiscal.pctLimite.toFixed(0)}%
+            </div>
+          </div>
+
+          <div className="fis-bar" style={{ marginTop: 8 }}>
+            <div className="fis-bar-fill" style={{
+              width: `${Math.min(100, fiscal.pctLimite)}%`,
+              background: fiscal.faixa.cor,
+            }} />
+          </div>
+
+          {fiscal.mesEstouroNome && (
+            <div className="fis-w-projecao">
+              <div>
+                <div className="fis-w-lbl">Previsão de estourar o limite</div>
+                <div className="fis-w-mes">{fiscal.mesEstouroNome}/{fiscal.ano}</div>
+              </div>
+              <AlertTriangle size={17} style={{ color: '#D97706', flexShrink: 0 }} />
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Próximo imposto + declaração */}
+      <div className="fis-w-obrigacoes">
+        <div className="fis-w-obr">
+          <div className="fis-w-obr-titulo">Próximo {fiscal.das.nome}</div>
+          <div className="fis-w-obr-sub">
+            {fiscal.das.status === 'pago' ? 'Pago nesta competência'
+              : fiscal.das.diasRestantes < 0 ? `Venceu há ${Math.abs(fiscal.das.diasRestantes)} dia(s)`
+              : `Vence em ${fiscal.das.diasRestantes} dia(s)`}
+          </div>
+          <div className="fis-w-obr-data mono">{fiscal.das.vencimento.toLocaleDateString('pt-BR')}</div>
+          {fiscal.das.valor > 0 && <div className="fis-w-obr-valor mono">{fmtBRL(fiscal.das.valor)}</div>}
+          <StatusFiscal status={fiscal.das.status} />
+        </div>
+        <div className="fis-w-obr">
+          <div className="fis-w-obr-titulo">Declaração Anual ({fiscal.declaracao.nome})</div>
+          <div className="fis-w-obr-sub">
+            Entrega até {fiscal.declaracao.prazo.toLocaleDateString('pt-BR')}
+          </div>
+          <div style={{ marginTop: 'auto', paddingTop: 8 }}>
+            <StatusFiscal status={fiscal.declaracao.status} />
+          </div>
+        </div>
+      </div>
+
+      <button className="fis-w-link" onClick={onAbrir}>
+        Ver painel fiscal completo <ChevronRight size={14} />
+      </button>
+    </div>
+  );
+}
+
+function PainelFiscal({ data, setData }) {
+  const { isOwner } = useAuth();
+  const { finEmpresa = [] } = data;
+  const [toast, setToast] = useToast();
+
+  const params = useMemo(() => getParamsFiscais(data.config), [data.config]);
+  const fiscal = useMemo(() => calcularFiscal(finEmpresa, params), [finEmpresa, params]);
+  const alertas = useMemo(() => alertasFiscais(fiscal, finEmpresa), [fiscal, finEmpresa]);
+  const checklist = useMemo(() => checklistFiscal(fiscal), [fiscal]);
+  const calendario = useMemo(() => calendarioFiscal(fiscal), [fiscal]);
+
+  // Marcar imposto do mês como pago (controle manual, salvo em config.fiscal)
+  const marcarImpostoPago = (pago) => {
+    setData(d => {
+      const fx = d.config?.fiscal || {};
+      const mapa = { ...(fx.impostosPagos || {}) };
+      if (pago) mapa[fiscal.das.chaveMes] = true; else delete mapa[fiscal.das.chaveMes];
+      return { ...d, config: { ...(d.config || {}), fiscal: { ...fx, impostosPagos: mapa } } };
+    });
+    setToast(pago ? `${fiscal.das.nome} marcado como pago` : 'Marcação removida');
+  };
+
+  const marcarDeclaracao = (entregue) => {
+    setData(d => {
+      const fx = d.config?.fiscal || {};
+      const mapa = { ...(fx.declaracoesEntregues || {}) };
+      const k = String(fiscal.declaracao.anoRef);
+      if (entregue) mapa[k] = true; else delete mapa[k];
+      return { ...d, config: { ...(d.config || {}), fiscal: { ...fx, declaracoesEntregues: mapa } } };
+    });
+    setToast(entregue ? 'Declaração marcada como entregue' : 'Marcação removida');
+  };
+
+  const st = fiscal.statusGeral;
+
+  return (
+    <div className="p-4 sm:p-6">
+      <div className="mud-container space-y-4">
+
+        {/* CABEÇALHO com status geral */}
+        <div className="fis-head fade-in" style={{ '--st': st.cor }}>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="fis-head-titulo">Painel Fiscal</h2>
+              <span className="fis-regime">{params.regimeNome}</span>
+            </div>
+            <p className="fis-head-sub">Situação tributária da empresa · ano {fiscal.ano}</p>
+          </div>
+          <div className="fis-status" style={{ background: st.cor }}>
+            <span className="fis-status-dot" />
+            {st.label}
+          </div>
+        </div>
+
+        {/* CARD 1 + CARD 2 — Limite e projeção */}
+        <div className="fis-grid-2">
+          <div className="card p-5 fade-in">
+            <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+              <h3 className="display h-card t-ink">Limite de faturamento</h3>
+              <span className="fis-pct mono" style={{ color: fiscal.faixa.cor }}>
+                {fiscal.temLimite ? `${fiscal.pctLimite.toFixed(0)}%` : '—'}
+              </span>
+            </div>
+            {fiscal.temLimite ? (
+              <>
+                <div className="fis-limite-valores">
+                  <span className="mono fis-limite-atual">{fmtBRL(fiscal.faturamentoAno)}</span>
+                  <span className="t-mute text-sm"> de </span>
+                  <span className="mono text-sm t-soft">{fmtBRL(fiscal.limiteAnual)}</span>
+                </div>
+                <div className="fis-bar">
+                  <div className="fis-bar-fill" style={{
+                    width: `${Math.min(100, fiscal.pctLimite)}%`,
+                    background: fiscal.faixa.cor,
+                  }} />
+                </div>
+                <div className="fis-bar-legend">
+                  {FAIXAS_LIMITE.slice(0, 3).map(f => (
+                    <span key={f.nivel} style={{ left: `${f.max}%` }} className="fis-bar-tick" />
+                  ))}
+                </div>
+                <p className="text-sm t-soft mt-3">
+                  Faltam <b className="t-ink mono">{fmtBRL(fiscal.restante)}</b> para atingir o limite anual do {params.regimeNome}.
+                </p>
+              </>
+            ) : (
+              <p className="text-sm t-soft mt-2">Este regime não tem limite anual de faturamento.</p>
+            )}
+          </div>
+
+          <div className="card p-5 fade-in">
+            <h3 className="display h-card t-ink mb-1">Projeção</h3>
+            <p className="text-xs t-mute mb-3">Baseada na média mensal do que já entrou no caixa</p>
+            <div className="fis-proj-metrics">
+              <div>
+                <div className="fis-metric-l">Média mensal</div>
+                <div className="fis-metric-v mono">{fmtBRL(fiscal.mediaMensal)}</div>
+              </div>
+              <div>
+                <div className="fis-metric-l">Projeção anual</div>
+                <div className="fis-metric-v mono">{fmtBRL(fiscal.projecaoAnual)}</div>
+              </div>
+            </div>
+            <div className={`fis-proj-box ${fiscal.mesEstouroNome ? 'alerta' : 'ok'}`}>
+              {fiscal.mesEstouroNome ? (
+                <>
+                  <AlertTriangle size={16} style={{ flexShrink: 0, color: '#D97706' }} />
+                  <span>No ritmo atual, sua empresa <b>atinge o limite em {fiscal.mesEstouroNome}</b>. Vale conversar com o contador sobre mudar de regime.</span>
+                </>
+              ) : (
+                <>
+                  <Check size={16} style={{ flexShrink: 0, color: '#16A34A' }} />
+                  <span>Você está <b>dentro do limite previsto</b> para o ano.</span>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* CARD 4 + CARD 5 — Imposto e Declaração */}
+        <div className="fis-grid-2">
+          <div className="card p-5 fade-in">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="display h-card t-ink">{fiscal.das.nome} do mês</h3>
+              <StatusFiscal status={fiscal.das.status} />
+            </div>
+            <div className="fis-obr">
+              <div className="fis-obr-data">
+                <span className="fis-obr-dia mono">{String(fiscal.das.vencimento.getDate()).padStart(2, '0')}</span>
+                <span className="fis-obr-mes">{MONTHS_PT[fiscal.das.vencimento.getMonth()]}</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="fis-obr-valor mono">{fiscal.das.valor > 0 ? fmtBRL(fiscal.das.valor) : 'Valor variável'}</div>
+                <div className="text-xs t-soft">
+                  {fiscal.das.status === 'pago' ? 'Pago nesta competência'
+                    : fiscal.das.diasRestantes < 0 ? `Venceu há ${Math.abs(fiscal.das.diasRestantes)} dia(s) — juros e multa incidem`
+                    : `Vence em ${fiscal.das.diasRestantes} dia(s)`}
+                </div>
+                {fiscal.das.pagoDetectado && (
+                  <div className="text-xs t-green mt-1">✓ Detectado automaticamente no Financeiro</div>
+                )}
+              </div>
+            </div>
+            {isOwner && !fiscal.das.pagoDetectado && (
+              <button
+                className={`btn ${fiscal.das.status === 'pago' ? 'btn-ghost' : 'btn-primary'} w-full mt-3`}
+                onClick={() => marcarImpostoPago(fiscal.das.status !== 'pago')}
+              >
+                {fiscal.das.status === 'pago'
+                  ? 'Desmarcar pagamento'
+                  : <><Check size={15} /> Marcar {fiscal.das.nome} como pago</>}
+              </button>
+            )}
+            {/* TODO (expansão futura): emissão da guia DAS pela API do gov.br */}
+          </div>
+
+          <div className="card p-5 fade-in">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="display h-card t-ink">Declaração anual</h3>
+              <StatusFiscal status={fiscal.declaracao.status} />
+            </div>
+            <div className="fis-obr">
+              <div className="fis-obr-data">
+                <span className="fis-obr-dia mono">{String(fiscal.declaracao.prazo.getDate()).padStart(2, '0')}</span>
+                <span className="fis-obr-mes">{MONTHS_PT[fiscal.declaracao.prazo.getMonth()]}</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="fis-obr-valor" style={{ fontSize: 16 }}>{fiscal.declaracao.nome}</div>
+                <div className="text-xs t-soft">
+                  Referente ao ano {fiscal.declaracao.anoRef} ·{' '}
+                  {fiscal.declaracao.status === 'entregue' ? 'entregue'
+                    : fiscal.declaracao.diasRestantes < 0 ? `atrasada há ${Math.abs(fiscal.declaracao.diasRestantes)} dia(s)`
+                    : `faltam ${fiscal.declaracao.diasRestantes} dia(s)`}
+                </div>
+              </div>
+            </div>
+            {isOwner && (
+              <button
+                className={`btn ${fiscal.declaracao.status === 'entregue' ? 'btn-ghost' : 'btn-primary'} w-full mt-3`}
+                onClick={() => marcarDeclaracao(fiscal.declaracao.status !== 'entregue')}
+              >
+                {fiscal.declaracao.status === 'entregue'
+                  ? 'Desmarcar entrega'
+                  : <><Check size={15} /> Marcar como entregue</>}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* CARD 3 — Calendário fiscal */}
+        <div className="card p-5 fade-in">
+          <h3 className="display h-card t-ink mb-1">Calendário fiscal</h3>
+          <p className="text-xs t-mute mb-4">Próximas obrigações em ordem cronológica</p>
+          <div className="fis-timeline">
+            {calendario.map(item => (
+              <div key={item.id} className={`fis-tl-item ${item.status}`}>
+                <span className="fis-tl-dot" />
+                <div className="fis-tl-data">
+                  <span className="mono">{String(item.data.getDate()).padStart(2, '0')}</span>
+                  <span>{MONTHS_PT[item.data.getMonth()]}</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="fis-tl-titulo">{item.titulo}</div>
+                  <div className="fis-tl-sub">{item.sub}</div>
+                </div>
+                <div className="fis-tl-right">
+                  {item.valor > 0 && <span className="mono text-sm t-ink">{fmtBRL(item.valor)}</span>}
+                  <span className={`fis-tl-dias ${item.dias < 0 ? 'atrasado' : item.dias <= 10 ? 'urgente' : ''}`}>
+                    {item.dias < 0 ? `${Math.abs(item.dias)}d atrás` : item.dias === 0 ? 'hoje' : `${item.dias}d`}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* CARD 6 — Alertas inteligentes */}
+        {alertas.length > 0 && (
+          <div className="card p-5 fade-in">
+            <h3 className="display h-card t-ink mb-3">Alertas inteligentes</h3>
+            <div className="space-y-2">
+              {alertas.map((a, i) => (
+                <div key={i} className={`fis-alerta ${a.nivel}`}>
+                  <span className="fis-alerta-ico">
+                    {a.nivel === 'critico' ? <AlertTriangle size={14} />
+                      : a.nivel === 'alerta' ? <CircleAlert size={14} />
+                      : <Lightbulb size={14} />}
+                  </span>
+                  <span className="text-sm">{a.txt}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* CARD 7 + CARD 8 — Histórico e comparativo */}
+        <div className="fis-grid-2">
+          <div className="card p-5 fade-in">
+            <h3 className="display h-card t-ink mb-1">Histórico de faturamento</h3>
+            <p className="text-xs t-mute mb-3">Receita recebida por mês em {fiscal.ano}</p>
+            <div style={{ height: 220 }}>
+              <ResponsiveContainer>
+                <BarChart data={fiscal.porMes} margin={{ top: 6, right: 4, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F3F5" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false}
+                    tickFormatter={(v) => v === 0 ? '0' : `${(v / 1000).toFixed(0)}k`} />
+                  <Tooltip
+                    formatter={(v) => [fmtBRL(v), 'Faturamento']}
+                    labelFormatter={(l, p) => {
+                      const item = p?.[0]?.payload;
+                      if (!item || !fiscal.temLimite) return l;
+                      const pct = (item.valor / fiscal.limiteAnual * 100).toFixed(1);
+                      return `${l} · ${pct}% do limite anual`;
+                    }}
+                    contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 12 }}
+                    cursor={{ fill: 'rgba(11,19,36,.04)' }}
+                  />
+                  <Bar dataKey="valor" radius={[4, 4, 0, 0]} maxBarSize={26}>
+                    {fiscal.porMes.map((m, i) => (
+                      <Cell key={i} fill={i === fiscal.mesAtual ? 'var(--color-primary)' : '#93C5FD'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="card p-5 fade-in">
+            <h3 className="display h-card t-ink mb-3">Comparativo anual</h3>
+            <div className="fis-comp">
+              <div className="fis-comp-item">
+                <div className="fis-metric-l">{fiscal.ano} (até agora)</div>
+                <div className="fis-metric-v mono">{fmtBRL(fiscal.comparativo.anoAtual)}</div>
+              </div>
+              <div className="fis-comp-item">
+                <div className="fis-metric-l">{fiscal.ano - 1} (ano todo)</div>
+                <div className="fis-metric-v mono t-soft">{fmtBRL(fiscal.comparativo.anoAnterior)}</div>
+              </div>
+              <div className="fis-comp-item">
+                <div className="fis-metric-l">Crescimento</div>
+                <div className={`fis-metric-v mono ${fiscal.comparativo.crescimento >= 0 ? 't-green' : 't-red'}`}>
+                  {fiscal.comparativo.crescimento >= 0 ? '+' : ''}{fiscal.comparativo.crescimento.toFixed(0)}%
+                </div>
+              </div>
+              <div className="fis-comp-item">
+                <div className="fis-metric-l">Média mensal</div>
+                <div className="fis-metric-v mono">{fmtBRL(fiscal.mediaMensal)}</div>
+              </div>
+            </div>
+
+            {/* CARD 9 — Checklist */}
+            <div className="mt-4 pt-4" style={{ borderTop: '1px solid #F1F2F4' }}>
+              <div className="label mb-2">Checklist fiscal</div>
+              <div className="space-y-1.5">
+                {checklist.map((c, i) => (
+                  <div key={i} className="fis-check">
+                    <span className={`fis-check-ico ${c.ok ? 'ok' : 'bad'}`}>
+                      {c.ok ? <Check size={11} /> : <X size={11} />}
+                    </span>
+                    <span className={`text-sm ${c.ok ? 't-ink' : ''}`} style={{ color: c.ok ? undefined : '#DC2626' }}>
+                      {c.ok ? c.txt : c.pend}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Rodapé de responsabilidade */}
+        <div className="fiscal-aviso">
+          <AlertTriangle size={15} style={{ color: '#D97706', flexShrink: 0, marginTop: 1 }} />
+          <p className="text-xs" style={{ color: '#92400E' }}>
+            Este painel é uma <b>ferramenta de acompanhamento</b>, não substitui seu contador. Os limites e valores vêm da
+            configuração da empresa e devem ser confirmados. O sistema não emite guias nem consulta a Receita Federal.
+          </p>
+        </div>
+      </div>
+      <Toast msg={toast} />
+    </div>
+  );
+}
+
+// Badge de status das obrigações fiscais
+function StatusFiscal({ status }) {
+  const map = {
+    pago:      { label: 'Pago',      cor: '#16A34A', bg: '#DCFCE7' },
+    entregue:  { label: 'Entregue',  cor: '#16A34A', bg: '#DCFCE7' },
+    pendente:  { label: 'Pendente',  cor: '#D97706', bg: '#FEF3C7' },
+    atrasado:  { label: 'Atrasado',  cor: '#DC2626', bg: '#FEE2E2' },
+    atrasada:  { label: 'Atrasada',  cor: '#DC2626', bg: '#FEE2E2' },
+    futuro:    { label: 'Futuro',    cor: '#6B7280', bg: '#F1F3F5' },
+  };
+  const s = map[status] || map.pendente;
+  return (
+    <span className="status-chip" style={{ background: s.bg, color: s.cor }}>
+      <span className="status-dot" style={{ background: s.cor }} />
+      {s.label}
+    </span>
+  );
+}
+
 function Configuracoes({ data, setData, onRequestLogout }) {
   const { user, profile, company, logout, isOwner } = useAuth();
+  const [secaoAberta, setSecaoAberta] = useState(null); // nenhuma aberta por padrão
+  const toggleSecao = (id) => setSecaoAberta(prev => prev === id ? null : id);
   const c = data.config || {};
   const [nomeEmp, setNomeEmp] = useState(c.nomeEmpresa || '');
   const [logoUrl, setLogoUrl] = useState(c.logoUrl || '');
@@ -8240,8 +9260,9 @@ function Configuracoes({ data, setData, onRequestLogout }) {
         </div>
       </div>
 
-      <div className="card p-5">
-        <h3 className="display h-card t-ink mb-3">Preferências operacionais</h3>
+      <CfgSecao id="pref" aberta={secaoAberta} onToggle={toggleSecao}
+        titulo="Preferências operacionais" sub="Combustível e consumo padrão"
+        icon={Fuel} cor="#D97706">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="block">
             <span className="label">Preço médio combustível (R$/L)</span>
@@ -8256,10 +9277,11 @@ function Configuracoes({ data, setData, onRequestLogout }) {
           <button className="btn btn-primary" onClick={salvarPref}>Salvar preferências</button>
           {saved === 'pref' && <span className="t-green text-sm">✓ Salvo</span>}
         </div>
-      </div>
+      </CfgSecao>
 
-      <div className="card p-5">
-        <h3 className="display h-card t-ink mb-1">Convidar sócio ou colaborador</h3>
+      <CfgSecao id="convite" aberta={secaoAberta} onToggle={toggleSecao}
+        titulo="Convidar sócio ou colaborador" sub="Código de acesso da empresa"
+        icon={Copy} cor="#0EA5E9">
         <p className="text-sm t-soft mb-3">Compartilhe o código abaixo. Quem criar conta usando esse código entra na mesma empresa e enxerga os mesmos dados em tempo real.</p>
         <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
           <code style={{ background: '#F4F6F8', border: '1px solid #E5E7EB', borderRadius: 8, padding: '8px 12px', fontSize: 12.5, fontFamily: 'Geist Mono, monospace', wordBreak: 'break-all', flex: '1 1 auto', minWidth: 0 }}>{company?.id || '—'}</code>
@@ -8267,24 +9289,41 @@ function Configuracoes({ data, setData, onRequestLogout }) {
             {copied ? <><Check size={14} /> Copiado</> : <><Copy size={14} /> Copiar</>}
           </button>
         </div>
-      </div>
+      </CfgSecao>
 
-      {isOwner && <MembrosSection company={company} />}
+      {isOwner && (
+        <CfgSecao id="equipe" aberta={secaoAberta} onToggle={toggleSecao}
+          titulo="Equipe e permissões" sub="Quem entrou na empresa e o que cada um acessa"
+          icon={Users} cor="var(--color-primary)">
+          <MembrosSection company={company} embutido />
+        </CfgSecao>
+      )}
 
-      <AparenciaSection data={data} setData={setData} isOwner={isOwner} />
+      <CfgSecao id="aparencia" aberta={secaoAberta} onToggle={toggleSecao}
+        titulo="Aparência" sub="Paleta de cores da empresa"
+        icon={Sparkles} cor="#7C3AED">
+        <AparenciaSection data={data} setData={setData} isOwner={isOwner} embutido />
+      </CfgSecao>
 
-      <div className="card p-5">
-        <h3 className="display h-card t-ink mb-3">Conta</h3>
+      <CfgSecao id="fiscal" aberta={secaoAberta} onToggle={toggleSecao}
+        titulo="Fiscal e tributário" sub="Regime, limites e obrigações"
+        icon={Receipt} cor="#059669">
+        <FiscalConfigSection data={data} setData={setData} isOwner={isOwner} embutido />
+      </CfgSecao>
+
+      <CfgSecao id="conta" aberta={secaoAberta} onToggle={toggleSecao}
+        titulo="Conta" sub="Seus dados e sair do sistema"
+        icon={LogOut} cor="#6B7280">
         <div className="text-sm space-y-1.5">
           <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>Nome:</span><span className="t-ink font-medium">{user?.displayName || profile?.nome || '—'}</span></div>
           <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>E-mail:</span><span className="t-ink">{user?.email || '—'}</span></div>
           <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>Empresa:</span><span className="t-ink">{company?.nome || '—'}</span></div>
-          <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>Função:</span><span className="t-ink capitalize">{profile?.role || '—'}</span></div>
+          <div className="flex gap-2 items-center"><span className="t-soft" style={{ minWidth: 90 }}>Papel:</span><PapelBadge papel={isOwner ? 'owner' : (profile?.role || 'member')} /></div>
         </div>
         <div className="mt-4">
           <button className="btn btn-danger" onClick={() => (onRequestLogout ? onRequestLogout() : logout())}><LogOut size={14} /> Sair da conta</button>
         </div>
-      </div>
+      </CfgSecao>
     </div>
   );
 }
