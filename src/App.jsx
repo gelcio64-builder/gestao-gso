@@ -504,14 +504,16 @@ const NAV = [
   { key: 'config', label: 'Configurações', icon: Settings },
 ];
 
-function Sidebar({ current, onNav, open, onClose, nomeEmpresa, logoUrl, permitidos }) {
+function Sidebar({ current, onNav, open, onClose, nomeEmpresa, logoUrl, permitidos, isOwner }) {
   const [imgErr, setImgErr] = useState(false);
   const iniciais = (nomeEmpresa || 'E').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
   const items = useMemo(() => {
-    if (!permitidos) return NAV; // null = tudo liberado
+    // Financeiro Pessoal é do DONO — nunca aparece para outros, mesmo com permissão
+    const base = isOwner ? NAV : NAV.filter(n => n.key !== 'finPessoal');
+    if (!permitidos) return base; // null = tudo liberado (dono ou sócio)
     const allowed = new Set([...permitidos, 'dashboard', 'config']); // sempre visíveis
-    return NAV.filter(n => allowed.has(n.key));
-  }, [permitidos]);
+    return base.filter(n => allowed.has(n.key));
+  }, [permitidos, isOwner]);
   return (
     <>
       {open && <div className="sb-overlay" onClick={onClose} />}
@@ -551,7 +553,7 @@ function Sidebar({ current, onNav, open, onClose, nomeEmpresa, logoUrl, permitid
 // ============================================================
 // TOP BAR
 // ============================================================
-function TopBar({ title, subtitle, onMenu, empresa, logoUrl, userName, onLogout }) {
+function TopBar({ title, subtitle, onMenu, empresa, logoUrl, userName, papel, onLogout }) {
   const [imgErr, setImgErr] = useState(false);
   const iniciais = (empresa || 'E').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
   return (
@@ -570,7 +572,10 @@ function TopBar({ title, subtitle, onMenu, empresa, logoUrl, userName, onLogout 
           </div>
           <div className="user-chip-info">
             <span className="user-chip-emp">{empresa || 'Empresa'}</span>
-            <span className="user-chip-name">{userName || '—'}</span>
+            <span className="user-chip-name">
+              {userName || '—'}
+              {papel && <PapelBadge papel={papel} size="xs" />}
+            </span>
           </div>
           <button className="user-chip-out" onClick={onLogout} title="Sair"><LogOut size={14} /></button>
         </div>
@@ -4300,7 +4305,7 @@ function LeadForm({ item, onSave, onCancel }) {
 // MAIN APP
 // ============================================================
 function AppInner() {
-  const { user, company, logout, modulosPermitidos, isOwner } = useAuth();
+  const { user, company, logout, modulosPermitidos, isOwner, isGestor, papel } = useAuth();
   const [data, setData, loaded] = useFirestoreSync(company?.id);
   const [route, setRoute] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -4312,12 +4317,14 @@ function AppInner() {
     applyPalette(data.config?.paletteId || DEFAULT_PALETTE_ID);
   }, [data.config?.paletteId]);
 
-  // Guard: if user hit a route they can't see (via memory of last route or direct URL), send to dashboard
+  // Guard: se caiu numa rota que não pode ver, volta pro dashboard
   useEffect(() => {
-    if (isOwner || !modulosPermitidos) return;
+    // Financeiro Pessoal é exclusivo do dono
+    if (route === 'finPessoal' && !isOwner) { setRoute('dashboard'); return; }
+    if (isGestor || !modulosPermitidos) return;
     const allowed = new Set([...modulosPermitidos, 'dashboard', 'config']);
     if (!allowed.has(route)) setRoute('dashboard');
-  }, [route, modulosPermitidos, isOwner]);
+  }, [route, modulosPermitidos, isGestor, isOwner]);
 
   useEffect(() => {
     const link = document.createElement('link');
@@ -4460,7 +4467,12 @@ function AppInner() {
         .user-chip-avatar span{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,var(--color-primary),var(--color-secondary)); color:#fff; font-weight:700; font-size:12px; letter-spacing:-.01em; }
         .user-chip-info{ display:flex; flex-direction:column; line-height:1.1; min-width:0; margin-left:2px; }
         .user-chip-emp{ font-size:10.5px; color:#6B7280; text-transform:uppercase; letter-spacing:.04em; font-weight:500; }
-        .user-chip-name{ font-size:12.5px; color:#0B1324; font-weight:600; max-width:140px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .user-chip-name{ font-size:12.5px; color:#0B1324; font-weight:600; max-width:180px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; }
+
+        /* Badge de papel (Dono / Sócio / Funcionário) */
+        .papel-badge{ display:inline-flex; align-items:center; padding:2px 8px; border-radius:99px; font-size:10.5px; font-weight:700; white-space:nowrap; }
+        .papel-badge-xs{ padding:1px 6px; font-size:9.5px; margin-left:6px; flex-shrink:0; }
+        .mb-papel{ margin-bottom:12px; }
         .user-chip-out{ width:28px; height:28px; border-radius:999px; background:#fff; border:1px solid #E5E7EB; color:#6B7280; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; transition:color .15s, background .15s, border-color .15s; }
         .user-chip-out:hover{ color:#B4234B; border-color:#FBC8D2; background:#FFF5F7; }
         @media(max-width:520px){ .user-chip-info{ display:none; } .user-chip{ padding:4px; } }
@@ -5238,7 +5250,7 @@ function AppInner() {
         .btn-sm{ padding:5px 11px; font-size:12.5px; }
       `}</style>
 
-      <Sidebar current={route} onNav={setRoute} open={sidebarOpen} onClose={() => setSidebarOpen(false)} nomeEmpresa={data.config?.nomeEmpresa || company?.nome || 'Empresa'} logoUrl={data.config?.logoUrl} permitidos={isOwner ? null : modulosPermitidos} />
+      <Sidebar current={route} onNav={setRoute} open={sidebarOpen} onClose={() => setSidebarOpen(false)} nomeEmpresa={data.config?.nomeEmpresa || company?.nome || 'Empresa'} logoUrl={data.config?.logoUrl} permitidos={isGestor ? null : modulosPermitidos} isOwner={isOwner} />
 
       <main className="flex-1 min-w-0">
         <TopBar
@@ -5248,6 +5260,7 @@ function AppInner() {
           empresa={data.config?.nomeEmpresa || company?.nome}
           logoUrl={data.config?.logoUrl}
           userName={user?.displayName || user?.email}
+          papel={papel}
           onLogout={openLogout}
         />
         {!loaded ? (
@@ -5265,7 +5278,7 @@ function AppInner() {
           {route === 'veiculos' && <Veiculos data={data} setData={setData} />}
           {route === 'combustivel' && <Combustivel data={data} setData={setData} />}
           {route === 'manutencao' && <Manutencao data={data} setData={setData} />}
-          {route === 'finPessoal' && <FinanceiroPessoal data={data} setData={setData} />}
+          {route === 'finPessoal' && isOwner && <FinanceiroPessoal data={data} setData={setData} />}
           {route === 'motoristas' && <Motoristas data={data} setData={setData} />}
           {route === 'contratos' && <Contratos data={data} setData={setData} />}
           {route === 'crm' && <CrmComercial data={data} setData={setData} />}
@@ -7031,7 +7044,8 @@ function PercentInput({ value, onChange, disabled }) {
 }
 
 function TabelaPrecos({ data, setData, setToast }) {
-  const { isOwner } = useAuth();
+  const { isGestor } = useAuth();
+  const isOwner = isGestor; // dono e sócio podem editar a tabela de preços
   const salva = getTabelaMudancas(data.config);
   const [t, setT] = useState(salva);
   const [dirty, setDirty] = useState(false);
@@ -7110,7 +7124,7 @@ function TabelaPrecos({ data, setData, setToast }) {
     <div className="space-y-3">
       {!isOwner && (
         <div className="card p-4" style={{ background: '#FEF9F3', border: '1px solid #F5D5A8' }}>
-          <p className="text-sm" style={{ color: '#92400E' }}>Só o dono da empresa pode editar a tabela de preços. Você pode visualizar os valores abaixo.</p>
+          <p className="text-sm" style={{ color: '#92400E' }}>Apenas o dono e os sócios podem editar a tabela de preços. Você pode visualizar os valores abaixo.</p>
         </div>
       )}
 
@@ -7822,6 +7836,21 @@ function WmsForm({ item, onSave, onCancel }) {
   );
 }
 
+// Badge do papel do usuário: Dono / Sócio / Funcionário
+const PAPEIS = {
+  owner:  { label: 'Dono',        cor: 'var(--color-primary)', bg: 'rgba(var(--color-primary-rgb),.1)' },
+  socio:  { label: 'Sócio',       cor: '#7C3AED',              bg: '#EDE9FE' },
+  member: { label: 'Funcionário', cor: '#6B7280',              bg: '#F1F3F5' },
+};
+function PapelBadge({ papel, size = 'sm' }) {
+  const p = PAPEIS[papel] || PAPEIS.member;
+  return (
+    <span className={`papel-badge ${size === 'xs' ? 'papel-badge-xs' : ''}`} style={{ background: p.bg, color: p.cor }}>
+      {p.label}
+    </span>
+  );
+}
+
 function MembrosSection({ company }) {
   const { user } = useAuth();
   const [membros, setMembros] = useState([]);
@@ -7842,6 +7871,24 @@ function MembrosSection({ company }) {
     }, (err) => console.error('[members]', err));
     return () => unsub();
   }, [company?.id]);
+
+  async function mudarPapel(memberUid, novoPapel) {
+    setSaving(memberUid);
+    try {
+      await updateDoc(
+        fsDoc(fdb, 'companies', company.id, 'members', memberUid),
+        {
+          role: novoPapel,
+          // Sócio vê tudo (modulosPermitidos = null); funcionário começa sem nada liberado
+          modulosPermitidos: novoPapel === 'socio' ? null : [],
+        }
+      );
+    } catch (e) {
+      console.error('[members] mudarPapel', e);
+    } finally {
+      setSaving('');
+    }
+  }
 
   async function toggleModulo(memberUid, moduloKey, currentSet) {
     setSaving(memberUid);
@@ -7900,20 +7947,49 @@ function MembrosSection({ company }) {
               <div key={m.uid} className="mb-row">
                 <div className="flex items-start justify-between gap-3 flex-wrap mb-2">
                   <div className="min-w-0">
-                    <div className="text-sm font-semibold t-ink">{m.nome || m.email}{isSelf && <span className="t-mute" style={{ fontWeight: 400 }}> · você</span>}</div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-semibold t-ink">{m.nome || m.email}{isSelf && <span className="t-mute" style={{ fontWeight: 400 }}> · você</span>}</span>
+                      <PapelBadge papel={m.role} />
+                    </div>
                     <div className="text-xs t-soft">{m.email}</div>
                     <div className="text-xs t-mute mt-0.5">
-                      {isOwnerRow ? '👑 Dono da empresa · acesso total' : seesAll ? 'Vê todos os módulos' : `Vê ${modulos.length + 2} de ${MODULOS_EDITAVEIS.length + 2} módulos`}
+                      {isOwnerRow ? 'Acesso total ao sistema'
+                        : m.role === 'socio' ? 'Vê o negócio inteiro · não acessa Financeiro Pessoal, Aparência nem a equipe'
+                        : seesAll ? 'Vê todos os módulos liberados' : `Vê ${modulos.length + 2} de ${MODULOS_EDITAVEIS.length + 2} módulos`}
                     </div>
                   </div>
-                  {!isOwnerRow && !seesAll && (
+                  {!isOwnerRow && m.role !== 'socio' && !seesAll && (
                     <button className="btn btn-ghost btn-sm" onClick={() => liberarTudo(m.uid)} disabled={isSaving} style={{ flexShrink: 0 }}>
                       Liberar tudo
                     </button>
                   )}
                 </div>
 
+                {/* Papel do membro — só o dono altera */}
                 {!isOwnerRow && (
+                  <div className="mb-papel">
+                    <span className="label" style={{ marginBottom: 6 }}>Papel na empresa</span>
+                    <div className="cot-seg" style={{ maxWidth: 320 }}>
+                      <button
+                        className={`cot-seg-btn ${m.role === 'socio' ? 'on' : ''}`}
+                        disabled={isSaving}
+                        onClick={() => mudarPapel(m.uid, 'socio')}
+                      >
+                        Sócio
+                      </button>
+                      <button
+                        className={`cot-seg-btn ${m.role !== 'socio' ? 'on' : ''}`}
+                        disabled={isSaving}
+                        onClick={() => mudarPapel(m.uid, 'member')}
+                      >
+                        Funcionário
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Módulos: só para funcionário (sócio vê tudo) */}
+                {!isOwnerRow && m.role !== 'socio' && (
                   <div className="mb-mods">
                     {MODULOS_EDITAVEIS.map(mod => {
                       const active = seesAll || (modulos || []).includes(mod.key);
