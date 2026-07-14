@@ -1319,6 +1319,127 @@ function RecorrenciaForm({ inicial, config, onSave, onCancel }) {
   );
 }
 
+// ============================================================
+// ORIGEM DO LANÇAMENTO + AUDITORIA
+// ============================================================
+// Cada lançamento tem uma procedência. Saber disso permite separar o
+// "saldo bancário" (o que passou pela conta) do "saldo total" (que inclui
+// dinheiro em espécie e lançamentos manuais).
+
+function origemLancamento(x) {
+  if (x.fitid) return 'extrato';                       // veio do OFX (tem id do banco)
+  if (x.mudancaId) return 'mudanca';                   // gerado pelo módulo Mudanças
+  if (x.recorrenciaId) return 'recorrencia';           // gerado por recorrência
+  const obs = String(x.obs || '');
+  if (/Importado de (OFX|CSV|Excel)/i.test(obs)) return 'extrato';
+  if (/NF-e|CT-e|Boleto ·/i.test(obs)) return 'documento';
+  return 'manual';                                     // lançado à mão (inclui dinheiro/cash)
+}
+
+const ORIGEM_INFO = {
+  extrato:     { label: 'Extrato bancário', cor: '#2563EB' },
+  manual:      { label: 'Manual / dinheiro', cor: '#16A34A' },
+  recorrencia: { label: 'Recorrência',       cor: '#7C3AED' },
+  mudanca:     { label: 'Mudanças',          cor: '#D97706' },
+  documento:   { label: 'Documento fiscal',  cor: '#6B7280' },
+};
+
+/**
+ * Auditoria do caixa: recalcula tudo e aponta possíveis problemas.
+ * PURA — não altera nada, só diagnostica.
+ */
+function auditarCaixa(finEmpresa = []) {
+  const ativos = finEmpresa.filter(x => effStatus(x) !== 'cancelado');
+  const pagos = ativos.filter(x => effStatus(x) === 'pago');
+
+  // saldo por origem
+  const porOrigem = {};
+  Object.keys(ORIGEM_INFO).forEach(k => {
+    porOrigem[k] = { entradas: 0, saidas: 0, saldo: 0, qtd: 0 };
+  });
+  pagos.forEach(x => {
+    const o = origemLancamento(x);
+    const b = porOrigem[o];
+    if (!b) return;
+    if (x.tipo === 'entrada') b.entradas += x.valor; else b.saidas += x.valor;
+    b.saldo = b.entradas - b.saidas;
+    b.qtd++;
+  });
+
+  const saldoBancario = porOrigem.extrato.saldo;
+  const saldoTotal = pagos.reduce((a, x) => a + (x.tipo === 'entrada' ? x.valor : -x.valor), 0);
+  const saldoForaDoBanco = saldoTotal - saldoBancario;
+
+  // --- PROBLEMA 1: possíveis duplicatas (mesma data + valor + tipo) ---
+  const mapaDup = new Map();
+  ativos.forEach(x => {
+    const k = `${x.data}|${x.tipo}|${(x.valor || 0).toFixed(2)}`;
+    if (!mapaDup.has(k)) mapaDup.set(k, []);
+    mapaDup.get(k).push(x);
+  });
+  const duplicatas = [...mapaDup.values()].filter(arr => arr.length > 1);
+
+  // --- PROBLEMA 2: linhas de saldo que sobraram ---
+  const linhasSaldo = ativos.filter(x => isLinhaSaldo(x.descricao));
+
+  // --- PROBLEMA 3: baixas por conciliação automática (podem ter sido falsas) ---
+  // Lançamento que foi marcado como pago+conciliado mas não tem fitid (não veio
+  // direto do extrato) — ou seja, foi um "match" da importação.
+  const baixasAutomaticas = pagos.filter(x =>
+    x.statusConc === 'conciliado' && !x.fitid && (x.recorrenciaId || x.mudancaId || origemLancamento(x) === 'manual')
+  );
+
+  // --- PROBLEMA 4: lançamentos sem valor ou sem data ---
+  const invalidos = ativos.filter(x => !x.data || !(Number(x.valor) > 0));
+
+  // --- PROBLEMA 5: mesmo fitid importado duas vezes ---
+  const porFitid = new Map();
+  ativos.filter(x => x.fitid).forEach(x => {
+    if (!porFitid.has(x.fitid)) porFitid.set(x.fitid, []);
+    porFitid.get(x.fitid).push(x);
+  });
+  const fitidRepetido = [...porFitid.values()].filter(arr => arr.length > 1);
+
+  return {
+    saldoBancario, saldoTotal, saldoForaDoBanco, porOrigem,
+    totalLancamentos: ativos.length, totalPagos: pagos.length,
+    duplicatas, linhasSaldo, baixasAutomaticas, invalidos, fitidRepetido,
+    temProblema: duplicatas.length > 0 || linhasSaldo.length > 0 || invalidos.length > 0 || fitidRepetido.length > 0,
+  };
+}
+
+// Bloco de problema encontrado na auditoria
+function AuditProblema({ titulo, desc, itens = [], acao, onAcao, aviso }) {
+  const [aberto, setAberto] = useState(false);
+  return (
+    <div className="aud-bloco" style={aviso ? { borderColor: '#FDE68A', background: '#FFFBEB' } : {}}>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold" style={{ color: aviso ? '#78350F' : '#7F1D1D' }}>{titulo}</div>
+          <p className="text-xs mt-1" style={{ color: aviso ? '#92400E' : '#991B1B' }}>{desc}</p>
+        </div>
+        <div className="flex gap-2" style={{ flexShrink: 0 }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => setAberto(v => !v)}>
+            {aberto ? 'Ocultar' : 'Ver quais'}
+          </button>
+          {acao && <button className="btn btn-danger btn-sm" onClick={onAcao}>{acao}</button>}
+        </div>
+      </div>
+      {aberto && (
+        <div className="space-y-1 mt-3 pt-3" style={{ borderTop: '1px dashed rgba(0,0,0,.1)' }}>
+          {itens.slice(0, 12).map(x => (
+            <div key={x.id} className="flex items-center justify-between gap-2 text-xs">
+              <span className="truncate">{x.data ? fmtDate(x.data) : 'sem data'} · {x.descricao || 'sem descrição'}</span>
+              <span className="mono font-semibold" style={{ flexShrink: 0 }}>{fmtBRL(x.valor || 0)}</span>
+            </div>
+          ))}
+          {itens.length > 12 && <p className="text-xs t-mute">+{itens.length - 12} outros…</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FinanceiroEmpresa({ data, setData, onNav }) {
   const { finEmpresa, veiculos, linhas, contratos, recorrencias = [] } = data;
   const [openForm, setOpenForm] = useState(false);
@@ -1329,6 +1450,9 @@ function FinanceiroEmpresa({ data, setData, onNav }) {
   const [delTarget, setDelTarget] = useState(null);
   const [saudeOpen, setSaudeOpen] = useState(false);
   const lancRef = useRef(null);
+  // Auditoria do caixa + saldos separados (banco vs total)
+  const auditoria = useMemo(() => auditarCaixa(finEmpresa), [finEmpresa]);
+  const [auditOpen, setAuditOpen] = useState(false);
   // Alertas fiscais críticos aparecem também no Financeiro
   const fiscalResumo = useMemo(() => {
     const p = getParamsFiscais(data.config);
@@ -1673,6 +1797,25 @@ function FinanceiroEmpresa({ data, setData, onNav }) {
 
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {auditoria.temProblema && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FEF2F2,#FEE2E2)', borderColor: '#FCA5A5' }}>
+          <div className="conc-banner-ico" style={{ background: '#DC2626' }}><AlertTriangle size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">Encontramos possíveis problemas no seu caixa</div>
+            <div className="conc-banner-sub" style={{ color: '#7F1D1D' }}>
+              {[
+                auditoria.duplicatas.length > 0 && `${auditoria.duplicatas.length} possível(is) duplicata(s)`,
+                auditoria.fitidRepetido.length > 0 && `${auditoria.fitidRepetido.length} transação(ões) do extrato importada(s) 2×`,
+                auditoria.linhasSaldo.length > 0 && `${auditoria.linhasSaldo.length} linha(s) de saldo`,
+                auditoria.invalidos.length > 0 && `${auditoria.invalidos.length} lançamento(s) sem data/valor`,
+              ].filter(Boolean).join(' · ')}
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={() => setAuditOpen(true)} style={{ flexShrink: 0 }}>
+            <Eye size={14} /> Auditar caixa
+          </button>
+        </div>
+      )}
       {fiscalResumo.criticos.length > 0 && !dismissFiscal && (
         <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FEF2F2,#FEE2E2)', borderColor: '#FCA5A5' }}>
           <div className="conc-banner-ico" style={{ background: '#DC2626' }}><Receipt size={20} /></div>
@@ -1744,9 +1887,16 @@ function FinanceiroEmpresa({ data, setData, onNav }) {
       <div className="fe-cards-grid">
         <button className={`fe-card fade-in ${filtroCard === 'caixa' ? 'on' : ''}`} onClick={() => clicarCard('caixa')}>
           <div className="fe-card-ico" style={{ background: 'var(--color-primary)', opacity: .92 }}><Wallet size={17} /></div>
-          <div className="fe-card-lbl">Saldo em caixa</div>
+          <div className="fe-card-lbl">Saldo total</div>
           <div className={`fe-card-val mono ${resumo.saldo >= 0 ? '' : 't-red'}`}>{fmtBRL(resumo.saldo)}</div>
-          <div className="fe-card-sub">{filtroCard === 'caixa' ? 'filtrando ✓' : 'Entradas − saídas pagas'}</div>
+          <div className="fe-card-saldos">
+            <span title="Só o que passou pela conta bancária">
+              <b>Banco:</b> <span className="mono">{fmtBRL(auditoria.saldoBancario)}</span>
+            </span>
+            <span title="Dinheiro em espécie e lançamentos manuais">
+              <b>Fora do banco:</b> <span className="mono">{fmtBRL(auditoria.saldoForaDoBanco)}</span>
+            </span>
+          </div>
         </button>
         <button className={`fe-card fade-in ${filtroCard === 'aReceber' ? 'on' : ''}`} onClick={() => clicarCard('aReceber')}>
           <div className="fe-card-ico" style={{ background: '#16A34A' }}><ArrowDownRight size={17} /></div>
@@ -2068,6 +2218,9 @@ function FinanceiroEmpresa({ data, setData, onNav }) {
           <div className="flex items-center gap-2 mb-3">
             <h3 className="display h-card t-ink">Lançamentos</h3>
             <span className="count-pill">{filtered.length} {filtered.length === 1 ? 'lançamento' : 'lançamentos'}</span>
+            <button className="fe-link-btn" onClick={() => setAuditOpen(true)} style={{ marginLeft: 'auto' }}>
+              <Eye size={13} style={{ display: 'inline', verticalAlign: -2 }} /> Auditar caixa
+            </button>
           </div>
           <div className="flex flex-col sm:flex-row sm:items-center gap-3">
             <div className="seg w-full sm:w-auto">
@@ -2304,6 +2457,132 @@ function FinanceiroEmpresa({ data, setData, onNav }) {
             </div>
           );
         })()}
+      </Modal>
+
+      {/* Auditoria do caixa */}
+      <Modal open={auditOpen} onClose={() => setAuditOpen(false)} title="Auditoria do caixa" wide>
+        <div className="space-y-4">
+          <p className="text-sm t-soft">
+            Conferência completa do seu saldo: de onde vem cada real e o que pode estar distorcendo os números.
+          </p>
+
+          {/* Saldos separados */}
+          <div className="aud-saldos">
+            <div className="aud-saldo">
+              <div className="fis-metric-l">Saldo bancário</div>
+              <div className={`aud-saldo-v mono ${auditoria.saldoBancario >= 0 ? '' : 't-red'}`}>{fmtBRL(auditoria.saldoBancario)}</div>
+              <div className="text-xs t-mute">Só o que passou pela conta</div>
+            </div>
+            <div className="aud-saldo">
+              <div className="fis-metric-l">Fora do banco</div>
+              <div className={`aud-saldo-v mono ${auditoria.saldoForaDoBanco >= 0 ? 't-green' : 't-red'}`}>{fmtBRL(auditoria.saldoForaDoBanco)}</div>
+              <div className="text-xs t-mute">Dinheiro, manual, recorrências</div>
+            </div>
+            <div className="aud-saldo destaque">
+              <div className="fis-metric-l">Saldo total</div>
+              <div className={`aud-saldo-v mono ${auditoria.saldoTotal >= 0 ? '' : 't-red'}`}>{fmtBRL(auditoria.saldoTotal)}</div>
+              <div className="text-xs t-mute">{auditoria.totalPagos} lançamentos pagos</div>
+            </div>
+          </div>
+
+          {/* Composição por origem */}
+          <div>
+            <div className="label mb-2">De onde vem cada real</div>
+            <div className="space-y-1.5">
+              {Object.entries(auditoria.porOrigem)
+                .filter(([, v]) => v.qtd > 0)
+                .sort((a, b) => Math.abs(b[1].saldo) - Math.abs(a[1].saldo))
+                .map(([k, v]) => (
+                  <div key={k} className="aud-origem">
+                    <span className="aud-origem-dot" style={{ background: ORIGEM_INFO[k].cor }} />
+                    <span className="flex-1 min-w-0 text-sm t-ink">{ORIGEM_INFO[k].label}</span>
+                    <span className="text-xs t-mute">{v.qtd} lanç.</span>
+                    <span className="text-xs t-green mono">+{fmtBRL(v.entradas)}</span>
+                    <span className="text-xs t-red mono">−{fmtBRL(v.saidas)}</span>
+                    <span className={`text-sm mono font-semibold ${v.saldo >= 0 ? 't-ink' : 't-red'}`} style={{ minWidth: 90, textAlign: 'right' }}>
+                      {fmtBRL(v.saldo)}
+                    </span>
+                  </div>
+                ))}
+            </div>
+          </div>
+
+          {/* Problemas encontrados */}
+          {!auditoria.temProblema ? (
+            <div className="fis-proj-box ok">
+              <Check size={16} style={{ flexShrink: 0, color: '#16A34A' }} />
+              <span>Nenhum problema encontrado. Os números batem.</span>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {auditoria.fitidRepetido.length > 0 && (
+                <AuditProblema
+                  titulo={`${auditoria.fitidRepetido.length} transação(ões) do extrato importada(s) duas vezes`}
+                  desc="A mesma transação do banco entrou mais de uma vez — provavelmente o extrato foi importado 2×. Isso infla o saldo."
+                  itens={auditoria.fitidRepetido.map(g => g[0])}
+                  acao="Remover duplicatas"
+                  onAcao={() => {
+                    const remover = new Set();
+                    auditoria.fitidRepetido.forEach(g => g.slice(1).forEach(x => remover.add(x.id)));
+                    setData(d => ({ ...d, finEmpresa: d.finEmpresa.filter(x => !remover.has(x.id)) }));
+                    setToast(`${remover.size} duplicata(s) removida(s)`);
+                  }}
+                />
+              )}
+              {auditoria.duplicatas.length > 0 && (
+                <AuditProblema
+                  titulo={`${auditoria.duplicatas.length} possível(is) duplicata(s)`}
+                  desc="Lançamentos com a mesma data, valor e tipo. Pode ser coincidência (dois fretes iguais no mesmo dia) — confira antes de excluir."
+                  itens={auditoria.duplicatas.map(g => g[0])}
+                  aviso
+                />
+              )}
+              {auditoria.linhasSaldo.length > 0 && (
+                <AuditProblema
+                  titulo={`${auditoria.linhasSaldo.length} linha(s) de saldo do banco`}
+                  desc='Linhas como "SALDO TOTAL DISPONÍVEL" não são transações — distorcem o caixa.'
+                  itens={auditoria.linhasSaldo}
+                  acao="Remover linhas de saldo"
+                  onAcao={removerLinhasSaldo}
+                />
+              )}
+              {auditoria.invalidos.length > 0 && (
+                <AuditProblema
+                  titulo={`${auditoria.invalidos.length} lançamento(s) sem data ou valor`}
+                  desc="Registros incompletos que podem estar sendo ignorados nos cálculos."
+                  itens={auditoria.invalidos}
+                  aviso
+                />
+              )}
+            </div>
+          )}
+
+          {/* Baixas automáticas — o suspeito principal */}
+          {auditoria.baixasAutomaticas.length > 0 && (
+            <div className="aud-bloco" style={{ borderColor: '#FDE68A', background: '#FFFBEB' }}>
+              <div className="flex items-start gap-2">
+                <CircleAlert size={16} style={{ color: '#D97706', flexShrink: 0, marginTop: 2 }} />
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold" style={{ color: '#78350F' }}>
+                    {auditoria.baixasAutomaticas.length} lançamento(s) receberam baixa automática na importação
+                  </div>
+                  <p className="text-xs mt-1" style={{ color: '#92400E' }}>
+                    Estes já existiam no sistema e o extrato deu baixa neles (em vez de duplicar).
+                    <b> Se algum casou errado</b>, uma transação do extrato pode não ter sido criada — confira se os valores batem com o banco.
+                  </p>
+                  <div className="space-y-1 mt-2">
+                    {auditoria.baixasAutomaticas.slice(0, 8).map(x => (
+                      <div key={x.id} className="flex items-center justify-between gap-2 text-xs">
+                        <span className="truncate" style={{ color: '#78350F' }}>{fmtDate(x.data)} · {x.descricao}</span>
+                        <span className="mono font-semibold" style={{ color: '#78350F', flexShrink: 0 }}>{fmtBRL(x.valor)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </Modal>
 
       {/* Painel de detalhes da Saúde Financeira */}
@@ -3213,8 +3492,60 @@ function Combustivel({ data, setData }) {
 
   const incompletos = useMemo(() => (combustivel || []).filter(c => c.incompleto), [combustivel]);
 
+  // Despesas de combustível que estão no Financeiro mas nunca viraram
+  // registro aqui (foram importadas/lançadas antes desta integração existir).
+  const semRegistro = useMemo(() => {
+    const jaTem = new Set((combustivel || []).map(c => c.id));
+    return (data.finEmpresa || []).filter(x =>
+      x.tipo === 'saida' &&
+      isAbastecimento(x.descricao, x.categoria) &&
+      !x.abastecimentoId &&
+      !jaTem.has(x.abastecimentoId)
+    );
+  }, [data.finEmpresa, combustivel]);
+
+  const importarDoFinanceiro = () => {
+    const qtd = semRegistro.length;
+    setData(d => {
+      const novos = [];
+      const fin = (d.finEmpresa || []).map(x => {
+        if (!semRegistro.some(s => s.id === x.id)) return x;
+        const novoId = uid();
+        novos.push({
+          id: novoId,
+          data: x.data,
+          posto: extrairPosto(x.descricao),
+          valor: x.valor,
+          litros: 0, valorLitro: 0, tipo: 'Diesel',
+          veiculoId: '', motoristaId: '', linhaId: '', kmVeiculo: 0,
+          incompleto: true,
+          obs: 'Vinculado a lançamento do Financeiro',
+        });
+        return { ...x, abastecimentoId: novoId, categoria: 'Combustível' };
+      });
+      return { ...d, finEmpresa: fin, combustivel: [...(d.combustivel || []), ...novos] };
+    });
+    setToast(`${qtd} abastecimento(s) trazido(s) do Financeiro`);
+  };
+
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {semRegistro.length > 0 && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#EFF6FF,#DBEAFE)', borderColor: '#93C5FD' }}>
+          <div className="conc-banner-ico" style={{ background: 'var(--color-primary)' }}><Fuel size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">
+              <b>{semRegistro.length}</b> {semRegistro.length === 1 ? 'gasto com combustível' : 'gastos com combustível'} no Financeiro fora deste módulo
+            </div>
+            <div className="conc-banner-sub" style={{ color: '#1E3A8A' }}>
+              Total de {fmtBRL(semRegistro.reduce((a, b) => a + b.valor, 0))}. Traga para cá e veja o histórico completo de abastecimento.
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={importarDoFinanceiro} style={{ flexShrink: 0 }}>
+            <Check size={14} /> Trazer {semRegistro.length}
+          </button>
+        </div>
+      )}
       {incompletos.length > 0 && (
         <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FFFBEB,#FEF3C7)', borderColor: '#FDE68A' }}>
           <div className="conc-banner-ico" style={{ background: '#D97706' }}><Fuel size={20} /></div>
@@ -3354,7 +3685,7 @@ function Combustivel({ data, setData }) {
       </div>
 
       <Modal open={openForm} onClose={() => { setOpenForm(false); setEditing(null); }} title={editing ? 'Editar abastecimento' : 'Novo abastecimento'} wide>
-        <AbastecimentoForm item={editing} veiculos={veiculos} linhas={linhas} motoristas={motoristas} onSave={handleSave} onCancel={() => { setOpenForm(false); setEditing(null); }} />
+        <AbastecimentoForm item={editing} veiculos={veiculos} linhas={linhas} motoristas={motoristas} postosConhecidos={(combustivel || []).map(c => c.posto)} onSave={handleSave} onCancel={() => { setOpenForm(false); setEditing(null); }} />
       </Modal>
       <ConfirmModal item={delTarget} title="Excluir abastecimento" message="Tem certeza que deseja excluir este abastecimento?" onCancel={() => setDelTarget(null)} onConfirm={confirmDelete} />
       <Toast msg={toast} />
@@ -3362,34 +3693,198 @@ function Combustivel({ data, setData }) {
   );
 }
 
-function AbastecimentoForm({ item, veiculos, linhas, motoristas, onSave, onCancel }) {
+// Redes de combustível comuns no Brasil (sugestões iniciais no seletor de posto)
+const POSTOS_SUGERIDOS = [
+  'Posto Ipiranga', 'Posto Shell', 'Posto Petrobras (BR)', 'Posto Ale',
+  'Posto Texaco', 'Posto Raízen', 'Auto Posto', 'Posto da Rodovia',
+];
+
+function AbastecimentoForm({ item, veiculos, linhas, motoristas, postosConhecidos = [], onSave, onCancel }) {
   const [f, setF] = useState({
-    data: item?.data || new Date().toISOString().slice(0, 10), veiculoId: item?.veiculoId || veiculos[0]?.id || '',
-    posto: item?.posto || '', tipo: item?.tipo || 'Gasolina', litros: item?.litros || '', valorLitro: item?.valorLitro || '',
-    kmVeiculo: item?.kmVeiculo || '', linhaId: item?.linhaId || '', motoristaId: item?.motoristaId || '',
+    data: item?.data || new Date().toISOString().slice(0, 10),
+    veiculoId: item?.veiculoId || veiculos[0]?.id || '',
+    posto: item?.posto || '',
+    tipo: item?.tipo || 'Diesel',
+    valor: item?.valor || '',        // AGORA é o campo principal
+    litros: item?.litros || '',
+    valorLitro: item?.valorLitro || '',
+    kmVeiculo: item?.kmVeiculo || '',
+    linhaId: item?.linhaId || '',
+    motoristaId: item?.motoristaId || '',
   });
-  const valorTotal = (+f.litros || 0) * (+f.valorLitro || 0);
-  const submitForm = () => { onSave({ ...f, litros: +f.litros, valorLitro: +f.valorLitro, valor: valorTotal, kmVeiculo: +f.kmVeiculo }); };
+  const [scanMsg, setScanMsg] = useState('');
+
+  // Deriva o terceiro campo quando dois estão preenchidos.
+  // Ex.: digitou valor + valor/litro → calcula os litros sozinho.
+  const setCampo = (campo, valorNovo) => {
+    setF(prev => {
+      const n = { ...prev, [campo]: valorNovo };
+      const v = parseFloat(n.valor) || 0;
+      const l = parseFloat(n.litros) || 0;
+      const vl = parseFloat(n.valorLitro) || 0;
+
+      if (campo === 'valor' || campo === 'valorLitro') {
+        // valor e preço/litro conhecidos → litros
+        if (v > 0 && vl > 0) n.litros = +(v / vl).toFixed(2);
+      }
+      if (campo === 'litros') {
+        // litros + preço/litro → valor ; senão litros + valor → preço/litro
+        if (l > 0 && vl > 0) n.valor = +(l * vl).toFixed(2);
+        else if (l > 0 && v > 0) n.valorLitro = +(v / l).toFixed(3);
+      }
+      if (campo === 'valor' && l > 0 && !vl) {
+        n.valorLitro = +(v / l).toFixed(3);
+      }
+      return n;
+    });
+  };
+
+  // OCR do comprovante do posto
+  const aplicarScan = (texto) => {
+    if (!texto) return;
+    const achados = [];
+    const T = texto.toUpperCase();
+
+    // Valor total: pega o MAIOR valor monetário do cupom (normalmente é o total)
+    const valores = extractValues(texto);
+    if (valores.length > 0) {
+      const maior = Math.max(...valores);
+      if (maior > 0) { setCampo('valor', maior); achados.push(`valor ${fmtBRL(maior)}`); }
+    }
+
+    // Data
+    const datas = extractDates(texto);
+    if (datas.length > 0) { setF(prev => ({ ...prev, data: datas[0] })); achados.push('data'); }
+
+    // Litros: procura padrões tipo "35,420 L" ou "LITROS 35,42"
+    const mLitros = texto.match(/(\d{1,3}[.,]\d{1,3})\s*(?:L\b|LT\b|LITROS?)/i)
+                 || texto.match(/(?:LITROS?|QTDE?)[:\s]+(\d{1,3}[.,]\d{1,3})/i);
+    if (mLitros) {
+      const l = parseFloat(mLitros[1].replace(',', '.'));
+      if (l > 0 && l < 999) { setCampo('litros', l); achados.push(`${l} litros`); }
+    }
+
+    // Tipo de combustível
+    const tipos = { DIESEL: 'Diesel', 'S-10': 'Diesel', S10: 'Diesel', GASOLINA: 'Gasolina', ETANOL: 'Etanol', ALCOOL: 'Etanol', GNV: 'GNV' };
+    for (const [k, v] of Object.entries(tipos)) {
+      if (T.includes(k)) { setF(prev => ({ ...prev, tipo: v })); achados.push(v); break; }
+    }
+
+    // Posto: primeira linha significativa do cupom costuma ser o nome
+    const linhasTxt = texto.split('\n').map(s => s.trim()).filter(s => s.length > 4);
+    const nomePosto = linhasTxt.find(l => /POSTO|AUTO|COMBUST|IPIRANGA|SHELL|PETROBRAS|RAIZEN|ALE\b/i.test(l));
+    if (nomePosto) {
+      const limpo = nomePosto.replace(/[^A-Za-zÀ-ú0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+      if (limpo) { setF(prev => ({ ...prev, posto: limpo })); achados.push('posto'); }
+    }
+
+    setScanMsg(achados.length > 0
+      ? `Encontrei: ${achados.join(' · ')}. Confira antes de salvar.`
+      : 'Não consegui ler o comprovante. Preencha manualmente.');
+  };
+
+  const valorNum = parseFloat(f.valor) || 0;
+  const litrosNum = parseFloat(f.litros) || 0;
+  const podeSalvar = valorNum > 0;
+
+  const submitForm = () => {
+    onSave({
+      ...f,
+      valor: valorNum,
+      litros: litrosNum,
+      valorLitro: parseFloat(f.valorLitro) || 0,
+      kmVeiculo: +f.kmVeiculo || 0,
+    });
+  };
+
+  // Lista de postos: os que a empresa já usou + as redes conhecidas
+  const listaPostos = useMemo(() => {
+    const conhecidos = [...new Set(postosConhecidos.filter(Boolean))].sort();
+    const extras = POSTOS_SUGERIDOS.filter(p => !conhecidos.some(c => c.toLowerCase() === p.toLowerCase()));
+    return [...conhecidos, ...extras];
+  }, [postosConhecidos]);
+
   return (
     <div className="space-y-4">
+      {/* Scanner do comprovante */}
+      <div className="scan-box">
+        <div className="flex items-center gap-2 flex-wrap">
+          <ScanButton label="Escanear comprovante do posto" onExtracted={aplicarScan} />
+          <span className="text-xs t-mute">Tire uma foto do cupom fiscal — preenchemos os campos pra você.</span>
+        </div>
+        {scanMsg && <p className="text-xs mt-2" style={{ color: 'var(--color-primary)' }}>{scanMsg}</p>}
+      </div>
+
       <div className="grid grid-cols-2 gap-3">
         <Field label="Data"><input type="date" className="inp" value={f.data} onChange={(e) => setF({ ...f, data: e.target.value })} required /></Field>
-        <Field label="Veículo"><select className="inp" value={f.veiculoId} onChange={(e) => setF({ ...f, veiculoId: e.target.value })} required>{veiculos.map(v => <option key={v.id} value={v.id}>{v.placa}</option>)}</select></Field>
+        <Field label="Veículo">
+          <select className="inp" value={f.veiculoId} onChange={(e) => setF({ ...f, veiculoId: e.target.value })} required>
+            <option value="">Selecione…</option>
+            {veiculos.map(v => <option key={v.id} value={v.id}>{v.placa}</option>)}
+          </select>
+        </Field>
         <Field label="Motorista"><MotoristaSelect motoristas={motoristas} value={f.motoristaId} onChange={(val) => setF({ ...f, motoristaId: val })} /></Field>
-        <Field label="Posto"><input className="inp" value={f.posto} onChange={(e) => setF({ ...f, posto: e.target.value })} /></Field>
-        <Field label="Tipo"><select className="inp" value={f.tipo} onChange={(e) => setF({ ...f, tipo: e.target.value })}>{['Gasolina', 'Etanol', 'Diesel', 'GNV'].map(t => <option key={t}>{t}</option>)}</select></Field>
-        <Field label="Litros"><input type="number" step="0.01" className="inp" value={f.litros} onChange={(e) => setF({ ...f, litros: e.target.value })} required /></Field>
-        <Field label="Valor por litro"><input type="number" step="0.001" className="inp" value={f.valorLitro} onChange={(e) => setF({ ...f, valorLitro: e.target.value })} required /></Field>
-        <Field label="KM do veículo"><input type="number" className="inp" value={f.kmVeiculo} onChange={(e) => setF({ ...f, kmVeiculo: e.target.value })} /></Field>
-        <Field label="Linha / Frete"><select className="inp" value={f.linhaId} onChange={(e) => setF({ ...f, linhaId: e.target.value })}><option value="">—</option>{linhas.map(l => <option key={l.id} value={l.id}>{l.nome}</option>)}</select></Field>
-        <div className="col-span-2 metric-box flex items-center justify-between gap-3">
-          <span className="label">Total</span>
-          <span className="display t-ink total-val">{fmtBRL(valorTotal)}</span>
-        </div>
+
+        {/* Posto com lista + digitação livre */}
+        <Field label="Posto">
+          <input
+            className="inp" list="lista-postos" value={f.posto} placeholder="Escolha ou digite"
+            onChange={(e) => setF({ ...f, posto: e.target.value })}
+          />
+          <datalist id="lista-postos">
+            {listaPostos.map(p => <option key={p} value={p} />)}
+          </datalist>
+        </Field>
+
+        {/* VALOR é o campo principal agora */}
+        <Field label="Valor pago (R$) *">
+          <input type="number" step="0.01" min="0" className="inp mono" value={f.valor}
+            onChange={(e) => setCampo('valor', e.target.value)} placeholder="Ex.: 100,00" required />
+        </Field>
+        <Field label="Tipo">
+          <select className="inp" value={f.tipo} onChange={(e) => setF({ ...f, tipo: e.target.value })}>
+            {['Diesel', 'Diesel S-10', 'Gasolina', 'Etanol', 'GNV', 'Arla 32'].map(t => <option key={t}>{t}</option>)}
+          </select>
+        </Field>
+
+        <Field label="Valor por litro (opcional)">
+          <input type="number" step="0.001" min="0" className="inp mono" value={f.valorLitro}
+            onChange={(e) => setCampo('valorLitro', e.target.value)} placeholder="Ex.: 6,19" />
+        </Field>
+        <Field label="Litros (opcional)">
+          <input type="number" step="0.01" min="0" className="inp mono" value={f.litros}
+            onChange={(e) => setCampo('litros', e.target.value)} placeholder="calculado automático" />
+        </Field>
+
+        <Field label="KM do veículo"><input type="number" className="inp mono" value={f.kmVeiculo} onChange={(e) => setF({ ...f, kmVeiculo: e.target.value })} placeholder="odômetro" /></Field>
+        <Field label="Linha / Frete">
+          <select className="inp" value={f.linhaId} onChange={(e) => setF({ ...f, linhaId: e.target.value })}>
+            <option value="">—</option>
+            {linhas.map(l => <option key={l.id} value={l.id}>{l.nome}</option>)}
+          </select>
+        </Field>
       </div>
+
+      <div className="abast-dica">
+        <Lightbulb size={14} style={{ color: '#D97706', flexShrink: 0, marginTop: 1 }} />
+        <p className="text-xs t-soft">
+          Basta o <b>valor pago</b>. Se você souber também o preço por litro, os litros são calculados sozinhos —
+          e aí o sistema consegue medir o <b>consumo (km/L)</b> do veículo.
+        </p>
+      </div>
+
+      {litrosNum > 0 && valorNum > 0 && (
+        <div className="metric-box flex items-center justify-between gap-3">
+          <span className="label">Resumo</span>
+          <span className="text-sm t-ink mono">
+            {litrosNum.toFixed(2)} L × {fmtBRL(parseFloat(f.valorLitro) || 0)} = <b>{fmtBRL(valorNum)}</b>
+          </span>
+        </div>
+      )}
+
       <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-2 form-foot">
         <button type="button" onClick={onCancel} className="btn btn-ghost">Cancelar</button>
-        <button type="button" onClick={submitForm} className="btn btn-primary">Salvar</button>
+        <button type="button" onClick={submitForm} className="btn btn-primary" disabled={!podeSalvar}>Salvar</button>
       </div>
     </div>
   );
@@ -5059,6 +5554,10 @@ function AppInner() {
         .abast-toggle input{ width:16px; height:16px; accent-color:#D97706; }
         .tag-abast{ display:inline-flex; align-items:center; gap:3px; padding:1px 7px; border-radius:99px; background:#FEF3C7; color:#B45309; font-size:10px; font-weight:600; white-space:nowrap; }
 
+        /* Formulário de abastecimento */
+        .scan-box{ padding:12px 14px; background:#F8FAFC; border:1px dashed #CBD5E1; border-radius:11px; }
+        .abast-dica{ display:flex; gap:8px; padding:11px 13px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:10px; }
+
         /* Exportar relatório em PDF */
         .rel-export{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px 18px; background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; flex-wrap:wrap; box-shadow:0 1px 3px rgba(11,19,36,.04); }
         .rel-pdf-opts{ display:flex; flex-direction:column; gap:8px; }
@@ -5186,6 +5685,21 @@ function AppInner() {
         .fe-card-lbl{ font-size:11.5px; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:.03em; font-weight:600; }
         .fe-card-val{ font-size:19px; font-weight:700; color:var(--color-text); letter-spacing:-.02em; margin-top:3px; line-height:1.1; }
         .fe-card-sub{ font-size:11px; color:#9CA3AF; margin-top:3px; }
+
+        /* Saldos separados no card */
+        .fe-card-saldos{ display:flex; flex-direction:column; gap:1px; margin-top:5px; }
+        .fe-card-saldos span{ font-size:10.5px; color:#9CA3AF; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .fe-card-saldos b{ font-weight:600; color:#6B7280; }
+
+        /* Auditoria do caixa */
+        .aud-saldos{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+        @media(max-width:560px){ .aud-saldos{ grid-template-columns:1fr; } }
+        .aud-saldo{ background:#F8F9FB; border:1px solid #EFF0F2; border-radius:12px; padding:13px 14px; }
+        .aud-saldo.destaque{ background:rgba(var(--color-primary-rgb),.05); border-color:rgba(var(--color-primary-rgb),.2); }
+        .aud-saldo-v{ font-size:19px; font-weight:700; color:#0B1324; margin:3px 0 2px; }
+        .aud-origem{ display:flex; align-items:center; gap:9px; padding:8px 10px; border-radius:9px; background:#FAFBFC; }
+        .aud-origem-dot{ width:9px; height:9px; border-radius:99px; flex-shrink:0; }
+        .aud-bloco{ border:1px solid #FECACA; background:#FEF2F2; border-radius:12px; padding:13px 14px; }
 
         /* Saúde Financeira — velocímetro */
         .fe-gauge-card{ transition:transform .2s, box-shadow .2s; }
