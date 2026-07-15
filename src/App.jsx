@@ -3482,6 +3482,7 @@ function Combustivel({ data, setData }) {
     // Se os litros foram preenchidos, o registro deixa de ser "incompleto"
     const completo = (Number(item.litros) || 0) > 0;
     const final = { ...item, incompleto: completo ? false : (editing?.incompleto || false) };
+    if (item.posto) salvarPosto(item.posto); // o posto entra na lista da empresa
     setData(d => ({ ...d, combustivel: editing ? d.combustivel.map(x => x.id === editing.id ? { ...final, id: editing.id } : x) : [...d.combustivel, { ...final, id: uid() }] }));
     setOpenForm(false); setEditing(null); setToast(msg);
   };
@@ -3491,6 +3492,33 @@ function Combustivel({ data, setData }) {
   const confirmDelete = () => { if (delTarget) { setData(d => ({ ...d, combustivel: d.combustivel.filter(c => c.id !== delTarget.id) })); setToast('Abastecimento excluído com sucesso'); setDelTarget(null); } };
 
   const incompletos = useMemo(() => (combustivel || []).filter(c => c.incompleto), [combustivel]);
+
+  // Lista de postos SALVA na empresa (config.postosSalvos).
+  // Nasce com os padrões, aprende com os abastecimentos e com o que vem do extrato.
+  const postosSalvos = useMemo(() => {
+    const salvos = data.config?.postosSalvos || [];
+    const usados = (combustivel || []).map(c => c.posto).filter(Boolean);
+    const todos = [...salvos, ...usados, ...POSTOS_SUGERIDOS];
+    // remove duplicados ignorando maiúsculas/acentos
+    const vistos = new Map();
+    todos.forEach(p => {
+      const k = p.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+      if (k && !vistos.has(k)) vistos.set(k, p);
+    });
+    return [...vistos.values()].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [data.config?.postosSalvos, combustivel]);
+
+  // Salva um posto novo na lista da empresa (fica pra sempre)
+  const salvarPosto = (nome) => {
+    const limpo = String(nome || '').trim();
+    if (!limpo) return;
+    setData(d => {
+      const atuais = d.config?.postosSalvos || [];
+      const jaTem = atuais.some(p => p.toLowerCase() === limpo.toLowerCase());
+      if (jaTem) return d;
+      return { ...d, config: { ...(d.config || {}), postosSalvos: [...atuais, limpo] } };
+    });
+  };
 
   // Despesas de combustível que estão no Financeiro mas nunca viraram
   // registro aqui (foram importadas/lançadas antes desta integração existir).
@@ -3508,13 +3536,16 @@ function Combustivel({ data, setData }) {
     const qtd = semRegistro.length;
     setData(d => {
       const novos = [];
+      const postosNovos = [];
       const fin = (d.finEmpresa || []).map(x => {
         if (!semRegistro.some(s => s.id === x.id)) return x;
         const novoId = uid();
+        const posto = extrairPosto(x.descricao);
+        if (posto) postosNovos.push(posto);
         novos.push({
           id: novoId,
           data: x.data,
-          posto: extrairPosto(x.descricao),
+          posto,
           valor: x.valor,
           litros: 0, valorLitro: 0, tipo: 'Diesel',
           veiculoId: '', motoristaId: '', linhaId: '', kmVeiculo: 0,
@@ -3523,9 +3554,22 @@ function Combustivel({ data, setData }) {
         });
         return { ...x, abastecimentoId: novoId, categoria: 'Combustível' };
       });
-      return { ...d, finEmpresa: fin, combustivel: [...(d.combustivel || []), ...novos] };
+
+      // Os postos reconhecidos no extrato entram na lista salva da empresa
+      const atuais = d.config?.postosSalvos || [];
+      const merged = [...atuais];
+      postosNovos.forEach(p => {
+        if (p && !merged.some(m => m.toLowerCase() === p.toLowerCase())) merged.push(p);
+      });
+
+      return {
+        ...d,
+        finEmpresa: fin,
+        combustivel: [...(d.combustivel || []), ...novos],
+        config: { ...(d.config || {}), postosSalvos: merged },
+      };
     });
-    setToast(`${qtd} abastecimento(s) trazido(s) do Financeiro`);
+    setToast(`${qtd} abastecimento(s) trazido(s) — postos salvos na lista`);
   };
 
   return (
@@ -3685,7 +3729,13 @@ function Combustivel({ data, setData }) {
       </div>
 
       <Modal open={openForm} onClose={() => { setOpenForm(false); setEditing(null); }} title={editing ? 'Editar abastecimento' : 'Novo abastecimento'} wide>
-        <AbastecimentoForm item={editing} veiculos={veiculos} linhas={linhas} motoristas={motoristas} postosConhecidos={(combustivel || []).map(c => c.posto)} onSave={handleSave} onCancel={() => { setOpenForm(false); setEditing(null); }} />
+        <AbastecimentoForm
+          item={editing} veiculos={veiculos} linhas={linhas} motoristas={motoristas}
+          postosConhecidos={postosSalvos}
+          onNovoPosto={salvarPosto}
+          onSave={handleSave}
+          onCancel={() => { setOpenForm(false); setEditing(null); }}
+        />
       </Modal>
       <ConfirmModal item={delTarget} title="Excluir abastecimento" message="Tem certeza que deseja excluir este abastecimento?" onCancel={() => setDelTarget(null)} onConfirm={confirmDelete} />
       <Toast msg={toast} />
@@ -3693,13 +3743,93 @@ function Combustivel({ data, setData }) {
   );
 }
 
-// Redes de combustível comuns no Brasil (sugestões iniciais no seletor de posto)
+// Postos mais comuns em SP (sugestões iniciais). A empresa vai criando os dela.
 const POSTOS_SUGERIDOS = [
   'Posto Ipiranga', 'Posto Shell', 'Posto Petrobras (BR)', 'Posto Ale',
-  'Posto Texaco', 'Posto Raízen', 'Auto Posto', 'Posto da Rodovia',
+  'Posto Texaco', 'Posto Raízen', 'Posto Rodoil', 'Posto Charrua',
+  'Auto Posto', 'Posto da Rodovia',
 ];
 
-function AbastecimentoForm({ item, veiculos, linhas, motoristas, postosConhecidos = [], onSave, onCancel }) {
+// Seletor de posto: dropdown com busca + botão de adicionar novo.
+// (Substitui o datalist, que quase não aparece no celular.)
+function PostoSelect({ value, onChange, postos = [], onNovoPosto }) {
+  const [aberto, setAberto] = useState(false);
+  const [busca, setBusca] = useState('');
+  const [criando, setCriando] = useState(false);
+  const [novo, setNovo] = useState('');
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const fora = (e) => { if (ref.current && !ref.current.contains(e.target)) { setAberto(false); setCriando(false); } };
+    document.addEventListener('mousedown', fora);
+    return () => document.removeEventListener('mousedown', fora);
+  }, []);
+
+  const lista = useMemo(() => {
+    const q = busca.trim().toLowerCase();
+    return postos.filter(p => !q || p.toLowerCase().includes(q));
+  }, [postos, busca]);
+
+  const escolher = (p) => { onChange(p); setAberto(false); setBusca(''); };
+  const salvarNovo = () => {
+    const nome = novo.trim();
+    if (!nome) return;
+    onNovoPosto?.(nome);
+    onChange(nome);
+    setNovo(''); setCriando(false); setAberto(false);
+  };
+
+  return (
+    <div className="posto-wrap" ref={ref}>
+      <button type="button" className="posto-btn" onClick={() => setAberto(v => !v)}>
+        <span className={value ? 'posto-val' : 'posto-ph'}>{value || 'Selecione o posto'}</span>
+        <ChevronDown size={16} className={`posto-chev ${aberto ? 'up' : ''}`} />
+      </button>
+
+      {aberto && (
+        <div className="posto-menu">
+          <div className="posto-busca">
+            <Search size={14} className="t-mute" />
+            <input
+              autoFocus className="posto-busca-inp" placeholder="Buscar posto…"
+              value={busca} onChange={(e) => setBusca(e.target.value)}
+            />
+          </div>
+
+          <div className="posto-lista">
+            {lista.length === 0 && (
+              <div className="posto-vazio">Nenhum posto encontrado</div>
+            )}
+            {lista.map(p => (
+              <button type="button" key={p} className={`posto-item ${value === p ? 'on' : ''}`} onClick={() => escolher(p)}>
+                <Fuel size={13} className="t-mute" />
+                <span className="truncate">{p}</span>
+                {value === p && <Check size={13} style={{ marginLeft: 'auto', color: 'var(--color-primary)' }} />}
+              </button>
+            ))}
+          </div>
+
+          {criando ? (
+            <div className="posto-novo">
+              <input
+                autoFocus className="inp" placeholder="Nome do novo posto"
+                value={novo} onChange={(e) => setNovo(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); salvarNovo(); } }}
+              />
+              <button type="button" className="btn btn-primary btn-sm" onClick={salvarNovo}>Salvar</button>
+            </div>
+          ) : (
+            <button type="button" className="posto-add" onClick={() => setCriando(true)}>
+              <Plus size={14} /> Adicionar novo posto
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AbastecimentoForm({ item, veiculos, linhas, motoristas, postosConhecidos = [], onNovoPosto, onSave, onCancel }) {
   const [f, setF] = useState({
     data: item?.data || new Date().toISOString().slice(0, 10),
     veiculoId: item?.veiculoId || veiculos[0]?.id || '',
@@ -3797,12 +3927,8 @@ function AbastecimentoForm({ item, veiculos, linhas, motoristas, postosConhecido
     });
   };
 
-  // Lista de postos: os que a empresa já usou + as redes conhecidas
-  const listaPostos = useMemo(() => {
-    const conhecidos = [...new Set(postosConhecidos.filter(Boolean))].sort();
-    const extras = POSTOS_SUGERIDOS.filter(p => !conhecidos.some(c => c.toLowerCase() === p.toLowerCase()));
-    return [...conhecidos, ...extras];
-  }, [postosConhecidos]);
+  // Lista de postos já vem pronta e ordenada do módulo (salvos + usados + padrões)
+  const listaPostos = postosConhecidos;
 
   return (
     <div className="space-y-4">
@@ -3825,15 +3951,14 @@ function AbastecimentoForm({ item, veiculos, linhas, motoristas, postosConhecido
         </Field>
         <Field label="Motorista"><MotoristaSelect motoristas={motoristas} value={f.motoristaId} onChange={(val) => setF({ ...f, motoristaId: val })} /></Field>
 
-        {/* Posto com lista + digitação livre */}
+        {/* Posto com dropdown + adicionar novo */}
         <Field label="Posto">
-          <input
-            className="inp" list="lista-postos" value={f.posto} placeholder="Escolha ou digite"
-            onChange={(e) => setF({ ...f, posto: e.target.value })}
+          <PostoSelect
+            value={f.posto}
+            onChange={(p) => setF({ ...f, posto: p })}
+            postos={listaPostos}
+            onNovoPosto={onNovoPosto}
           />
-          <datalist id="lista-postos">
-            {listaPostos.map(p => <option key={p} value={p} />)}
-          </datalist>
         </Field>
 
         {/* VALOR é o campo principal agora */}
@@ -5261,7 +5386,7 @@ function AppInner() {
         .mud-kpi-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
         @media(max-width:900px){ .mud-kpi-grid{ grid-template-columns:repeat(2,1fr); } }
         @media(max-width:480px){ .mud-kpi-grid{ grid-template-columns:repeat(2,1fr); gap:10px; } }
-        .mud-kpi{ background:#fff; border:1px solid #EFF0F2; border-radius:16px; padding:16px; position:relative; overflow:hidden; transition:transform .18s, box-shadow .18s, border-color .18s; text-align:left; font-family:inherit; cursor:pointer; display:block; width:100%; }
+        .mud-kpi{ background:#fff; border:1px solid #EFF0F2; border-radius:16px; padding:16px; position:relative; overflow:hidden; transition:transform .18s, box-shadow .18s, border-color .18s; text-align:left; font-family:inherit; cursor:pointer; width:100%; display:flex; flex-direction:column; min-height:142px; }
         .mud-kpi::before{ content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--kc,#1D4ED8); }
         .mud-kpi:hover{ transform:translateY(-3px); box-shadow:0 12px 28px rgba(11,19,36,.08); }
         .mud-kpi:active{ transform:translateY(-1px) scale(.99); }
@@ -5269,9 +5394,9 @@ function AppInner() {
         .mud-kpi.active::before{ width:5px; }
         .mud-kpi.active .mud-kpi-sub{ color:var(--kc,#1D4ED8); font-weight:600; }
         .mud-kpi-ico{ width:38px; height:38px; border-radius:11px; display:flex; align-items:center; justify-content:center; margin-bottom:10px; }
-        .mud-kpi-num{ font-size:26px; font-weight:700; letter-spacing:-.02em; color:#0B1324; line-height:1.05; }
+        .mud-kpi-num{ font-size:26px; font-weight:700; letter-spacing:-.03em; color:#0B1324; line-height:1.15; overflow-wrap:anywhere; }
         .mud-kpi-lbl{ font-size:12.5px; font-weight:600; color:#0B1324; margin-top:3px; }
-        .mud-kpi-sub{ font-size:11px; color:#9CA3AF; margin-top:1px; }
+        .mud-kpi-sub{ font-size:11px; color:#9CA3AF; margin-top:auto; padding-top:5px; line-height:1.3; }
 
         /* Faixa de filtro ativo */
         .orc-filtro-ativo{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 14px; margin-bottom:14px; background:#EEF2FF; border:1px solid #C7D2FE; border-radius:10px; font-size:13px; color:#1E3A8A; }
@@ -5558,6 +5683,27 @@ function AppInner() {
         .scan-box{ padding:12px 14px; background:#F8FAFC; border:1px dashed #CBD5E1; border-radius:11px; }
         .abast-dica{ display:flex; gap:8px; padding:11px 13px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:10px; }
 
+        /* Seletor de posto */
+        .posto-wrap{ position:relative; }
+        .posto-btn{ width:100%; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px; border:1px solid #E5E7EB; border-radius:10px; background:#fff; font-family:inherit; font-size:14px; cursor:pointer; text-align:left; transition:border-color .14s; }
+        .posto-btn:hover{ border-color:#CBD5E1; }
+        .posto-val{ color:#0B1324; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .posto-ph{ color:#9CA3AF; }
+        .posto-chev{ color:#9CA3AF; flex-shrink:0; transition:transform .2s; }
+        .posto-chev.up{ transform:rotate(180deg); }
+        .posto-menu{ position:absolute; top:calc(100% + 5px); left:0; right:0; z-index:60; background:#fff; border:1px solid #E5E7EB; border-radius:12px; box-shadow:0 12px 32px rgba(11,19,36,.14); overflow:hidden; }
+        .posto-busca{ display:flex; align-items:center; gap:7px; padding:9px 12px; border-bottom:1px solid #F1F2F4; }
+        .posto-busca-inp{ flex:1; min-width:0; border:0; outline:none; font-family:inherit; font-size:13.5px; color:#0B1324; background:transparent; }
+        .posto-lista{ max-height:200px; overflow-y:auto; padding:4px; }
+        .posto-item{ width:100%; display:flex; align-items:center; gap:8px; padding:9px 10px; border:0; border-radius:8px; background:none; font-family:inherit; font-size:13.5px; color:#374151; cursor:pointer; text-align:left; transition:background .1s; }
+        .posto-item:hover{ background:#F6F7F9; }
+        .posto-item.on{ background:rgba(var(--color-primary-rgb),.07); color:var(--color-primary); font-weight:600; }
+        .posto-vazio{ padding:14px; text-align:center; font-size:12.5px; color:#9CA3AF; }
+        .posto-add{ width:100%; display:flex; align-items:center; justify-content:center; gap:6px; padding:11px; border:0; border-top:1px solid #F1F2F4; background:#FAFBFC; color:var(--color-primary); font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; transition:background .12s; }
+        .posto-add:hover{ background:#F1F3F5; }
+        .posto-novo{ display:flex; gap:6px; padding:9px; border-top:1px solid #F1F2F4; background:#FAFBFC; }
+        .posto-novo .inp{ flex:1; min-width:0; }
+
         /* Exportar relatório em PDF */
         .rel-export{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px 18px; background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; flex-wrap:wrap; box-shadow:0 1px 3px rgba(11,19,36,.04); }
         .rel-pdf-opts{ display:flex; flex-direction:column; gap:8px; }
@@ -5664,11 +5810,13 @@ function AppInner() {
         .fis-w-mes{ font-size:15px; font-weight:700; color:#78350F; text-transform:capitalize; margin-top:1px; }
         .fis-w-obrigacoes{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:14px; }
         @media(max-width:420px){ .fis-w-obrigacoes{ grid-template-columns:1fr; } }
-        .fis-w-obr{ display:flex; flex-direction:column; gap:2px; padding:12px; border:1px solid #EFF0F2; border-radius:11px; background:#FAFBFC; }
+        .fis-w-obr{ display:flex; flex-direction:column; gap:2px; padding:12px; border:1px solid #EFF0F2; border-radius:11px; background:#FAFBFC; min-height:118px; }
         .fis-w-obr-titulo{ font-size:11.5px; font-weight:700; color:#0B1324; line-height:1.3; }
         .fis-w-obr-sub{ font-size:10.5px; color:#9CA3AF; line-height:1.3; }
         .fis-w-obr-data{ font-size:12px; color:#374151; font-weight:600; margin-top:2px; }
-        .fis-w-obr-valor{ font-size:14px; font-weight:700; color:#0B1324; margin-bottom:4px; }
+        .fis-w-obr-valor{ font-size:14px; font-weight:700; color:#0B1324; margin-top:auto; margin-bottom:5px; }
+        .fis-w-obr .status-chip{ align-self:flex-start; margin-top:auto; }
+        .fis-w-obr-valor + .status-chip{ margin-top:0; }
         .fis-w-link{ display:flex; align-items:center; justify-content:center; gap:4px; width:100%; margin-top:14px; padding:9px; border:0; background:none; color:var(--color-primary); font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer; border-radius:9px; transition:background .14s; }
         .fis-w-link:hover{ background:rgba(var(--color-primary-rgb),.06); }
 
@@ -5676,18 +5824,19 @@ function AppInner() {
         .fe-cards-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:14px; }
         @media(max-width:1280px){ .fe-cards-grid{ grid-template-columns:repeat(3,1fr); } }
         @media(max-width:720px){ .fe-cards-grid{ grid-template-columns:repeat(2,1fr); } }
-        .fe-card{ background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; padding:15px; box-shadow:0 1px 3px rgba(11,19,36,.04); transition:transform .18s, box-shadow .18s, border-color .18s; text-align:left; font-family:inherit; cursor:pointer; display:block; width:100%; }
+        .fe-card{ background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; padding:15px; box-shadow:0 1px 3px rgba(11,19,36,.04); transition:transform .18s, box-shadow .18s, border-color .18s; text-align:left; font-family:inherit; cursor:pointer; width:100%; display:flex; flex-direction:column; min-height:140px; }
         .fe-card:hover{ transform:translateY(-3px); box-shadow:0 12px 28px rgba(11,19,36,.09); }
         .fe-card:active{ transform:translateY(-1px) scale(.99); }
         .fe-card.on{ border-color:var(--color-primary); box-shadow:0 0 0 2px var(--color-primary), 0 12px 28px rgba(11,19,36,.1); }
         .fe-card.on .fe-card-sub{ color:var(--color-primary); font-weight:600; }
-        .fe-card-ico{ width:34px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#fff; margin-bottom:11px; }
-        .fe-card-lbl{ font-size:11.5px; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:.03em; font-weight:600; }
-        .fe-card-val{ font-size:19px; font-weight:700; color:var(--color-text); letter-spacing:-.02em; margin-top:3px; line-height:1.1; }
-        .fe-card-sub{ font-size:11px; color:#9CA3AF; margin-top:3px; }
+        .fe-card-ico{ width:34px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#fff; margin-bottom:11px; flex-shrink:0; }
+        .fe-card-lbl{ font-size:11.5px; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:.03em; font-weight:600; line-height:1.25; }
+        .fe-card-val{ font-size:19px; font-weight:700; color:var(--color-text); letter-spacing:-.03em; margin-top:3px; line-height:1.15; overflow-wrap:anywhere; }
+        /* o rodapé sempre encostado embaixo → todos os cards alinham */
+        .fe-card-sub{ font-size:11px; color:#9CA3AF; margin-top:auto; padding-top:6px; line-height:1.3; }
+        .fe-card-saldos{ display:flex; flex-direction:column; gap:1px; margin-top:auto; padding-top:6px; }
 
         /* Saldos separados no card */
-        .fe-card-saldos{ display:flex; flex-direction:column; gap:1px; margin-top:5px; }
         .fe-card-saldos span{ font-size:10.5px; color:#9CA3AF; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         .fe-card-saldos b{ font-weight:600; color:#6B7280; }
 
@@ -5700,6 +5849,66 @@ function AppInner() {
         .aud-origem{ display:flex; align-items:center; gap:9px; padding:8px 10px; border-radius:9px; background:#FAFBFC; }
         .aud-origem-dot{ width:9px; height:9px; border-radius:99px; flex-shrink:0; }
         .aud-bloco{ border:1px solid #FECACA; background:#FEF2F2; border-radius:12px; padding:13px 14px; }
+
+        /* ==========================================================
+           POLIMENTO MOBILE — padroniza altura, fonte e alinhamento
+           dos cards em telas pequenas.
+           ========================================================== */
+        @media(max-width:720px){
+          /* Cards do Financeiro: 2 colunas, altura e fonte consistentes */
+          .fe-card{ min-height:132px; padding:13px; }
+          .fe-card-ico{ width:30px; height:30px; border-radius:9px; margin-bottom:9px; }
+          .fe-card-lbl{ font-size:10.5px; }
+          .fe-card-val{ font-size:16px; }
+          .fe-card-sub{ font-size:10px; }
+          .fe-card-saldos span{ font-size:9.5px; }
+
+          /* KPIs do módulo Mudanças */
+          .mud-kpi{ min-height:130px; padding:13px; }
+          .mud-kpi-ico{ width:32px; height:32px; margin-bottom:8px; }
+          .mud-kpi-num{ font-size:21px; }
+          .mud-kpi-lbl{ font-size:11.5px; }
+
+          /* Cards de rota/orçamento */
+          .orc-card{ padding:14px; }
+          .orc-meta-v{ font-size:12.5px; }
+
+          /* Painel Fiscal */
+          .fis-head{ padding:15px 16px; }
+          .fis-head-titulo{ font-size:17px; }
+          .fis-pct{ font-size:22px; }
+          .fis-limite-atual{ font-size:19px; }
+          .fis-metric-v{ font-size:15px; }
+          .fis-obr-valor{ font-size:17px; }
+          .fis-w-limite{ font-size:17px; }
+          .fis-w-valor{ font-size:16px; }
+          .fis-w-pct{ font-size:20px; }
+
+          /* Recorrências */
+          .fe-rec-m-val{ font-size:16px; }
+
+          /* Fluxo de caixa */
+          .fe-flux-saldo{ font-size:20px; }
+          .fe-flux-stat-val{ font-size:13px; }
+
+          /* Auditoria */
+          .aud-saldo-v{ font-size:17px; }
+
+          /* Métricas genéricas não estouram */
+          .metric-box{ padding:11px; }
+        }
+
+        @media(max-width:400px){
+          .fe-card-val{ font-size:14.5px; }
+          .fe-card{ min-height:124px; }
+          .mud-kpi-num{ font-size:19px; }
+          .fis-pct{ font-size:19px; }
+        }
+
+        /* Valores monetários nunca estouram o card */
+        .mono{ font-variant-numeric:tabular-nums; }
+        .fe-card-val, .mud-kpi-num, .fis-metric-v, .aud-saldo-v, .fe-rec-m-val,
+        .fis-w-limite, .fis-w-valor, .fe-flux-saldo{ min-width:0; max-width:100%; }
 
         /* Saúde Financeira — velocímetro */
         .fe-gauge-card{ transition:transform .2s, box-shadow .2s; }
