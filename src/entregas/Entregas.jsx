@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, Component } from 'react';
 import { doc, setDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import {
   Bike, Plus, Pencil, Trash2, X, KeyRound, Copy, Check, Search,
@@ -27,7 +27,56 @@ const ABAS = [
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 const STATUS_MOTOBOY = ['ativo', 'inativo'];
 
-export default function Entregas({ data, setData }) {
+// ------------------------------------------------------------
+//   Barreira de erro
+// ------------------------------------------------------------
+//   Sem isto, qualquer exceção dentro do módulo derruba o React
+//   inteiro e o usuário vê uma tela branca, sem pista nenhuma.
+//   Aqui o erro fica contido no módulo e a mensagem aparece na
+//   tela — o resto do sistema continua navegável.
+// ------------------------------------------------------------
+class BarreiraErro extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { erro: null };
+  }
+  static getDerivedStateFromError(erro) {
+    return { erro };
+  }
+  componentDidCatch(erro, info) {
+    console.error('[Entregas] erro no módulo:', erro, info);
+  }
+  render() {
+    if (this.state.erro) {
+      const msg = this.state.erro?.message || String(this.state.erro);
+      return (
+        <div className="p-4 sm:p-6">
+          <style>{ENT_CSS}</style>
+          <div className="ent-crash">
+            <AlertTriangle size={30} />
+            <h3>O módulo Entregas não conseguiu abrir</h3>
+            <p>O restante do sistema continua funcionando normalmente.</p>
+            <pre className="ent-crash-msg">{msg}</pre>
+            <p className="ent-crash-dica">
+              Copie a mensagem acima e envie ao suporte — ela diz exatamente o que falhou.
+            </p>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export default function Entregas(props) {
+  return (
+    <BarreiraErro>
+      <EntregasConteudo {...props} />
+    </BarreiraErro>
+  );
+}
+
+function EntregasConteudo({ data, setData }) {
   const [aba, setAba] = useState('motoboys');
   return (
     <div className="p-4 sm:p-6 space-y-4">
@@ -46,7 +95,7 @@ export default function Entregas({ data, setData }) {
         ))}
       </div>
       <style>{ENT_CSS}</style>
-      {aba === 'motoboys' && <Motoboys data={data} setData={setData} />}
+      {aba === 'motoboys' && <Motoboys data={data || {}} setData={setData} />}
     </div>
   );
 }
@@ -55,8 +104,11 @@ export default function Entregas({ data, setData }) {
 //   Motoboys
 // ------------------------------------------------------------
 function Motoboys({ data, setData }) {
-  const { company, isOwner } = useAuth();
-  const lista = data.entMotoboys || [];
+  // useAuth() pode devolver null se o provider ainda não montou.
+  // Sem o `|| {}` o destructuring abaixo estoura e a tela fica branca.
+  const auth = useAuth() || {};
+  const { company, isOwner } = auth;
+  const lista = Array.isArray(data?.entMotoboys) ? data.entMotoboys : [];
   const [busca, setBusca] = useState('');
   const [form, setForm] = useState(null);      // motoboy sendo editado (ou {} p/ novo)
   const [convite, setConvite] = useState(null); // { codigo, nome }
@@ -105,6 +157,7 @@ function Motoboys({ data, setData }) {
   //   sensível: só amarra código → empresa → cadastro.
   async function gerarConvite(m) {
     setErro('');
+    if (!company?.id) { setErro('Empresa não identificada. Recarregue a página e tente de novo.'); return; }
     try {
       const codigo = gerarCodigoConvite();
       await setDoc(doc(fdb, 'convites', codigo), {
@@ -423,4 +476,11 @@ const ENT_CSS = `
 .ent-avisos{ list-style:none; padding:0; margin:16px 0 0; display:flex; flex-direction:column; gap:8px; }
 .ent-avisos li{ display:flex; align-items:flex-start; gap:7px; font-size:12.5px; color:#6B7280; }
 .ent-avisos svg{ color:#047857; flex-shrink:0; margin-top:1px; }
+
+.ent-crash{ background:#fff; border:1px solid #FECACA; border-radius:16px; padding:26px 22px; text-align:center; color:#6B7280; }
+.ent-crash svg{ color:#DC2626; }
+.ent-crash h3{ font-size:15.5px; font-weight:650; color:#0B1324; margin:12px 0 4px; }
+.ent-crash p{ font-size:13px; margin:0; }
+.ent-crash-msg{ margin:16px auto 0; max-width:560px; text-align:left; background:#FEF2F2; border:1px solid #FECACA; color:#991B1B; padding:12px 14px; border-radius:10px; font-size:12px; font-family:ui-monospace,monospace; white-space:pre-wrap; word-break:break-word; }
+.ent-crash-dica{ margin-top:12px !important; font-size:12px; }
 `;
