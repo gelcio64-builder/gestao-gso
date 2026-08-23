@@ -4,10 +4,21 @@ import {
 } from 'firebase/firestore';
 import { fdb } from '../firebase';
 
+// ATENÇÃO: este hook carrega a empresa INTEIRA em tempo real.
+// Ele é para o app de gestão (dono, sócio, funcionário).
+// O motoboy NÃO usa este hook — ele tem um hook próprio que consulta
+// apenas os documentos dele (src/entregas/useMotoboySync.js).
+// Se um motoboy passasse por aqui, o Firestore recusaria as leituras
+// bloqueadas pelas regras e o app ficaria preso em "carregando".
+
 const COLS = [
   'veiculos', 'motoristas', 'linhas', 'combustivel', 'manutencao',
   'finEmpresa', 'finPessoal', 'contratos', 'metasPessoais', 'crmLeads', 'wms', 'documentos', 'mudancas', 'recorrencias',
+  // ---- Módulo Entregas ----
+  'entConfig', 'entLojistas', 'entBases', 'entMotoboys', 'entTarifas',
+  'entColetas', 'entRotas', 'entComprovantes', 'entFechamentos', 'entPagamentos',
 ];
+
 const DEFAULT_CONFIG = { nomeEmpresa: 'Minha Empresa', precoCombustivel: 5.89, consumoPadrao: 10 };
 
 const buildEmpty = () => {
@@ -52,7 +63,13 @@ export function useFirestoreSync(companyId) {
           setDataRaw({ ...cache });
           received.add(name);
           checkReady();
-        }, (err) => console.error('[fs]', name, err))
+        }, (err) => {
+          console.error('[fs]', name, err);
+          // Uma coleção que falha (permissão, por exemplo) não pode travar o app:
+          // marca como recebida para o `ready` não ficar preso para sempre.
+          received.add(name);
+          checkReady();
+        })
       );
     });
 
