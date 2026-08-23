@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   LayoutDashboard, Wallet, Truck, Car, Fuel, Wrench, Users,
   FileSignature, FolderOpen, BarChart3, Settings, Plus, Pencil,
@@ -7,22 +7,29 @@ import {
   Activity, Clock, Coins, Receipt, ChevronRight, ChevronDown, CircleAlert, Sun, Phone,
   Trophy, Flame, Lightbulb, Percent, Calendar,
   Home, ShoppingCart, CreditCard, Heart, GraduationCap, Target, PiggyBank, Gauge, Sparkles,
-  LogOut, Copy, Check, Building2,
+  LogOut, Copy, Check, Building2, Camera, Package, Eye, Search, Bike,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Area, AreaChart, LineChart, Line, PieChart, Pie, Cell
+  ResponsiveContainer, Area, AreaChart, LineChart, Line, PieChart, Pie, Cell, ComposedChart
 } from 'recharts';
 import { AuthProvider, useAuth } from './auth/AuthContext';
 import { AuthGate } from './auth/AuthGate';
 import { useFirestoreSync } from './data/useFirestoreSync';
+import { PALETTES, getPalette, applyPalette, DEFAULT_PALETTE_ID } from './theme/palettes';
 import { fdb } from './firebase';
 import { collection, doc as fsDoc, onSnapshot, updateDoc } from 'firebase/firestore';
-import { parseOFX } from './importers/ofx';
+import { parseOFX, isLinhaSaldo } from './importers/ofx';
 import { parseBoleto } from './importers/boleto';
 import { parseCSV } from './importers/csv';
 import { parseXLSX } from './importers/xlsx';
 import { parseXML } from './importers/xml';
+import { scanImage, extractBoletoLinha, extractVencimentoDate, extractValues, extractDates } from './ocr/scanner';
+import { gerarOrcamentoPDF } from './pdf/orcamento';
+import { gerarRelatorioPDF } from './pdf/relatorio';
+import { REGIMES, getRegime, getParamsFiscais, calcularFiscal, alertasFiscais, checklistFiscal, calendarioFiscal, FAIXAS_LIMITE } from './fiscal/engine';
+import Entregas from './entregas/Entregas';
+import AppMotoboy from './entregas/AppMotoboy';
 
 /* ============================================================
    GESTÃO GSO — v2.1
@@ -33,8 +40,8 @@ import { parseXML } from './importers/xml';
 
 // ---------- Constants ----------
 const CAT_FIN_EMPRESA = {
-  entrada: ['Pagamento Prefeitura', 'Frete', 'Carreto', 'Serviço Avulso', 'Venda de Materiais', 'Contrato', 'Outros'],
-  saida: ['Combustível', 'Manutenção', 'Pneus', 'Seguro', 'IPVA/Documentação', 'Parcela', 'Salário/Motorista', 'Pedágio', 'Impostos', 'Compra de Materiais', 'Outros'],
+  entrada: ['Recebimento cliente', 'Pagamento Prefeitura', 'Frete', 'Carreto', 'Contrato', 'Serviço Avulso', 'Venda de Materiais', 'Pró-labore recebido', 'Reembolso', 'Devolução', 'Outros'],
+  saida: ['Combustível', 'Manutenção', 'Pedágio', 'Salário/Motorista', 'Ajudante avulso', 'Pró-labore', 'Pneus', 'Peças', 'Seguro', 'IPVA/Documentação', 'Parcela', 'Aluguel', 'Impostos', 'Utilidades', 'Contador', 'Alimentação', 'Compra de Materiais', 'Boletos', 'Tarifas bancárias', 'Outros'],
 };
 const FORMAS_PGTO = ['Dinheiro', 'PIX', 'Transferência', 'Cartão Débito', 'Cartão Crédito', 'Boleto'];
 const TIPOS_LINHA = ['Linha Fixa', 'Carreto', 'Frete Avulso', 'Licitação', 'Contrato'];
@@ -154,6 +161,32 @@ const fmtDate = (s) => { if (!s) return '—'; const [y, m, d] = s.split('-'); r
 const uid = () => Math.random().toString(36).slice(2, 9);
 const monthKey = (s) => s ? s.slice(0, 7) : '';
 const currentMonth = () => new Date().toISOString().slice(0, 7);
+
+// Redimensiona uma imagem (File) no client-side e retorna um data URL base64.
+// Usado pra salvar logo da empresa sem precisar de Firebase Storage.
+async function imgFileToResizedDataURL(file, maxSize = 256, quality = 0.85) {
+  if (!file || !file.type.startsWith('image/')) throw new Error('Arquivo não é imagem');
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error('Falha ao carregar imagem'));
+      i.src = url;
+    });
+    const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+    const w = Math.max(1, Math.round(img.width * scale));
+    const h = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    const format = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+    return canvas.toDataURL(format, quality);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 const greeting = () => { const h = new Date().getHours(); return h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite'; };
 const monthName = () => { const d = new Date(); return `${['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][d.getMonth()]} de ${d.getFullYear()}`; };
 
@@ -220,6 +253,198 @@ function HeroMoney({ value }) {
   return <span className="hero-money"><span className="hero-cur">R$</span><span>{v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></span>;
 }
 
+// Componente reutilizável de escaneamento OCR.
+// props:
+//   label — texto do botão ("Escanear boleto por foto")
+//   onExtracted(text, extras) — chamado quando o OCR termina com o texto bruto
+//   size — 'sm' (default) ou 'md'
+function ScanButton({ label = 'Escanear por foto', onExtracted, size = 'sm', accept = 'image/*' }) {
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const inputId = useMemo(() => 'scan-' + Math.random().toString(36).slice(2, 8), []);
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setBusy(true); setProgress(0);
+    try {
+      const text = await scanImage(file, setProgress);
+      onExtracted?.(text, { file });
+    } catch (err) {
+      console.error('[OCR]', err);
+      alert('Não consegui processar a imagem. Tenta tirar a foto de novo com boa iluminação e sem tremer.');
+    } finally {
+      setBusy(false); setProgress(0);
+    }
+  }
+
+  return (
+    <label htmlFor={inputId} className={`scan-btn scan-btn-${size} ${busy ? 'busy' : ''}`}>
+      {busy ? (
+        <>
+          <span className="scan-spin" />
+          <span>{progress > 0 ? `Lendo… ${progress}%` : 'Carregando OCR…'}</span>
+        </>
+      ) : (
+        <>
+          <Camera size={size === 'md' ? 15 : 13} />
+          <span>{label}</span>
+        </>
+      )}
+      <input
+        id={inputId}
+        type="file"
+        accept={accept}
+        capture="environment"
+        onChange={handleFile}
+        style={{ display: 'none' }}
+        disabled={busy}
+      />
+    </label>
+  );
+}
+
+// =========================================================
+//   CATEGORIA — memória automática + custom + dropdown inline
+// =========================================================
+
+// Palavras genéricas que devemos ignorar quando indexamos a descrição.
+const CAT_STOPWORDS = new Set([
+  'PIX', 'TED', 'DOC', 'ENVIADO', 'RECEBIDO', 'CREDITO', 'CRED', 'DEBITO', 'DEB',
+  'BOLETO', 'PAGAMENTO', 'RECEBIMENTO', 'TRANSFERENCIA', 'DEPOSITO', 'SAQUE',
+  'COMPRA', 'DIA', 'PARA', 'DE', 'DO', 'DA', 'EM', 'NA', 'NO', 'COM',
+  'ORIGEM', 'DESTINO', 'CONTA', 'AGENCIA', 'BANCO', 'PAG',
+]);
+
+// Constrói a chave de memória a partir de uma descrição.
+// Ex.: "PIX ENVIADO WILKER HENRIQUE LIMA 463.046.508-17" → "HENRIQUE-LIMA-WILKER"
+function categoryMemoryKey(descricao) {
+  if (!descricao) return '';
+  const tokens = String(descricao)
+    .toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Z\s]/g, ' ')
+    .split(/\s+/)
+    .filter(t => t.length >= 3 && !CAT_STOPWORDS.has(t));
+  if (tokens.length === 0) return '';
+  return [...tokens].sort().slice(0, 3).join('-');
+}
+
+// Sugere categoria a partir de memória (memoria[key] existe?) e de palavras-chave.
+function suggestCategoria(descricao, tipo, memoria = {}) {
+  const key = categoryMemoryKey(descricao);
+  if (key && memoria[key]) return { categoria: memoria[key], motivo: 'memoria' };
+  const m = String(descricao || '').toUpperCase();
+  if (tipo === 'saida') {
+    if (/\b(POSTO|SHELL|IPIRANGA|BR|PETROBRAS|COMBUSTIVEL|GASOLINA|DIESEL|ETANOL)\b/.test(m)) return { categoria: 'Combustível', motivo: 'palavra' };
+    if (/\b(PEDAGIO|SEM\s*PARAR|CONECTCAR|VELOE)\b/.test(m)) return { categoria: 'Pedágio', motivo: 'palavra' };
+    if (/\b(OFICINA|MECANIC|MANUT|PECA)\b/.test(m)) return { categoria: 'Manutenção', motivo: 'palavra' };
+    if (/\bIPVA|LICEN|DETRAN|DPVAT\b/.test(m)) return { categoria: 'IPVA/Documentação', motivo: 'palavra' };
+    if (/\bSEGURO/.test(m)) return { categoria: 'Seguro', motivo: 'palavra' };
+    if (/\bSALARIO|FOLHA|VALE/.test(m)) return { categoria: 'Salário/Motorista', motivo: 'palavra' };
+    if (/\bIMPOSTO|DARF|GPS|GNRE|SIMPLES\s*NACIONAL/.test(m)) return { categoria: 'Impostos', motivo: 'palavra' };
+    if (/\bENERGIA|LUZ|AGUA|INTERNET|TELEFONE|CELULAR/.test(m)) return { categoria: 'Utilidades', motivo: 'palavra' };
+    if (/\bALUGUEL|LOCACAO/.test(m)) return { categoria: 'Aluguel', motivo: 'palavra' };
+    if (/\bTARIFA|IOF|JUROS|MULTA\s*BANCO/.test(m)) return { categoria: 'Tarifas bancárias', motivo: 'palavra' };
+  } else {
+    if (/\b(FRETE|TRANSPORTE)\b/.test(m)) return { categoria: 'Frete', motivo: 'palavra' };
+    if (/\b(PREFEITURA|MUNICIPIO)\b/.test(m)) return { categoria: 'Pagamento Prefeitura', motivo: 'palavra' };
+    if (/\b(REEMBOLSO|ESTORNO)\b/.test(m)) return { categoria: 'Reembolso', motivo: 'palavra' };
+  }
+  return null;
+}
+
+// Merge das categorias padrão com as customizadas da empresa.
+function getCategoriasCompletas(tipo, categoriasCustom = {}) {
+  const padrao = CAT_FIN_EMPRESA[tipo] || [];
+  const custom = (categoriasCustom[tipo] || []).filter(c => !padrao.includes(c));
+  return [...padrao.filter(c => c !== 'Outros'), ...custom, 'Outros'];
+}
+
+function CategoryDropdown({ lancamento, config = {}, onChangeCategoria, onAddCustom }) {
+  const [open, setOpen] = useState(false);
+  const [addingNew, setAddingNew] = useState(false);
+  const [novaCategoria, setNovaCategoria] = useState('');
+  const ref = React.useRef(null);
+  const memoria = config.categoryMemory || {};
+  const custom = config.categoriasCustomEmpresa || {};
+  const categorias = getCategoriasCompletas(lancamento.tipo, custom);
+  const sugestao = suggestCategoria(lancamento.descricao, lancamento.tipo, memoria);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setAddingNew(false); } };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const selecionar = (cat) => {
+    onChangeCategoria?.(cat);
+    setOpen(false);
+    setAddingNew(false);
+  };
+  const salvarNova = () => {
+    const c = novaCategoria.trim();
+    if (!c) return;
+    onAddCustom?.(lancamento.tipo, c);
+    selecionar(c);
+    setNovaCategoria('');
+  };
+
+  return (
+    <span className="cat-drop-wrap" ref={ref}>
+      <button type="button" className="cat-drop-btn" onClick={(e) => { e.stopPropagation(); setOpen(v => !v); }}>
+        {lancamento.categoria || 'Categoria'}
+        <ChevronDown size={11} style={{ transition: 'transform .15s', transform: open ? 'rotate(180deg)' : 'none' }} />
+      </button>
+      {open && (
+        <div className="cat-drop-menu" onClick={(e) => e.stopPropagation()}>
+          {sugestao && sugestao.categoria !== lancamento.categoria && (
+            <>
+              <div className="cat-drop-header">Sugestão</div>
+              <button className="cat-drop-item cat-drop-suggested" onClick={() => selecionar(sugestao.categoria)}>
+                <Sparkles size={11} /> {sugestao.categoria}
+                <span className="cat-drop-hint">{sugestao.motivo === 'memoria' ? 'você já usou' : 'pela descrição'}</span>
+              </button>
+              <div className="cat-drop-sep" />
+            </>
+          )}
+          <div className="cat-drop-header">{lancamento.tipo === 'entrada' ? 'Entradas' : 'Saídas'}</div>
+          <div className="cat-drop-list">
+            {categorias.map(c => (
+              <button
+                key={c}
+                className={`cat-drop-item ${c === lancamento.categoria ? 'on' : ''}`}
+                onClick={() => selecionar(c)}
+              >{c}{c === lancamento.categoria && <Check size={12} />}</button>
+            ))}
+          </div>
+          <div className="cat-drop-sep" />
+          {addingNew ? (
+            <div className="cat-drop-new">
+              <input
+                autoFocus
+                className="inp"
+                style={{ padding: '6px 8px', fontSize: 12.5 }}
+                value={novaCategoria}
+                onChange={(e) => setNovaCategoria(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') salvarNova(); if (e.key === 'Escape') { setAddingNew(false); setNovaCategoria(''); } }}
+                placeholder="Nome da nova categoria"
+              />
+              <button className="btn btn-primary" style={{ padding: '5px 10px', fontSize: 12 }} onClick={salvarNova}>Adicionar</button>
+            </div>
+          ) : (
+            <button className="cat-drop-item cat-drop-add" onClick={() => setAddingNew(true)}>
+              <Plus size={12} /> Nova categoria
+            </button>
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
 function Modal({ open, onClose, title, children, wide }) {
   if (!open) return null;
   return (
@@ -277,19 +502,24 @@ const NAV = [
   { key: 'crm', label: 'CRM Comercial', icon: Target },
   { key: 'wms', label: 'Armazém (WMS)', icon: Home },
   { key: 'documentos', label: 'Documentos', icon: FolderOpen },
+  { key: 'mudancas', label: 'Mudanças', icon: Package },
+  { key: 'entregas', label: 'Entregas', icon: Bike },
+  { key: 'fiscal', label: 'Painel Fiscal', icon: Receipt },
   { key: 'relatorios', label: 'Relatórios', icon: BarChart3 },
   { key: 'importacao', label: 'Importação', icon: ArrowDownRight },
   { key: 'config', label: 'Configurações', icon: Settings },
 ];
 
-function Sidebar({ current, onNav, open, onClose, nomeEmpresa, logoUrl, permitidos }) {
+function Sidebar({ current, onNav, open, onClose, nomeEmpresa, logoUrl, permitidos, isOwner }) {
   const [imgErr, setImgErr] = useState(false);
   const iniciais = (nomeEmpresa || 'E').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
   const items = useMemo(() => {
-    if (!permitidos) return NAV; // null = tudo liberado
+    // Financeiro Pessoal é do DONO — nunca aparece para outros, mesmo com permissão
+    const base = isOwner ? NAV : NAV.filter(n => n.key !== 'finPessoal');
+    if (!permitidos) return base; // null = tudo liberado (dono ou sócio)
     const allowed = new Set([...permitidos, 'dashboard', 'config']); // sempre visíveis
-    return NAV.filter(n => allowed.has(n.key));
-  }, [permitidos]);
+    return base.filter(n => allowed.has(n.key));
+  }, [permitidos, isOwner]);
   return (
     <>
       {open && <div className="sb-overlay" onClick={onClose} />}
@@ -329,7 +559,7 @@ function Sidebar({ current, onNav, open, onClose, nomeEmpresa, logoUrl, permitid
 // ============================================================
 // TOP BAR
 // ============================================================
-function TopBar({ title, subtitle, onMenu, empresa, logoUrl, userName, onLogout }) {
+function TopBar({ title, subtitle, onMenu, empresa, logoUrl, userName, papel, onLogout }) {
   const [imgErr, setImgErr] = useState(false);
   const iniciais = (empresa || 'E').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
   return (
@@ -348,7 +578,10 @@ function TopBar({ title, subtitle, onMenu, empresa, logoUrl, userName, onLogout 
           </div>
           <div className="user-chip-info">
             <span className="user-chip-emp">{empresa || 'Empresa'}</span>
-            <span className="user-chip-name">{userName || '—'}</span>
+            <span className="user-chip-name">
+              {userName || '—'}
+              {papel && <PapelBadge papel={papel} size="xs" />}
+            </span>
           </div>
           <button className="user-chip-out" onClick={onLogout} title="Sair"><LogOut size={14} /></button>
         </div>
@@ -534,6 +767,8 @@ function Dashboard({ data }) {
 // FINANCEIRO EMPRESA
 // ============================================================
 const PERIODOS = [{ k: 'hoje', label: 'Hoje' }, { k: '7d', label: '7 dias' }, { k: '30d', label: '30 dias' }, { k: 'mes', label: 'Mês' }, { k: 'ano', label: 'Ano' }];
+// Relatórios tem períodos mais longos (trimestre/semestre) além dos padrão
+const PERIODOS_REL = [{ k: '30d', label: '30 dias' }, { k: 'mes', label: 'Mês' }, { k: 'trimestre', label: 'Trimestre' }, { k: 'semestre', label: 'Semestre' }, { k: 'ano', label: 'Ano' }];
 
 function periodRange(period) {
   const end = new Date(); end.setHours(23, 59, 59, 999);
@@ -541,12 +776,18 @@ function periodRange(period) {
   if (period === '7d') start.setDate(start.getDate() - 6);
   else if (period === '30d') start.setDate(start.getDate() - 29);
   else if (period === 'mes') start = new Date(start.getFullYear(), start.getMonth(), 1);
+  else if (period === 'trimestre') start = new Date(start.getFullYear(), start.getMonth() - 2, 1);
+  else if (period === 'semestre') start = new Date(start.getFullYear(), start.getMonth() - 5, 1);
   else if (period === 'ano') start = new Date(start.getFullYear(), 0, 1);
   const span = end - start;
   const prevEnd = new Date(start.getTime() - 1);
   const prevStart = new Date(start.getTime() - span - 1);
   return { start, end, prevStart, prevEnd };
 }
+const PERIODO_LABEL = {
+  '7d': 'Últimos 7 dias', '30d': 'Últimos 30 dias', mes: 'Mês atual',
+  trimestre: 'Trimestre', semestre: 'Semestre', ano: 'Ano atual',
+};
 const pctChange = (cur, prev) => (!prev ? (cur > 0 ? 100 : 0) : ((cur - prev) / prev) * 100);
 
 const STATUS_LANC = [
@@ -652,23 +893,594 @@ function ConfirmModal({ item, title, message, onCancel, onConfirm }) {
   );
 }
 
-function FinanceiroEmpresa({ data, setData }) {
-  const { finEmpresa, veiculos, linhas, contratos } = data;
+function LogoutConfirm({ open, onCancel, onConfirm }) {
+  return (
+    <Modal open={open} onClose={onCancel} title="Sair da conta">
+      <div className="space-y-4">
+        <div className="flex items-start gap-3">
+          <div className="chip" style={{ background: '#EEF2FF', color: '#1D4ED8', flexShrink: 0 }}><LogOut size={16} /></div>
+          <div className="min-w-0">
+            <p className="text-sm t-ink">Você realmente deseja sair da sua conta?</p>
+            <p className="text-xs t-mute mt-1">Seus dados continuam salvos na nuvem — basta entrar de novo pra continuar de onde parou.</p>
+          </div>
+        </div>
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-1">
+          <button onClick={onCancel} className="btn btn-ghost">Cancelar</button>
+          <button onClick={onConfirm} className="btn btn-danger"><LogOut size={14} /> Sair</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// Editor de logo com preview circular, zoom e arrastar pra reenquadrar.
+// Recebe um File, retorna via onConfirm uma dataURL 256×256 pronta para usar.
+function LogoEditor({ file, onCancel, onConfirm }) {
+  const [imgSrc, setImgSrc] = useState('');
+  const [imgW, setImgW] = useState(0);
+  const [imgH, setImgH] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = React.useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
+  const CONTAINER = 240;
+
+  useEffect(() => {
+    if (!file) { setImgSrc(''); setImgW(0); setImgH(0); setZoom(1); setOffset({ x: 0, y: 0 }); return; }
+    const url = URL.createObjectURL(file);
+    setImgSrc(url);
+    setZoom(1); setOffset({ x: 0, y: 0 });
+    const img = new Image();
+    img.onload = () => { setImgW(img.width); setImgH(img.height); };
+    img.src = url;
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  useEffect(() => {
+    const move = (cx, cy) => {
+      if (!dragRef.current.dragging) return;
+      const dx = cx - dragRef.current.startX;
+      const dy = cy - dragRef.current.startY;
+      setOffset({ x: dragRef.current.origX + dx, y: dragRef.current.origY + dy });
+    };
+    const mmove = (e) => move(e.clientX, e.clientY);
+    const tmove = (e) => { const t = e.touches[0]; if (t) move(t.clientX, t.clientY); };
+    const end = () => { dragRef.current.dragging = false; };
+    window.addEventListener('mousemove', mmove);
+    window.addEventListener('mouseup', end);
+    window.addEventListener('touchmove', tmove, { passive: true });
+    window.addEventListener('touchend', end);
+    return () => {
+      window.removeEventListener('mousemove', mmove);
+      window.removeEventListener('mouseup', end);
+      window.removeEventListener('touchmove', tmove);
+      window.removeEventListener('touchend', end);
+    };
+  }, []);
+
+  const startDrag = (cx, cy) => {
+    dragRef.current = { dragging: true, startX: cx, startY: cy, origX: offset.x, origY: offset.y };
+  };
+  const onMouseDown = (e) => { e.preventDefault(); startDrag(e.clientX, e.clientY); };
+  const onTouchStart = (e) => { const t = e.touches[0]; if (t) startDrag(t.clientX, t.clientY); };
+
+  const confirm = () => {
+    if (!imgSrc || !imgW || !imgH) return;
+    const CANVAS_SIZE = 256;
+    const ratio = CANVAS_SIZE / CONTAINER;
+    const coverScale = Math.max(CONTAINER / imgW, CONTAINER / imgH);
+    const drawW = imgW * coverScale * zoom * ratio;
+    const drawH = imgH * coverScale * zoom * ratio;
+    const drawX = (CANVAS_SIZE - drawW) / 2 + offset.x * ratio;
+    const drawY = (CANVAS_SIZE - drawH) / 2 + offset.y * ratio;
+    const canvas = document.createElement('canvas');
+    canvas.width = CANVAS_SIZE; canvas.height = CANVAS_SIZE;
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    img.onload = () => {
+      // fundo branco caso a imagem tenha transparência
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+      ctx.drawImage(img, drawX, drawY, drawW, drawH);
+      onConfirm(canvas.toDataURL('image/jpeg', 0.9));
+    };
+    img.src = imgSrc;
+  };
+
+  const coverScale = imgW && imgH ? Math.max(CONTAINER / imgW, CONTAINER / imgH) : 1;
+  const displayW = imgW * coverScale * zoom;
+  const displayH = imgH * coverScale * zoom;
+
+  return (
+    <Modal open={!!file} onClose={onCancel} title="Ajustar logo">
+      <div className="logo-editor space-y-3">
+        <div
+          className="logo-editor-preview"
+          onMouseDown={onMouseDown}
+          onTouchStart={onTouchStart}
+        >
+          {imgSrc && imgW > 0 && (
+            <img
+              src={imgSrc}
+              alt=""
+              draggable={false}
+              style={{
+                position: 'absolute',
+                left: '50%', top: '50%',
+                width: `${displayW}px`,
+                height: `${displayH}px`,
+                transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px))`,
+                userSelect: 'none',
+                pointerEvents: 'none',
+              }}
+            />
+          )}
+          {(!imgSrc || !imgW) && <span className="t-mute text-sm">Carregando…</span>}
+        </div>
+        <div>
+          <div className="flex items-center gap-3">
+            <span className="label" style={{ minWidth: 40 }}>Zoom</span>
+            <button type="button" className="zoom-btn" onClick={() => setZoom(z => Math.max(1, +(z - 0.1).toFixed(2)))}>−</button>
+            <input
+              className="zoom-slider"
+              type="range" min="1" max="3" step="0.05"
+              value={zoom}
+              onChange={(e) => setZoom(parseFloat(e.target.value))}
+            />
+            <button type="button" className="zoom-btn" onClick={() => setZoom(z => Math.min(3, +(z + 0.1).toFixed(2)))}>+</button>
+          </div>
+          <p className="text-xs t-mute mt-2">Arraste a foto pra reposicionar. Ajuste o zoom acima.</p>
+        </div>
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-1">
+          <button className="btn btn-ghost" onClick={onCancel}>Cancelar</button>
+          <button className="btn btn-primary" onClick={confirm} disabled={!imgW}>Aplicar logo</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ============================================================
+// RECORRÊNCIAS — motor de geração de lançamentos futuros
+// ============================================================
+// Uma recorrência é um "molde" (ex.: Aluguel R$6.000, todo dia 12, mensal).
+// A partir dela geramos lançamentos reais no finEmpresa, cada um marcado
+// com recorrenciaId — assim eles entram normalmente em todos os cálculos,
+// no calendário e nos vencimentos, sem duplicar lógica.
+
+const FREQUENCIAS = [
+  { k: 'mensal', label: 'Mensal', meses: 1 },
+  { k: 'bimestral', label: 'Bimestral', meses: 2 },
+  { k: 'trimestral', label: 'Trimestral', meses: 3 },
+  { k: 'semestral', label: 'Semestral', meses: 6 },
+  { k: 'anual', label: 'Anual', meses: 12 },
+  { k: 'semanal', label: 'Semanal', dias: 7 },
+  { k: 'quinzenal', label: 'Quinzenal', dias: 15 },
+];
+const freqInfo = (k) => FREQUENCIAS.find(f => f.k === k) || FREQUENCIAS[0];
+
+const REC_STATUS = [
+  { k: 'ativa', label: 'Ativa', tone: 'green' },
+  { k: 'pausada', label: 'Pausada', tone: 'orange' },
+  { k: 'encerrada', label: 'Encerrada', tone: 'slate' },
+];
+
+// Gera as datas de ocorrência de uma recorrência dentro de uma janela.
+// Puro: não toca em estado nem no Firebase.
+function gerarDatasRecorrencia(rec, ateISO) {
+  const datas = [];
+  const inicio = new Date((rec.dataInicio || todayISO()) + 'T00:00:00');
+  const limite = new Date(ateISO + 'T00:00:00');
+  const fim = rec.dataFim ? new Date(rec.dataFim + 'T00:00:00') : null;
+  const f = freqInfo(rec.frequencia);
+  const maxParcelas = Number(rec.parcelas) || 0; // 0 = sem limite
+
+  let cursor = new Date(inicio);
+  // Se for mensal-like e houver diaVencimento, ajusta o dia
+  const diaVenc = Number(rec.diaVencimento) || 0;
+  if (f.meses && diaVenc > 0) {
+    cursor.setDate(Math.min(diaVenc, new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate()));
+    if (cursor < inicio) cursor.setMonth(cursor.getMonth() + f.meses);
+  }
+
+  let n = 0;
+  while (cursor <= limite) {
+    if (fim && cursor > fim) break;
+    if (maxParcelas > 0 && n >= maxParcelas) break;
+    datas.push(cursor.toISOString().slice(0, 10));
+    n++;
+    if (f.meses) {
+      const mesAlvo = cursor.getMonth() + f.meses;
+      const proximo = new Date(cursor.getFullYear(), mesAlvo, 1);
+      const ultimoDia = new Date(proximo.getFullYear(), proximo.getMonth() + 1, 0).getDate();
+      proximo.setDate(Math.min(diaVenc > 0 ? diaVenc : cursor.getDate(), ultimoDia));
+      cursor = proximo;
+    } else {
+      cursor = new Date(cursor);
+      cursor.setDate(cursor.getDate() + f.dias);
+    }
+  }
+  return datas;
+}
+
+// Monta os lançamentos que faltam para uma recorrência, sem duplicar os já existentes.
+function lancamentosFaltantes(rec, finEmpresa, ateISO) {
+  if (rec.status !== 'ativa') return [];
+  if (rec.modo === 'lembrar') return []; // só lembra, não gera
+  const jaExistem = new Set(
+    finEmpresa.filter(x => x.recorrenciaId === rec.id).map(x => x.data)
+  );
+  return gerarDatasRecorrencia(rec, ateISO)
+    .filter(d => !jaExistem.has(d))
+    .map(d => ({
+      id: uid(),
+      recorrenciaId: rec.id,
+      tipo: rec.tipo,
+      descricao: rec.descricao,
+      categoria: rec.categoria,
+      valor: Number(rec.valor) || 0,
+      data: d,
+      vencimento: d,
+      status: 'pendente',
+      recorrente: true,
+      obs: rec.obs || '',
+      criadoEm: new Date().toISOString(),
+    }));
+}
+
+// ============================================================
+// SAÚDE FINANCEIRA — velocímetro (gauge) em SVG
+// ============================================================
+const SAUDE_FAIXAS = [
+  { min: 0,  max: 30,  label: 'Crítica',   cor: '#DC2626', icone: 'x'     },
+  { min: 31, max: 50,  label: 'Atenção',   cor: '#EA580C', icone: 'alert' },
+  { min: 51, max: 70,  label: 'Estável',   cor: '#EAB308', icone: 'alert' },
+  { min: 71, max: 85,  label: 'Saudável',  cor: '#16A34A', icone: 'check' },
+  { min: 86, max: 100, label: 'Excelente', cor: '#2563EB', icone: 'check' },
+];
+
+// Converte um valor 0-100 num ângulo de tela para o semicírculo superior.
+// Com polar() usando (ang-90): 270° = esquerda, 360° = topo, 450° = direita.
+function gaugeAngle(v) {
+  const clamped = Math.max(0, Math.min(100, v));
+  return 270 + (clamped / 100) * 180;
+}
+// Ponto na circunferência para um dado ângulo de tela (0°=topo, cresce horário)
+function polar(cx, cy, r, angGraus) {
+  const rad = (angGraus - 90) * Math.PI / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+// Path de um arco entre dois valores (0-100)
+function arcPath(cx, cy, r, v1, v2) {
+  const a1 = gaugeAngle(v1);
+  const a2 = gaugeAngle(v2);
+  const p1 = polar(cx, cy, r, a1);
+  const p2 = polar(cx, cy, r, a2);
+  const largeArc = (a2 - a1) > 180 ? 1 : 0;
+  return `M ${p1.x} ${p1.y} A ${r} ${r} 0 ${largeArc} 1 ${p2.x} ${p2.y}`;
+}
+
+function GaugeSaude({ nota, faixa }) {
+  const [anim, setAnim] = useState(0); // valor animado do ponteiro
+  const reduzir = typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+  useEffect(() => {
+    if (reduzir) { setAnim(nota); return; }
+    let raf;
+    const dur = 900;
+    const t0 = performance.now();
+    const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+    const tick = (now) => {
+      const t = Math.min(1, (now - t0) / dur);
+      setAnim(nota * easeOutCubic(t));
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [nota, reduzir]);
+
+  const W = 300, H = 190;
+  const cx = W / 2, cy = 158, r = 112;
+  const ang = gaugeAngle(anim);
+  // ponteiro curto: para bem antes do centro do texto
+  const ponta = polar(cx, cy, r - 46, ang);
+  const base = polar(cx, cy, 14, ang + 180); // pequena cauda oposta
+
+  return (
+    <div className="gauge-wrap">
+      <svg viewBox={`0 0 ${W} ${H}`} className="gauge-svg" role="img"
+        aria-label={`Saúde financeira: ${nota} de 100 — ${faixa.label}`}>
+        {/* trilha de fundo */}
+        <path d={arcPath(cx, cy, r, 0, 100)} fill="none" stroke="#EFF1F4" strokeWidth="18" strokeLinecap="round" />
+        {/* faixas coloridas */}
+        {SAUDE_FAIXAS.map((f, i) => (
+          <path key={i}
+            d={arcPath(cx, cy, r, f.min, f.max)}
+            fill="none" stroke={f.cor} strokeWidth="18"
+            strokeLinecap={i === 0 || i === SAUDE_FAIXAS.length - 1 ? 'round' : 'butt'}
+            opacity={nota >= f.min && nota <= f.max ? 1 : 0.28}
+            style={{ transition: 'opacity .5s ease' }}
+          />
+        ))}
+        {/* marcas 0 e 100 */}
+        <text x={cx - r} y={cy + 20} className="gauge-tick" textAnchor="middle">0</text>
+        <text x={cx + r} y={cy + 20} className="gauge-tick" textAnchor="middle">100</text>
+
+        {/* conteúdo central — dentro do arco, acima do pivô */}
+        <g className="gauge-txt">
+          <text x={cx} y={cy - 62} textAnchor="middle" className="gauge-svg-status" fill={faixa.cor}>{faixa.label}</text>
+          <text x={cx} y={cy - 24} textAnchor="middle" className="gauge-svg-nota">{Math.round(anim)}</text>
+          <text x={cx} y={cy - 24} textAnchor="middle" className="gauge-svg-max" dx="34">/100</text>
+        </g>
+
+        {/* ponteiro curto (não cobre o número) */}
+        <line x1={base.x} y1={base.y} x2={ponta.x} y2={ponta.y}
+          stroke="#0B1324" strokeWidth="3" strokeLinecap="round" />
+        <circle cx={cx} cy={cy} r="7" fill="#0B1324" />
+        <circle cx={cx} cy={cy} r="3" fill="#fff" />
+      </svg>
+    </div>
+  );
+}
+
+function RecorrenciaForm({ inicial, config, onSave, onCancel }) {
+  const [f, setF] = useState({
+    tipo: inicial.tipo || 'saida',
+    descricao: inicial.descricao || '',
+    categoria: inicial.categoria || '',
+    valor: inicial.valor ?? '',
+    frequencia: inicial.frequencia || 'mensal',
+    diaVencimento: inicial.diaVencimento ?? new Date().getDate(),
+    dataInicio: inicial.dataInicio || todayISO(),
+    dataFim: inicial.dataFim || '',
+    parcelas: inicial.parcelas ?? '',
+    modo: inicial.modo || 'gerar', // gerar | lembrar
+    obs: inicial.obs || '',
+    status: inicial.status || 'ativa',
+    id: inicial.id,
+    criadoEm: inicial.criadoEm,
+  });
+  const upd = (patch) => setF(prev => ({ ...prev, ...patch }));
+  const cats = getCategoriasCompletas(f.tipo, config?.categoriasCustomEmpresa || {});
+  const usaDiaVenc = !!freqInfo(f.frequencia).meses;
+
+  const podeSalvar = f.descricao.trim() && Number(f.valor) > 0 && f.categoria;
+
+  // Prévia das próximas datas (ajuda a pessoa a entender o que vai ser gerado)
+  const previa = useMemo(() => {
+    if (!podeSalvar) return [];
+    const h = new Date(); h.setMonth(h.getMonth() + 12);
+    return gerarDatasRecorrencia(f, h.toISOString().slice(0, 10)).slice(0, 4);
+  }, [f, podeSalvar]);
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <span className="label">Tipo</span>
+        <div className="cot-seg">
+          <button className={`cot-seg-btn ${f.tipo === 'saida' ? 'on' : ''}`} onClick={() => upd({ tipo: 'saida', categoria: '' })}>Despesa</button>
+          <button className={`cot-seg-btn ${f.tipo === 'entrada' ? 'on' : ''}`} onClick={() => upd({ tipo: 'entrada', categoria: '' })}>Receita</button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Descrição"><input className="inp" value={f.descricao} onChange={(e) => upd({ descricao: e.target.value })} placeholder="Ex.: Aluguel da sede" /></Field>
+        <Field label="Categoria">
+          <select className="inp" value={f.categoria} onChange={(e) => upd({ categoria: e.target.value })}>
+            <option value="">Selecione…</option>
+            {cats.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+        <Field label="Valor (R$)"><input type="number" step="0.01" min="0" className="inp mono" value={f.valor} onChange={(e) => upd({ valor: e.target.value })} placeholder="0,00" /></Field>
+        <Field label="Frequência">
+          <select className="inp" value={f.frequencia} onChange={(e) => upd({ frequencia: e.target.value })}>
+            {FREQUENCIAS.map(fr => <option key={fr.k} value={fr.k}>{fr.label}</option>)}
+          </select>
+        </Field>
+        {usaDiaVenc && (
+          <Field label="Dia do vencimento">
+            <input type="number" min="1" max="31" className="inp mono" value={f.diaVencimento} onChange={(e) => upd({ diaVencimento: parseInt(e.target.value) || 1 })} />
+          </Field>
+        )}
+        <Field label="Data de início"><input type="date" className="inp" value={f.dataInicio} onChange={(e) => upd({ dataInicio: e.target.value })} /></Field>
+        <Field label="Data final (opcional)"><input type="date" className="inp" value={f.dataFim} onChange={(e) => upd({ dataFim: e.target.value })} /></Field>
+        <Field label="Nº de parcelas (opcional)"><input type="number" min="0" className="inp mono" value={f.parcelas} onChange={(e) => upd({ parcelas: e.target.value })} placeholder="deixe vazio p/ indeterminado" /></Field>
+      </div>
+
+      <div>
+        <span className="label">Modo</span>
+        <div className="cot-seg">
+          <button className={`cot-seg-btn ${f.modo === 'gerar' ? 'on' : ''}`} onClick={() => upd({ modo: 'gerar' })}>Gerar lançamentos</button>
+          <button className={`cot-seg-btn ${f.modo === 'lembrar' ? 'on' : ''}`} onClick={() => upd({ modo: 'lembrar' })}>Apenas lembrar</button>
+        </div>
+        <p className="text-xs t-mute mt-1.5">
+          {f.modo === 'gerar'
+            ? 'Os lançamentos futuros serão criados automaticamente no financeiro (status pendente).'
+            : 'Nenhum lançamento será criado — a recorrência serve só de referência.'}
+        </p>
+      </div>
+
+      <Field label="Observações"><textarea className="inp" rows={2} value={f.obs} onChange={(e) => upd({ obs: e.target.value })} /></Field>
+
+      {previa.length > 0 && f.modo === 'gerar' && (
+        <div className="fe-previa">
+          <div className="label mb-2">Próximos lançamentos que serão gerados</div>
+          <div className="flex flex-wrap gap-1.5">
+            {previa.map(d => <span key={d} className="badge badge-slate">{fmtDate(d)}</span>)}
+            <span className="text-xs t-mute self-center">…até 12 meses à frente</span>
+          </div>
+        </div>
+      )}
+
+      <div className="flex gap-2 pt-2">
+        <button className="btn btn-ghost flex-1" onClick={onCancel}>Cancelar</button>
+        <button className="btn btn-primary flex-1" onClick={() => onSave(f)} disabled={!podeSalvar}>
+          {f.id ? 'Salvar alterações' : 'Criar recorrência'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// ORIGEM DO LANÇAMENTO + AUDITORIA
+// ============================================================
+// Cada lançamento tem uma procedência. Saber disso permite separar o
+// "saldo bancário" (o que passou pela conta) do "saldo total" (que inclui
+// dinheiro em espécie e lançamentos manuais).
+
+function origemLancamento(x) {
+  if (x.fitid) return 'extrato';                       // veio do OFX (tem id do banco)
+  if (x.mudancaId) return 'mudanca';                   // gerado pelo módulo Mudanças
+  if (x.recorrenciaId) return 'recorrencia';           // gerado por recorrência
+  const obs = String(x.obs || '');
+  if (/Importado de (OFX|CSV|Excel)/i.test(obs)) return 'extrato';
+  if (/NF-e|CT-e|Boleto ·/i.test(obs)) return 'documento';
+  return 'manual';                                     // lançado à mão (inclui dinheiro/cash)
+}
+
+const ORIGEM_INFO = {
+  extrato:     { label: 'Extrato bancário', cor: '#2563EB' },
+  manual:      { label: 'Manual / dinheiro', cor: '#16A34A' },
+  recorrencia: { label: 'Recorrência',       cor: '#7C3AED' },
+  mudanca:     { label: 'Mudanças',          cor: '#D97706' },
+  documento:   { label: 'Documento fiscal',  cor: '#6B7280' },
+};
+
+/**
+ * Auditoria do caixa: recalcula tudo e aponta possíveis problemas.
+ * PURA — não altera nada, só diagnostica.
+ */
+function auditarCaixa(finEmpresa = []) {
+  const ativos = finEmpresa.filter(x => effStatus(x) !== 'cancelado');
+  const pagos = ativos.filter(x => effStatus(x) === 'pago');
+
+  // saldo por origem
+  const porOrigem = {};
+  Object.keys(ORIGEM_INFO).forEach(k => {
+    porOrigem[k] = { entradas: 0, saidas: 0, saldo: 0, qtd: 0 };
+  });
+  pagos.forEach(x => {
+    const o = origemLancamento(x);
+    const b = porOrigem[o];
+    if (!b) return;
+    if (x.tipo === 'entrada') b.entradas += x.valor; else b.saidas += x.valor;
+    b.saldo = b.entradas - b.saidas;
+    b.qtd++;
+  });
+
+  const saldoBancario = porOrigem.extrato.saldo;
+  const saldoTotal = pagos.reduce((a, x) => a + (x.tipo === 'entrada' ? x.valor : -x.valor), 0);
+  const saldoForaDoBanco = saldoTotal - saldoBancario;
+
+  // --- PROBLEMA 1: possíveis duplicatas (mesma data + valor + tipo) ---
+  const mapaDup = new Map();
+  ativos.forEach(x => {
+    const k = `${x.data}|${x.tipo}|${(x.valor || 0).toFixed(2)}`;
+    if (!mapaDup.has(k)) mapaDup.set(k, []);
+    mapaDup.get(k).push(x);
+  });
+  const duplicatas = [...mapaDup.values()].filter(arr => arr.length > 1);
+
+  // --- PROBLEMA 2: linhas de saldo que sobraram ---
+  const linhasSaldo = ativos.filter(x => isLinhaSaldo(x.descricao));
+
+  // --- PROBLEMA 3: baixas por conciliação automática (podem ter sido falsas) ---
+  // Lançamento que foi marcado como pago+conciliado mas não tem fitid (não veio
+  // direto do extrato) — ou seja, foi um "match" da importação.
+  const baixasAutomaticas = pagos.filter(x =>
+    x.statusConc === 'conciliado' && !x.fitid && (x.recorrenciaId || x.mudancaId || origemLancamento(x) === 'manual')
+  );
+
+  // --- PROBLEMA 4: lançamentos sem valor ou sem data ---
+  const invalidos = ativos.filter(x => !x.data || !(Number(x.valor) > 0));
+
+  // --- PROBLEMA 5: mesmo fitid importado duas vezes ---
+  const porFitid = new Map();
+  ativos.filter(x => x.fitid).forEach(x => {
+    if (!porFitid.has(x.fitid)) porFitid.set(x.fitid, []);
+    porFitid.get(x.fitid).push(x);
+  });
+  const fitidRepetido = [...porFitid.values()].filter(arr => arr.length > 1);
+
+  return {
+    saldoBancario, saldoTotal, saldoForaDoBanco, porOrigem,
+    totalLancamentos: ativos.length, totalPagos: pagos.length,
+    duplicatas, linhasSaldo, baixasAutomaticas, invalidos, fitidRepetido,
+    temProblema: duplicatas.length > 0 || linhasSaldo.length > 0 || invalidos.length > 0 || fitidRepetido.length > 0,
+  };
+}
+
+// Bloco de problema encontrado na auditoria
+function AuditProblema({ titulo, desc, itens = [], acao, onAcao, aviso }) {
+  const [aberto, setAberto] = useState(false);
+  return (
+    <div className="aud-bloco" style={aviso ? { borderColor: '#FDE68A', background: '#FFFBEB' } : {}}>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold" style={{ color: aviso ? '#78350F' : '#7F1D1D' }}>{titulo}</div>
+          <p className="text-xs mt-1" style={{ color: aviso ? '#92400E' : '#991B1B' }}>{desc}</p>
+        </div>
+        <div className="flex gap-2" style={{ flexShrink: 0 }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => setAberto(v => !v)}>
+            {aberto ? 'Ocultar' : 'Ver quais'}
+          </button>
+          {acao && <button className="btn btn-danger btn-sm" onClick={onAcao}>{acao}</button>}
+        </div>
+      </div>
+      {aberto && (
+        <div className="space-y-1 mt-3 pt-3" style={{ borderTop: '1px dashed rgba(0,0,0,.1)' }}>
+          {itens.slice(0, 12).map(x => (
+            <div key={x.id} className="flex items-center justify-between gap-2 text-xs">
+              <span className="truncate">{x.data ? fmtDate(x.data) : 'sem data'} · {x.descricao || 'sem descrição'}</span>
+              <span className="mono font-semibold" style={{ flexShrink: 0 }}>{fmtBRL(x.valor || 0)}</span>
+            </div>
+          ))}
+          {itens.length > 12 && <p className="text-xs t-mute">+{itens.length - 12} outros…</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FinanceiroEmpresa({ data, setData, onNav }) {
+  const { finEmpresa, veiculos, linhas, contratos, recorrencias = [] } = data;
   const [openForm, setOpenForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [filtroTipo, setFiltroTipo] = useState('todos');
   const [periodo, setPeriodo] = useState('mes');
   const [expandTx, setExpandTx] = useState(false);
   const [delTarget, setDelTarget] = useState(null);
+  const [saudeOpen, setSaudeOpen] = useState(false);
+  const lancRef = useRef(null);
+  // Auditoria do caixa + saldos separados (banco vs total)
+  const auditoria = useMemo(() => auditarCaixa(finEmpresa), [finEmpresa]);
+  const [auditOpen, setAuditOpen] = useState(false);
+  // Alertas fiscais críticos aparecem também no Financeiro
+  const fiscalResumo = useMemo(() => {
+    const p = getParamsFiscais(data.config);
+    const f = calcularFiscal(finEmpresa, p);
+    return { fiscal: f, criticos: alertasFiscais(f, finEmpresa).filter(a => a.nivel === 'critico') };
+  }, [data.config, finEmpresa]);
+  const [dismissFiscal, setDismissFiscal] = useState(false);
+  const [filtroCard, setFiltroCard] = useState(null); // caixa | aReceber | aPagar | lucro | recorrente
+  const clicarCard = (chave) => {
+    setFiltroCard(prev => prev === chave ? null : chave);
+    setFiltroTipo('todos');
+    setExpandTx(true);
+    setTimeout(() => lancRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+  };
+  const [dismissConc, setDismissConc] = useState(false);
+  const [dismissSaldo, setDismissSaldo] = useState(false);
+  const irParaLancamentos = (tipo = 'todos') => {
+    setFiltroTipo(tipo);
+    setExpandTx(true);
+    setTimeout(() => lancRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+  };
   const [toast, setToast] = useState('');
   useEffect(() => { if (!toast) return; const t = setTimeout(() => setToast(''), 2500); return () => clearTimeout(t); }, [toast]);
 
   const inRange = (s, a, b) => { const d = new Date(s); return d >= a && d <= b; };
-
-  const sparks = useMemo(() => {
-    const s = reportSeries(finEmpresa.filter(x => effStatus(x) !== 'cancelado'), periodo);
-    return { receita: s.map(b => b.receita), lucro: s.map(b => b.lucro), custo: s.map(b => b.custo) };
-  }, [finEmpresa, periodo]);
 
   const m = useMemo(() => {
     const { start, end, prevStart, prevEnd } = periodRange(periodo);
@@ -707,69 +1519,711 @@ function FinanceiroEmpresa({ data, setData }) {
     return { saldo, aReceber, aPagar, despMes, recorrente };
   }, [finEmpresa, linhas]);
 
+  // Saúde Financeira: nota 0-100 derivada de indicadores que já calculamos.
+  // Não altera nenhum cálculo existente — só combina os números pra dar um panorama.
+  const saude = useMemo(() => {
+    let nota = 50; // base neutra
+    const fatores = [];
+
+    // 1) Caixa positivo (peso alto)
+    if (resumo.saldo > 0) { nota += 15; fatores.push({ ok: true, txt: 'Caixa positivo' }); }
+    else { nota -= 20; fatores.push({ ok: false, txt: 'Caixa negativo' }); }
+
+    // 2) Margem de lucro do período
+    if (m.margem >= 20) { nota += 15; fatores.push({ ok: true, txt: `Margem saudável (${m.margem.toFixed(0)}%)` }); }
+    else if (m.margem >= 8) { nota += 7; fatores.push({ ok: true, txt: `Margem razoável (${m.margem.toFixed(0)}%)` }); }
+    else if (m.margem >= 0) { fatores.push({ ok: false, txt: `Margem baixa (${m.margem.toFixed(0)}%)` }); }
+    else { nota -= 15; fatores.push({ ok: false, txt: 'Operando no prejuízo' }); }
+
+    // 3) Contas a pagar vs a receber
+    if (resumo.aReceber >= resumo.aPagar) { nota += 10; fatores.push({ ok: true, txt: 'A receber cobre o a pagar' }); }
+    else { nota -= 10; fatores.push({ ok: false, txt: 'A pagar maior que a receber' }); }
+
+    // 4) Contas vencidas (peso alto — sinal de aperto)
+    const vencidas = finEmpresa.filter(x => effStatus(x) === 'vencido');
+    const totalVencido = vencidas.reduce((a, b) => a + b.valor, 0);
+    if (vencidas.length === 0) { nota += 10; fatores.push({ ok: true, txt: 'Nenhuma conta vencida' }); }
+    else { nota -= Math.min(20, vencidas.length * 5); fatores.push({ ok: false, txt: `${vencidas.length} conta(s) vencida(s)` }); }
+
+    // 5) Receita recorrente (previsibilidade)
+    if (resumo.recorrente > 0) { nota += 5; fatores.push({ ok: true, txt: 'Tem receita recorrente' }); }
+
+    nota = Math.max(0, Math.min(100, Math.round(nota)));
+
+    const faixa = SAUDE_FAIXAS.find(f => nota >= f.min && nota <= f.max) || SAUDE_FAIXAS[0];
+    const nivel = faixa.label;
+    const cor = faixa.cor;
+
+    // Sugestões automáticas com base nos fatores negativos
+    const sugestoes = [];
+    if (resumo.saldo <= 0) sugestoes.push('Priorize entradas: cobre os títulos a receber em aberto.');
+    if (m.margem < 8) sugestoes.push('Margem apertada — revise custos ou reajuste preços.');
+    if (totalVencido > 0) sugestoes.push(`Regularize ${fmtBRL(totalVencido)} em contas vencidas.`);
+    if (resumo.aPagar > resumo.aReceber) sugestoes.push('Renegocie prazos de pagamento para aliviar o caixa.');
+    if (sugestoes.length === 0) sugestoes.push('Continue assim! Mantenha o controle de vencimentos em dia.');
+
+    // Resumo inteligente — uma frase que resume a situação
+    let resumoTxt;
+    if (nota >= 86) resumoTxt = 'Seu fluxo de caixa está saudável e a operação é lucrativa.';
+    else if (nota >= 71) resumoTxt = 'Sua empresa está no caminho certo. Mantenha o controle das despesas.';
+    else if (nota >= 51) resumoTxt = 'Situação estável, mas há pontos a melhorar nos indicadores.';
+    else if (nota >= 31) resumoTxt = 'Atenção: os custos estão acima do ideal para a receita atual.';
+    else resumoTxt = 'Situação crítica. Priorize entradas e regularize as contas vencidas.';
+
+    return { nota, nivel, cor, faixa, resumoTxt, fatores, sugestoes, totalVencido, vencidas: vencidas.length };
+  }, [resumo, m, finEmpresa]);
+
+  // Série de fluxo de caixa (reaproveita reportSeries) + saldo acumulado
+  const fluxo = useMemo(() => {
+    const serie = reportSeries(finEmpresa.filter(x => effStatus(x) !== 'cancelado'), periodo);
+    let acumulado = 0;
+    const dados = serie.map(b => {
+      acumulado += b.lucro;
+      return { label: b.label, entradas: b.receita, saidas: b.custo, saldo: acumulado };
+    });
+
+    // Métricas derivadas (apenas leitura da série — não altera nenhum cálculo)
+    const totalEnt = dados.reduce((a, b) => a + b.entradas, 0);
+    const totalSai = dados.reduce((a, b) => a + b.saidas, 0);
+    const saldoPeriodo = totalEnt - totalSai;
+    const n = dados.length || 1;
+    const melhorDia = dados.reduce((best, b) => b.entradas > (best?.entradas || 0) ? b : best, null);
+    const maiorGastoDia = dados.reduce((worst, b) => b.saidas > (worst?.saidas || 0) ? b : worst, null);
+    const mediaDiaria = saldoPeriodo / n;
+    const saldoMedio = dados.reduce((a, b) => a + b.saldo, 0) / n;
+
+    // Variação vs período anterior (mesma lógica de pctChange já usada no app)
+    const { prevStart, prevEnd } = periodRange(periodo);
+    const prev = finEmpresa.filter(x => effStatus(x) !== 'cancelado' && inRange(x.data, prevStart, prevEnd));
+    const prevSaldo = prev.filter(x => x.tipo === 'entrada').reduce((a, b) => a + b.valor, 0)
+                    - prev.filter(x => x.tipo === 'saida').reduce((a, b) => a + b.valor, 0);
+    const delta = pctChange(saldoPeriodo, prevSaldo);
+
+    return { dados, saldoPeriodo, delta, melhorDia, maiorGastoDia, mediaDiaria, saldoMedio };
+  }, [finEmpresa, periodo]);
+
+  // Despesas por categoria (rosca) — reaproveita groupByCat
+  const despCategorias = useMemo(() => {
+    const { start, end } = periodRange(periodo);
+    const saidas = finEmpresa.filter(x => x.tipo === 'saida' && effStatus(x) !== 'cancelado' && inRange(x.data, start, end));
+    const grp = groupByCat(saidas);
+    const total = grp.reduce((a, b) => a + b.valor, 0);
+    const top = grp.slice(0, 6);
+    const outros = grp.slice(6).reduce((a, b) => a + b.valor, 0);
+    const arr = top.map((c, i) => ({ nome: c.nome, valor: c.valor, pct: total ? Math.round(c.valor / total * 100) : 0, cor: CAT_DONUT_CORES[i % CAT_DONUT_CORES.length] }));
+    if (outros > 0) arr.push({ nome: 'Outros', valor: outros, pct: total ? Math.round(outros / total * 100) : 0, cor: '#9AA1AC' });
+    return { arr, total };
+  }, [finEmpresa, periodo]);
+
+  const [catSel, setCatSel] = useState(null); // categoria clicada pra ver lançamentos
+
+  // Próximos vencimentos: contas em aberto (pendente/vencido) ordenadas por data
+  const vencimentos = useMemo(() => {
+    return finEmpresa
+      .filter(x => { const s = effStatus(x); return s === 'pendente' || s === 'vencido'; })
+      .sort((a, b) => (a.data || '').localeCompare(b.data || ''))
+      .slice(0, 6);
+  }, [finEmpresa]);
+
+  // Calendário financeiro — mês visível
+  const hojeISO = todayISO();
+  const [calRef, setCalRef] = useState(() => { const d = new Date(); return { ano: d.getFullYear(), mes: d.getMonth() }; });
+  const [diaSel, setDiaSel] = useState(null); // 'YYYY-MM-DD' clicado
+
+  const calDados = useMemo(() => {
+    const { ano, mes } = calRef;
+    // agrega por dia do mês visível
+    const porDia = {}; // 'YYYY-MM-DD' -> { entrada, saida, temVenc, temVencido }
+    finEmpresa.forEach(x => {
+      if (effStatus(x) === 'cancelado') return;
+      const data = x.data || '';
+      const d = new Date(data + 'T00:00:00');
+      if (d.getFullYear() !== ano || d.getMonth() !== mes) return;
+      const cur = porDia[data] || { entrada: 0, saida: 0, temVenc: false, temVencido: false };
+      const st = effStatus(x);
+      if (x.tipo === 'entrada') cur.entrada += x.valor; else cur.saida += x.valor;
+      if (st === 'pendente') cur.temVenc = true;
+      if (st === 'vencido') cur.temVencido = true;
+      porDia[data] = cur;
+    });
+    // monta a grade (semanas x 7 dias), começando no domingo
+    const primeiro = new Date(ano, mes, 1);
+    const inicioSemana = primeiro.getDay(); // 0=domingo
+    const diasNoMes = new Date(ano, mes + 1, 0).getDate();
+    const celulas = [];
+    for (let i = 0; i < inicioSemana; i++) celulas.push(null);
+    for (let dia = 1; dia <= diasNoMes; dia++) {
+      const iso = `${ano}-${String(mes + 1).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
+      celulas.push({ dia, iso, ...(porDia[iso] || { entrada: 0, saida: 0, temVenc: false, temVencido: false }) });
+    }
+    while (celulas.length % 7 !== 0) celulas.push(null);
+    return celulas;
+  }, [finEmpresa, calRef]);
+
+  const mudarMes = (delta) => setCalRef(prev => {
+    let m = prev.mes + delta, a = prev.ano;
+    if (m < 0) { m = 11; a--; } if (m > 11) { m = 0; a++; }
+    return { ano: a, mes: m };
+  });
+
+  // ---------- RECORRÊNCIAS ----------
+  const [recDrawer, setRecDrawer] = useState(null); // 'saida' | 'entrada' | null → lista
+  const [recForm, setRecForm] = useState(null);     // objeto em edição ou {} pra nova
+  const [recDel, setRecDel] = useState(null);
+
+  const recResumo = useMemo(() => {
+    const calc = (tipo) => {
+      const lista = recorrencias.filter(r => r.tipo === tipo && r.status === 'ativa');
+      const totalMensal = lista.reduce((a, r) => {
+        const f = freqInfo(r.frequencia);
+        // normaliza pra valor mensal aproximado (só pra exibição do resumo)
+        const v = Number(r.valor) || 0;
+        if (f.meses) return a + v / f.meses;
+        if (f.dias) return a + v * (30 / f.dias);
+        return a + v;
+      }, 0);
+      // próximo vencimento: menor data futura entre os lançamentos gerados
+      const futuros = finEmpresa
+        .filter(x => x.recorrenciaId && lista.some(r => r.id === x.recorrenciaId) && x.data >= hojeISO && effStatus(x) !== 'pago')
+        .sort((a, b) => a.data.localeCompare(b.data));
+      return { qtd: lista.length, totalMensal, proximo: futuros[0]?.data || null };
+    };
+    return { saida: calc('saida'), entrada: calc('entrada') };
+  }, [recorrencias, finEmpresa, hojeISO]);
+
+  // Salva a recorrência e gera os lançamentos futuros (até 12 meses à frente)
+  const salvarRecorrencia = (rec) => {
+    const horizonte = new Date();
+    horizonte.setMonth(horizonte.getMonth() + 12);
+    const ateISO = horizonte.toISOString().slice(0, 10);
+    const isEdit = !!rec.id;
+    const registro = {
+      ...rec,
+      id: rec.id || uid(),
+      status: rec.status || 'ativa',
+      criadoEm: rec.criadoEm || new Date().toISOString(),
+      atualizadoEm: new Date().toISOString(),
+    };
+    setData(d => {
+      const recs = isEdit
+        ? (d.recorrencias || []).map(r => r.id === registro.id ? registro : r)
+        : [...(d.recorrencias || []), registro];
+      // gera os lançamentos que faltam (não duplica os existentes)
+      const novos = lancamentosFaltantes(registro, d.finEmpresa, ateISO);
+      return { ...d, recorrencias: recs, finEmpresa: [...d.finEmpresa, ...novos] };
+    });
+    setRecForm(null);
+    setToast(isEdit ? 'Recorrência atualizada' : 'Recorrência criada — lançamentos gerados');
+  };
+
+  const mudarStatusRec = (id, novo) => {
+    setData(d => ({ ...d, recorrencias: (d.recorrencias || []).map(r => r.id === id ? { ...r, status: novo, atualizadoEm: new Date().toISOString() } : r) }));
+    setToast(novo === 'ativa' ? 'Recorrência reativada' : novo === 'pausada' ? 'Recorrência pausada' : 'Recorrência encerrada');
+  };
+
+  // Exclui a recorrência. escopo: 'somente' (mantém lançamentos) | 'futuros' (remove os não pagos futuros)
+  const excluirRecorrencia = (rec, escopo) => {
+    setData(d => {
+      const recs = (d.recorrencias || []).filter(r => r.id !== rec.id);
+      let fin = d.finEmpresa;
+      if (escopo === 'futuros') {
+        fin = fin.filter(x => !(x.recorrenciaId === rec.id && x.data >= hojeISO && effStatus(x) !== 'pago'));
+      }
+      return { ...d, recorrencias: recs, finEmpresa: fin };
+    });
+    setRecDel(null);
+    setToast('Recorrência excluída');
+  };
+
   const filtered = useMemo(() => {
     const { start, end } = periodRange(periodo);
-    return finEmpresa
-      .filter(x => filtroTipo === 'todos' || x.tipo === filtroTipo)
-      .filter(x => inRange(x.data, start, end) || effStatus(x) === 'pendente' || effStatus(x) === 'vencido')
+    let arr = finEmpresa.filter(x => filtroTipo === 'todos' || x.tipo === filtroTipo);
+
+    // Filtro vindo do clique nos cards do topo
+    if (filtroCard === 'aReceber') {
+      arr = arr.filter(x => x.tipo === 'entrada' && ['pendente', 'vencido'].includes(effStatus(x)));
+    } else if (filtroCard === 'aPagar') {
+      arr = arr.filter(x => x.tipo === 'saida' && ['pendente', 'vencido'].includes(effStatus(x)));
+    } else if (filtroCard === 'caixa') {
+      arr = arr.filter(x => effStatus(x) === 'pago');
+    } else if (filtroCard === 'recorrente') {
+      arr = arr.filter(x => x.recorrente || x.recorrenciaId);
+    } else if (filtroCard === 'lucro') {
+      arr = arr.filter(x => effStatus(x) !== 'cancelado' && inRange(x.data, start, end));
+    }
+
+    return arr
+      .filter(x => filtroCard
+        ? true // quando um card filtra, ele já define o escopo
+        : (inRange(x.data, start, end) || effStatus(x) === 'pendente' || effStatus(x) === 'vencido'))
       .sort((a, b) => b.data.localeCompare(a.data));
-  }, [finEmpresa, filtroTipo, periodo]);
+  }, [finEmpresa, filtroTipo, periodo, filtroCard]);
 
   const handleSave = (item) => { const msg = editing ? 'Lançamento atualizado com sucesso' : 'Lançamento salvo com sucesso'; setData(d => ({ ...d, finEmpresa: editing ? d.finEmpresa.map(x => x.id === editing.id ? { ...item, id: editing.id } : x) : [...d.finEmpresa, { ...item, id: uid() }] })); setOpenForm(false); setEditing(null); setToast(msg); };
   const handleDelete = (id) => { const item = finEmpresa.find(x => x.id === id); if (item) setDelTarget(item); };
   const confirmDelete = () => { if (delTarget) { setData(d => ({ ...d, finEmpresa: d.finEmpresa.filter(x => x.id !== delTarget.id) })); setToast('Lançamento excluído com sucesso'); setDelTarget(null); } };
 
+  const pendentesConc = useMemo(() => finEmpresa.filter(x => x.statusConc === 'pendente'), [finEmpresa]);
+  const conciliarTodos = () => {
+    if (pendentesConc.length === 0) return;
+    setData(d => ({ ...d, finEmpresa: d.finEmpresa.map(y => y.statusConc === 'pendente' ? { ...y, statusConc: 'conciliado' } : y) }));
+    setToast(`${pendentesConc.length} lançamento(s) marcados como conciliados`);
+  };
+
+  // Detecta lançamentos que na verdade são linhas de saldo importadas por engano
+  const linhasSaldo = useMemo(() => finEmpresa.filter(x => isLinhaSaldo(x.descricao)), [finEmpresa]);
+
+  // Mudanças já confirmadas que ainda NÃO viraram conta a receber
+  // (ex.: foram confirmadas antes desta função existir)
+  const mudancasSemLancamento = useMemo(() => {
+    const comLanc = new Set(finEmpresa.filter(x => x.mudancaId).map(x => x.mudancaId));
+    return (data.mudancas || []).filter(m =>
+      MUD_STATUS_FATURAVEL.includes(m.status) && !comLanc.has(m.id) && (m.valorTotal || 0) > 0
+    );
+  }, [data.mudancas, finEmpresa]);
+
+  const lancarMudancasPendentes = () => {
+    const qtd = mudancasSemLancamento.length;
+    setData(d => {
+      let fin = d.finEmpresa || [];
+      mudancasSemLancamento.forEach(m => { fin = sincronizarFinanceiroMudanca(m, fin); });
+      return { ...d, finEmpresa: fin };
+    });
+    setToast(`${qtd} serviço(s) lançado(s) como conta a receber`);
+  };
+  const removerLinhasSaldo = () => {
+    if (linhasSaldo.length === 0) return;
+    const ids = new Set(linhasSaldo.map(x => x.id));
+    setData(d => ({ ...d, finEmpresa: d.finEmpresa.filter(x => !ids.has(x.id)) }));
+    setToast(`${linhasSaldo.length} linha(s) de saldo removida(s)`);
+  };
+
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {auditoria.temProblema && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FEF2F2,#FEE2E2)', borderColor: '#FCA5A5' }}>
+          <div className="conc-banner-ico" style={{ background: '#DC2626' }}><AlertTriangle size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">Encontramos possíveis problemas no seu caixa</div>
+            <div className="conc-banner-sub" style={{ color: '#7F1D1D' }}>
+              {[
+                auditoria.duplicatas.length > 0 && `${auditoria.duplicatas.length} possível(is) duplicata(s)`,
+                auditoria.fitidRepetido.length > 0 && `${auditoria.fitidRepetido.length} transação(ões) do extrato importada(s) 2×`,
+                auditoria.linhasSaldo.length > 0 && `${auditoria.linhasSaldo.length} linha(s) de saldo`,
+                auditoria.invalidos.length > 0 && `${auditoria.invalidos.length} lançamento(s) sem data/valor`,
+              ].filter(Boolean).join(' · ')}
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={() => setAuditOpen(true)} style={{ flexShrink: 0 }}>
+            <Eye size={14} /> Auditar caixa
+          </button>
+        </div>
+      )}
+      {fiscalResumo.criticos.length > 0 && !dismissFiscal && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FEF2F2,#FEE2E2)', borderColor: '#FCA5A5' }}>
+          <div className="conc-banner-ico" style={{ background: '#DC2626' }}><Receipt size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">Atenção fiscal</div>
+            <div className="conc-banner-sub" style={{ color: '#7F1D1D' }}>
+              {fiscalResumo.criticos[0].txt}
+              {fiscalResumo.criticos.length > 1 && ` (+${fiscalResumo.criticos.length - 1} alerta)`}
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={() => onNav?.('fiscal')} style={{ flexShrink: 0 }}>
+            Ver painel fiscal
+          </button>
+          <button className="conc-fechar" onClick={() => setDismissFiscal(true)} title="Fechar aviso"><X size={16} /></button>
+        </div>
+      )}
+      {mudancasSemLancamento.length > 0 && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#EFF6FF,#DBEAFE)', borderColor: '#93C5FD' }}>
+          <div className="conc-banner-ico" style={{ background: 'var(--color-primary)' }}><Package size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">
+              <b>{mudancasSemLancamento.length}</b> {mudancasSemLancamento.length === 1 ? 'serviço de mudança confirmado' : 'serviços de mudança confirmados'} fora do Financeiro
+            </div>
+            <div className="conc-banner-sub" style={{ color: '#1E3A8A' }}>
+              Total de {fmtBRL(mudancasSemLancamento.reduce((a, b) => a + (b.valorTotal || 0), 0))} que ainda não está em "A receber". Clique para lançar.
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={lancarMudancasPendentes} style={{ flexShrink: 0 }}>
+            <Check size={14} /> Lançar {mudancasSemLancamento.length}
+          </button>
+        </div>
+      )}
+      {linhasSaldo.length > 0 && !dismissSaldo && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FEF2F2,#FEE2E2)', borderColor: '#FCA5A5' }}>
+          <div className="conc-banner-ico" style={{ background: '#B4234B' }}><AlertTriangle size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">Encontramos <b>{linhasSaldo.length}</b> {linhasSaldo.length === 1 ? 'linha de saldo' : 'linhas de saldo'} no seu financeiro</div>
+            <div className="conc-banner-sub" style={{ color: '#7F1D1D' }}>Linhas como "SALDO TOTAL DISPONÍVEL" não são entradas nem saídas — são só o saldo da conta. Elas distorcem seus totais. Recomendamos remover.</div>
+          </div>
+          <button className="btn btn-danger" onClick={removerLinhasSaldo} style={{ flexShrink: 0 }}>
+            <Trash2 size={14} /> Remover {linhasSaldo.length}
+          </button>
+          <button className="conc-fechar" onClick={() => setDismissSaldo(true)} title="Fechar aviso" aria-label="Fechar aviso">
+            <X size={16} />
+          </button>
+        </div>
+      )}
+      {pendentesConc.length > 0 && !dismissConc && (
+        <div className="conc-banner">
+          <div className="conc-banner-ico"><CircleAlert size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">Você tem <b>{pendentesConc.length}</b> {pendentesConc.length === 1 ? 'lançamento pendente' : 'lançamentos pendentes'} de conciliação</div>
+            <div className="conc-banner-sub">Estes vieram da Importação. Confira valor e data com seu extrato, depois clique em <b>Conciliar</b> na linha ou em <b>Conciliar todos</b>.</div>
+          </div>
+          <button className="btn btn-primary" onClick={conciliarTodos} style={{ flexShrink: 0 }}>
+            <Check size={14} /> Conciliar todos
+          </button>
+          <button className="conc-fechar" onClick={() => setDismissConc(true)} title="Fechar lembrete" aria-label="Fechar lembrete">
+            <X size={16} />
+          </button>
+        </div>
+      )}
       {/* Período — controla todos os dados da tela */}
       <div className="period-bar">
         {PERIODOS.map(p => <button key={p.k} onClick={() => setPeriodo(p.k)} className={`period-pill ${periodo === p.k ? 'on' : ''}`}>{p.label}</button>)}
       </div>
 
-      {/* Cards premium */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
-        <FinStatCard accent="green" icon={TrendingUp} title="Receita Bruta" value={fmtBRL(m.receita)} deltaPct={m.gRec} sub={`${m.gRec >= 0 ? '+' : ''}${m.gRec.toFixed(0)}% vs. período anterior`} spark={sparks.receita} sparkColor="#10A37F" />
-        <FinStatCard accent="blue" icon={Activity} title="Lucro Líquido" value={fmtBRL(m.lucro)} sub={`Margem de ${m.margem.toFixed(0)}%`} spark={sparks.lucro} sparkColor="#1D4ED8" />
-        <FinStatCard accent="red" icon={TrendingDown} title="Custos" value={fmtBRL(m.custo)} deltaPct={m.gCusto} sub={m.topCat ? `Maior: ${m.topCat.nome} · ${m.topCat.share.toFixed(0)}%` : 'Sem custos no período'} spark={sparks.custo} sparkColor="#E06A85" />
+      {/* Cards principais premium + Saúde Financeira */}
+      <div className="fe-cards-grid">
+        <button className={`fe-card fade-in ${filtroCard === 'caixa' ? 'on' : ''}`} onClick={() => clicarCard('caixa')}>
+          <div className="fe-card-ico" style={{ background: 'var(--color-primary)', opacity: .92 }}><Wallet size={17} /></div>
+          <div className="fe-card-lbl">Saldo total</div>
+          <div className={`fe-card-val mono ${resumo.saldo >= 0 ? '' : 't-red'}`}>{fmtBRL(resumo.saldo)}</div>
+          <div className="fe-card-saldos">
+            <span title="Só o que passou pela conta bancária">
+              <b>Banco:</b> <span className="mono">{fmtBRL(auditoria.saldoBancario)}</span>
+            </span>
+            <span title="Dinheiro em espécie e lançamentos manuais">
+              <b>Fora do banco:</b> <span className="mono">{fmtBRL(auditoria.saldoForaDoBanco)}</span>
+            </span>
+          </div>
+        </button>
+        <button className={`fe-card fade-in ${filtroCard === 'aReceber' ? 'on' : ''}`} onClick={() => clicarCard('aReceber')}>
+          <div className="fe-card-ico" style={{ background: '#16A34A' }}><ArrowDownRight size={17} /></div>
+          <div className="fe-card-lbl">A receber</div>
+          <div className="fe-card-val mono t-green">{fmtBRL(resumo.aReceber)}</div>
+          <div className="fe-card-sub">{filtroCard === 'aReceber' ? 'filtrando ✓' : 'Títulos em aberto'}</div>
+        </button>
+        <button className={`fe-card fade-in ${filtroCard === 'aPagar' ? 'on' : ''}`} onClick={() => clicarCard('aPagar')}>
+          <div className="fe-card-ico" style={{ background: '#DC2626' }}><ArrowUpRight size={17} /></div>
+          <div className="fe-card-lbl">A pagar</div>
+          <div className="fe-card-val mono t-red">{fmtBRL(resumo.aPagar)}</div>
+          <div className="fe-card-sub">{filtroCard === 'aPagar' ? 'filtrando ✓' : 'Contas em aberto'}</div>
+        </button>
+        <button className={`fe-card fade-in ${filtroCard === 'lucro' ? 'on' : ''}`} onClick={() => clicarCard('lucro')}>
+          <div className="fe-card-ico" style={{ background: 'var(--color-accent)' }}><Activity size={17} /></div>
+          <div className="fe-card-lbl">Lucro do período</div>
+          <div className={`fe-card-val mono ${m.lucro >= 0 ? '' : 't-red'}`}>{fmtBRL(m.lucro)}</div>
+          <div className="fe-card-sub">{filtroCard === 'lucro' ? 'filtrando ✓' : `Margem: ${m.margem.toFixed(0)}%`}</div>
+        </button>
+        <button className={`fe-card fade-in ${filtroCard === 'recorrente' ? 'on' : ''}`} onClick={() => clicarCard('recorrente')}>
+          <div className="fe-card-ico" style={{ background: '#0EA5E9' }}><TrendingUp size={17} /></div>
+          <div className="fe-card-lbl">Receita recorrente</div>
+          <div className="fe-card-val mono t-green">{fmtBRL(resumo.recorrente)}</div>
+          <div className="fe-card-sub">{filtroCard === 'recorrente' ? 'filtrando ✓' : 'Prevista no mês'}</div>
+        </button>
+        <button className="fe-card fade-in" onClick={() => setSaudeOpen(true)}>
+          <div className="fe-card-ico" style={{ background: '#7C3AED' }}><Percent size={17} /></div>
+          <div className="fe-card-lbl">Margem líquida</div>
+          <div className={`fe-card-val mono ${m.margem >= 0 ? '' : 't-red'}`}>{m.margem.toFixed(1)}%</div>
+          <div className="fe-card-sub">Ver saúde financeira ›</div>
+        </button>
       </div>
 
-      {/* Resumo inteligente */}
-      <div>
-        <div className="flex items-center gap-2 mb-3"><Wallet size={15} className="t-soft" /><h3 className="display h-card t-ink">Resumo Financeiro</h3></div>
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 sm:gap-3">
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">Saldo atual</span></div>
-            <div className={`pf-tile-val mono ${resumo.saldo >= 0 ? 't-ink' : 't-red'}`}>{fmtBRL(resumo.saldo)}</div>
+      {filtroCard && (
+        <div className="orc-filtro-ativo">
+          <span>Mostrando: <b>{
+            filtroCard === 'aReceber' ? 'Contas a receber' :
+            filtroCard === 'aPagar' ? 'Contas a pagar' :
+            filtroCard === 'caixa' ? 'Lançamentos pagos' :
+            filtroCard === 'recorrente' ? 'Recorrentes' : 'Lançamentos do período'
+          }</b> · {filtered.length} lançamento(s)</span>
+          <button onClick={() => setFiltroCard(null)} className="orc-filtro-limpar"><X size={13} /> Limpar</button>
+        </div>
+      )}
+
+      {/* Saúde Financeira — velocímetro premium */}
+      <div className="card p-5 fe-gauge-card fade-in">
+        <div className="fe-gauge-head">
+          <h3 className="display h-card t-ink">Saúde Financeira</h3>
+          <p className="text-sm t-soft">Avaliação geral da empresa</p>
+        </div>
+
+        <GaugeSaude nota={saude.nota} faixa={saude.faixa} />
+
+        {/* Legenda das faixas */}
+        <div className="fe-gauge-legend">
+          {SAUDE_FAIXAS.map(f => (
+            <div key={f.label} className={`fe-gauge-leg ${saude.faixa.label === f.label ? 'on' : ''}`}>
+              <span className="fe-gauge-leg-dot" style={{ background: f.cor }} />
+              <span className="fe-gauge-leg-faixa mono">{f.min}-{f.max}</span>
+              <span className="fe-gauge-leg-lbl">{f.label}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Resumo inteligente */}
+        <div className="fe-gauge-resumo" style={{ borderColor: saude.cor + '33', background: saude.cor + '0D' }}>
+          <span className="fe-gauge-resumo-ico" style={{ background: saude.cor }}>
+            {saude.faixa.icone === 'check' ? <TrendingUp size={15} /> : saude.faixa.icone === 'alert' ? <AlertTriangle size={15} /> : <TrendingDown size={15} />}
+          </span>
+          <p className="fe-gauge-resumo-txt">{saude.resumoTxt}</p>
+          <button className="fe-saude-btn" onClick={() => setSaudeOpen(true)} style={{ flexShrink: 0 }}>
+            Ver detalhes <ChevronRight size={13} />
+          </button>
+        </div>
+      </div>
+
+      {/* Fluxo de caixa + Despesas por categoria */}
+      <div className="fe-mid-grid">
+        <div className="card p-4 sm:p-5">
+          {/* Cabeçalho: saldo do período + variação */}
+          <div className="fe-flux-head">
+            <div>
+              <h3 className="display h-card t-ink">Fluxo de Caixa</h3>
+              <div className="fe-flux-lbl">Saldo do período</div>
+              <div className="fe-flux-saldo-row">
+                <span className={`fe-flux-saldo mono ${fluxo.saldoPeriodo >= 0 ? '' : 't-red'}`}>{fmtBRL(fluxo.saldoPeriodo)}</span>
+                {Number.isFinite(fluxo.delta) && fluxo.delta !== 0 && (
+                  <span className={`fe-flux-delta ${fluxo.delta >= 0 ? 'up' : 'down'}`}>
+                    {fluxo.delta >= 0 ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
+                    {fluxo.delta >= 0 ? '+' : ''}{fluxo.delta.toFixed(0)}%
+                  </span>
+                )}
+              </div>
+            </div>
+            <span className="text-xs t-mute fe-flux-leg">no período selecionado</span>
           </div>
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">A receber</span></div>
-            <div className="pf-tile-val mono t-green">{fmtBRL(resumo.aReceber)}</div>
+
+          <div style={{ height: 250 }}>
+            <ResponsiveContainer>
+              <ComposedChart data={fluxo.dados} margin={{ top: 8, right: 6, left: -20, bottom: 0 }} barGap={2}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F1F3F5" vertical={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false} interval="preserveStartEnd" minTickGap={18} />
+                {/* eixo das barras (entradas/saídas) */}
+                <YAxis yAxisId="mov" tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false}
+                  tickFormatter={(v) => v === 0 ? '0' : `${(v / 1000).toFixed(0)}k`} />
+                {/* eixo próprio do saldo acumulado — evita que a linha esmague as barras */}
+                <YAxis yAxisId="saldo" orientation="right" hide />
+                <Tooltip formatter={(v, n) => [fmtBRL(v), n]} contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 12 }}
+                  cursor={{ fill: 'rgba(11,19,36,.04)' }} />
+                <Bar yAxisId="mov" dataKey="entradas" name="Entradas" fill="#16A34A" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                <Bar yAxisId="mov" dataKey="saidas" name="Saídas" fill="#DC2626" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                <Line yAxisId="saldo" type="linear" dataKey="saldo" name="Saldo acumulado"
+                  stroke="var(--color-primary)" strokeWidth={2} strokeDasharray="4 3"
+                  dot={{ r: 2, fill: 'var(--color-primary)', strokeWidth: 0 }} activeDot={{ r: 4 }} />
+              </ComposedChart>
+            </ResponsiveContainer>
           </div>
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">A pagar</span></div>
-            <div className="pf-tile-val mono t-red">{fmtBRL(resumo.aPagar)}</div>
+          <div className="fe-flux-legenda">
+            <span><i style={{ background: '#16A34A' }} /> Entradas</span>
+            <span><i style={{ background: '#DC2626' }} /> Saídas</span>
+            <span><i className="dash" style={{ background: 'var(--color-primary)' }} /> Saldo acumulado</span>
           </div>
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">Despesas do mês</span></div>
-            <div className="pf-tile-val mono t-red">{fmtBRL(resumo.despMes)}</div>
+
+          {/* Mini-métricas do período */}
+          <div className="fe-flux-stats">
+            <div className="fe-flux-stat">
+              <span className="fe-flux-stat-ico" style={{ background: '#DCFCE7', color: '#16A34A' }}><ArrowUpRight size={13} /></span>
+              <div className="min-w-0">
+                <div className="fe-flux-stat-lbl">Melhor dia</div>
+                <div className="fe-flux-stat-val mono t-green">{fmtBRL(fluxo.melhorDia?.entradas || 0)}</div>
+              </div>
+            </div>
+            <div className="fe-flux-stat">
+              <span className="fe-flux-stat-ico" style={{ background: '#FEE2E2', color: '#DC2626' }}><ArrowDownRight size={13} /></span>
+              <div className="min-w-0">
+                <div className="fe-flux-stat-lbl">Maior gasto</div>
+                <div className="fe-flux-stat-val mono t-red">{fmtBRL(fluxo.maiorGastoDia?.saidas || 0)}</div>
+              </div>
+            </div>
+            <div className="fe-flux-stat">
+              <span className="fe-flux-stat-ico" style={{ background: '#EFF4FF', color: 'var(--color-primary)' }}><TrendingUp size={13} /></span>
+              <div className="min-w-0">
+                <div className="fe-flux-stat-lbl">Média diária</div>
+                <div className={`fe-flux-stat-val mono ${fluxo.mediaDiaria >= 0 ? 't-ink' : 't-red'}`}>{fmtBRL(fluxo.mediaDiaria)}</div>
+              </div>
+            </div>
+            <div className="fe-flux-stat">
+              <span className="fe-flux-stat-ico" style={{ background: '#F3F4F6', color: '#6B7280' }}><Activity size={13} /></span>
+              <div className="min-w-0">
+                <div className="fe-flux-stat-lbl">Saldo médio</div>
+                <div className={`fe-flux-stat-val mono ${fluxo.saldoMedio >= 0 ? 't-ink' : 't-red'}`}>{fmtBRL(fluxo.saldoMedio)}</div>
+              </div>
+            </div>
           </div>
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">Receita recorrente</span></div>
-            <div className="pf-tile-val mono t-green">{fmtBRL(resumo.recorrente)}</div>
+        </div>
+
+        <div className="card p-4 sm:p-5">
+          <h3 className="display h-card t-ink mb-3">Despesas por categoria</h3>
+          {despCategorias.arr.length === 0 ? (
+            <EmptyState icon={Coins} title="Sem despesas no período." />
+          ) : (
+            <div className="fe-donut-wrap">
+              <div className="fe-donut">
+                <ResponsiveContainer>
+                  <PieChart>
+                    <Pie
+                      data={despCategorias.arr} dataKey="valor" nameKey="nome"
+                      cx="50%" cy="50%" innerRadius={62} outerRadius={84} paddingAngle={2} stroke="none"
+                      isAnimationActive={false}
+                      onClick={(_, index) => {
+                        const cat = despCategorias.arr[index]?.nome;
+                        if (cat) setCatSel(cat);
+                      }}
+                      style={{ cursor: 'pointer', outline: 'none' }}
+                    >
+                      {despCategorias.arr.map((c, i) => <Cell key={`${c.nome}-${i}`} fill={c.cor} style={{ cursor: 'pointer', outline: 'none' }} />)}
+                    </Pie>
+                    <Tooltip formatter={(v) => fmtBRL(v)} contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 12 }} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="fe-donut-center">
+                  <span className="fe-donut-lbl">Total</span>
+                  <span className="fe-donut-val mono">{fmtBRL(despCategorias.total)}</span>
+                </div>
+              </div>
+              <div className="fe-donut-legend">
+                {despCategorias.arr.map((c, i) => (
+                  <button key={i} className="fe-leg-item" onClick={() => setCatSel(c.nome)}>
+                    <span className="fe-leg-dot" style={{ background: c.cor }} />
+                    <span className="fe-leg-nome truncate">{c.nome}</span>
+                    <span className="fe-leg-pct mono">{c.pct}%</span>
+                    <span className="fe-leg-val mono">{fmtBRL(c.valor)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Próximos vencimentos + Painel Fiscal */}
+      <div className="fe-venc-fiscal-grid">
+      <div className="card p-4 sm:p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="display h-card t-ink">Próximos vencimentos</h3>
+          <button className="fe-link-btn" onClick={() => irParaLancamentos('todos')}>Ver todos</button>
+        </div>
+        {vencimentos.length === 0 ? (
+          <EmptyState icon={Check} title="Nenhuma conta em aberto. Tudo em dia!" />
+        ) : (
+          <div className="fe-venc-list">
+            {vencimentos.map(v => {
+              const isE = v.tipo === 'entrada';
+              const st = effStatus(v);
+              const venc = st === 'vencido';
+              const d = new Date(v.data + 'T00:00:00');
+              return (
+                <div key={v.id} className="fe-venc-row">
+                  <div className="fe-venc-data">
+                    <span className="fe-venc-dia mono">{String(d.getDate()).padStart(2, '0')}</span>
+                    <span className="fe-venc-mes">{MONTHS_PT[d.getMonth()]?.slice(0, 3)}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium t-ink truncate">{v.descricao}</div>
+                    <div className="text-xs t-soft">{v.categoria}{v.recorrente ? ' · recorrente' : ''}</div>
+                  </div>
+                  <div className="text-right" style={{ flexShrink: 0 }}>
+                    <div className={`mono text-sm font-semibold ${isE ? 't-green' : 't-red'}`}>{isE ? '+ ' : '− '}{fmtBRL(v.valor)}</div>
+                    <span className={`fe-venc-badge ${venc ? 'venc' : 'pend'}`}>{venc ? 'Vencido' : 'Pendente'}</span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-          <div className="card pf-tile">
-            <div className="pf-tile-head"><span className="label">Margem líquida</span></div>
-            <div className={`pf-tile-val mono ${m.margem >= 0 ? 't-ink' : 't-red'}`}>{m.margem.toFixed(1)}%</div>
+        )}
+      </div>
+
+      <FiscalWidget data={data} onAbrir={() => onNav?.('fiscal')} />
+      </div>
+
+      {/* Recorrências — cards compactos */}
+      <div className="fe-rec-grid">
+        {[
+          { tipo: 'saida', titulo: 'Despesas recorrentes', ico: TrendingDown, cor: '#DC2626', lblTotal: 'Total mensal', r: recResumo.saida },
+          { tipo: 'entrada', titulo: 'Receitas recorrentes', ico: TrendingUp, cor: '#16A34A', lblTotal: 'Receita prevista', r: recResumo.entrada },
+        ].map(({ tipo, titulo, ico: Ico, cor, lblTotal, r }) => (
+          <div key={tipo} className="card p-4 sm:p-5">
+            <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <span className="fe-rec-ico" style={{ background: cor }}><Ico size={15} /></span>
+                <h3 className="display h-card t-ink">{titulo}</h3>
+              </div>
+              <button className="fe-link-btn" onClick={() => setRecDrawer(tipo)}>Ver recorrências</button>
+            </div>
+            <div className="fe-rec-metrics">
+              <div>
+                <div className="fe-rec-m-lbl">Quantidade</div>
+                <div className="fe-rec-m-val mono">{r.qtd}</div>
+              </div>
+              <div>
+                <div className="fe-rec-m-lbl">{lblTotal}</div>
+                <div className="fe-rec-m-val mono" style={{ color: cor }}>{fmtBRL(r.totalMensal)}</div>
+              </div>
+              <div>
+                <div className="fe-rec-m-lbl">Próximo</div>
+                <div className="fe-rec-m-val" style={{ fontSize: 14 }}>{r.proximo ? fmtDate(r.proximo) : '—'}</div>
+              </div>
+            </div>
+            <button className="btn btn-primary w-full mt-3" onClick={() => setRecForm({ tipo })}>
+              <Plus size={15} /> Nova recorrência
+            </button>
           </div>
+        ))}
+      </div>
+
+      {/* Calendário financeiro */}
+      <div className="card p-4 sm:p-5">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h3 className="display h-card t-ink">Calendário financeiro</h3>
+          <div className="fe-cal-nav">
+            <button onClick={() => mudarMes(-1)} className="fe-cal-navbtn" aria-label="Mês anterior"><ChevronRight size={16} style={{ transform: 'rotate(180deg)' }} /></button>
+            <span className="fe-cal-mes">{['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'][calRef.mes]} {calRef.ano}</span>
+            <button onClick={() => mudarMes(1)} className="fe-cal-navbtn" aria-label="Próximo mês"><ChevronRight size={16} /></button>
+            <button onClick={() => { const d = new Date(); setCalRef({ ano: d.getFullYear(), mes: d.getMonth() }); }} className="fe-cal-hoje">Hoje</button>
+          </div>
+        </div>
+        <div className="fe-cal-grid">
+          {['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'].map(d => <div key={d} className="fe-cal-wd">{d}</div>)}
+          {calDados.map((c, i) => {
+            if (!c) return <div key={i} className="fe-cal-cell empty" />;
+            const hoje = c.iso === hojeISO;
+            const temMov = c.entrada > 0 || c.saida > 0;
+            return (
+              <button key={i} className={`fe-cal-cell ${hoje ? 'hoje' : ''} ${temMov || c.temVenc || c.temVencido ? 'ativo' : ''}`}
+                onClick={() => temMov || c.temVenc || c.temVencido ? setDiaSel(c.iso) : null}>
+                <span className="fe-cal-dia">{c.dia}</span>
+                <span className="fe-cal-dots">
+                  {c.entrada > 0 && <span className="fe-cal-dot" style={{ background: '#16A34A' }} />}
+                  {c.saida > 0 && <span className="fe-cal-dot" style={{ background: '#DC2626' }} />}
+                  {c.temVenc && <span className="fe-cal-dot" style={{ background: '#D97706' }} />}
+                  {c.temVencido && <span className="fe-cal-dot" style={{ background: '#7C3AED' }} />}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="fe-cal-legend">
+          <span><span className="fe-cal-dot" style={{ background: '#16A34A' }} /> Entrada</span>
+          <span><span className="fe-cal-dot" style={{ background: '#DC2626' }} /> Saída</span>
+          <span><span className="fe-cal-dot" style={{ background: '#D97706' }} /> Vencimento</span>
+          <span><span className="fe-cal-dot" style={{ background: '#7C3AED' }} /> Vencido</span>
         </div>
       </div>
 
       {/* Lista */}
-      <div className="card">
+      <div className="card" ref={lancRef}>
         <div className="p-4 list-head">
           <div className="flex items-center gap-2 mb-3">
             <h3 className="display h-card t-ink">Lançamentos</h3>
             <span className="count-pill">{filtered.length} {filtered.length === 1 ? 'lançamento' : 'lançamentos'}</span>
+            <button className="fe-link-btn" onClick={() => setAuditOpen(true)} style={{ marginLeft: 'auto' }}>
+              <Eye size={13} style={{ display: 'inline', verticalAlign: -2 }} /> Auditar caixa
+            </button>
           </div>
           <div className="flex flex-col sm:flex-row sm:items-center gap-3">
             <div className="seg w-full sm:w-auto">
@@ -793,7 +2247,39 @@ function FinanceiroEmpresa({ data, setData }) {
                     <div className={`text-sm font-medium truncate ${canc ? 'tx-canc' : 't-ink'}`}>{x.descricao}</div>
                     <div className="text-xs t-soft mt-0.5 flex flex-wrap items-center gap-1.5">
                       <Badge tone={sb.tone}>{sb.label}</Badge>
-                      <Badge tone="slate">{x.categoria}</Badge>
+                      {x.abastecimentoId && (
+                        <span className="tag-abast" title="Também registrado no módulo Combustível">
+                          <Fuel size={10} /> Combustível
+                        </span>
+                      )}
+                      <CategoryDropdown
+                        lancamento={x}
+                        config={data.config}
+                        onChangeCategoria={(nova) => {
+                          const key = categoryMemoryKey(x.descricao);
+                          setData(d => {
+                            const config = { ...(d.config || {}) };
+                            if (key) config.categoryMemory = { ...(config.categoryMemory || {}), [key]: nova };
+                            return {
+                              ...d,
+                              config,
+                              finEmpresa: d.finEmpresa.map(y => y.id === x.id ? { ...y, categoria: nova } : y),
+                            };
+                          });
+                          setToast(`Categoria alterada para "${nova}"`);
+                        }}
+                        onAddCustom={(tipo, cat) => {
+                          setData(d => {
+                            const cfg = { ...(d.config || {}) };
+                            const custom = { ...(cfg.categoriasCustomEmpresa || {}) };
+                            const arr = [...(custom[tipo] || [])];
+                            if (!arr.includes(cat)) arr.push(cat);
+                            custom[tipo] = arr;
+                            cfg.categoriasCustomEmpresa = custom;
+                            return { ...d, config: cfg };
+                          });
+                        }}
+                      />
                       {x.statusConc === 'conciliado' && <Badge tone="green">✓ Conciliado</Badge>}
                       {x.statusConc === 'pendente' && <Badge tone="orange">Pendente conciliação</Badge>}
                       <span>{fmtDate(x.data)}</span>
@@ -805,7 +2291,11 @@ function FinanceiroEmpresa({ data, setData }) {
                   <div className={`mono text-sm font-semibold text-right ${canc ? 't-mute' : isE ? 't-green' : 't-red'}`} style={{ flexShrink: 0, textDecoration: canc ? 'line-through' : 'none' }}>{isE ? '+ ' : '− '}{fmtBRL(x.valor)}</div>
                   <div className="row-actions flex">
                     {x.statusConc === 'pendente' && (
-                      <button onClick={() => setData(d => ({ ...d, finEmpresa: d.finEmpresa.map(y => y.id === x.id ? { ...y, statusConc: 'conciliado' } : y) }))} className="ibtn" title="Marcar como conciliado"><Check size={14} /></button>
+                      <button
+                        onClick={() => setData(d => ({ ...d, finEmpresa: d.finEmpresa.map(y => y.id === x.id ? { ...y, statusConc: 'conciliado' } : y) }))}
+                        className="conc-btn"
+                        title="Marcar como conciliado"
+                      ><Check size={13} /> Conciliar</button>
                     )}
                     <button onClick={() => { setEditing(x); setOpenForm(true); }} className="ibtn"><Pencil size={14} /></button>
                     <button onClick={() => handleDelete(x.id)} className="ibtn ibtn-del"><Trash2 size={14} /></button>
@@ -822,6 +2312,324 @@ function FinanceiroEmpresa({ data, setData }) {
           </div>
         )}
       </div>
+
+      {/* Drawer: lista de recorrências */}
+      <Modal open={!!recDrawer} onClose={() => setRecDrawer(null)} title={recDrawer === 'entrada' ? 'Receitas recorrentes' : 'Despesas recorrentes'} wide>
+        {recDrawer && (() => {
+          const lista = recorrencias.filter(r => r.tipo === recDrawer)
+            .sort((a, b) => (a.status === 'ativa' ? -1 : 1) - (b.status === 'ativa' ? -1 : 1));
+          return (
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <span className="text-sm t-soft">{lista.length} recorrência(s)</span>
+                <button className="btn btn-primary" onClick={() => { setRecForm({ tipo: recDrawer }); setRecDrawer(null); }}>
+                  <Plus size={15} /> Nova
+                </button>
+              </div>
+              {lista.length === 0 ? <EmptyState icon={Receipt} title="Nenhuma recorrência cadastrada ainda." /> : (
+                <div className="space-y-2" style={{ maxHeight: 420, overflowY: 'auto' }}>
+                  {lista.map(r => {
+                    const st = REC_STATUS.find(s => s.k === r.status) || REC_STATUS[0];
+                    const gerados = finEmpresa.filter(x => x.recorrenciaId === r.id);
+                    const pagos = gerados.filter(x => effStatus(x) === 'pago').length;
+                    const restantes = Number(r.parcelas) > 0 ? Math.max(0, Number(r.parcelas) - pagos) : null;
+                    const prox = gerados.filter(x => x.data >= hojeISO && effStatus(x) !== 'pago').sort((a, b) => a.data.localeCompare(b.data))[0];
+                    return (
+                      <div key={r.id} className="fe-rec-row">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-semibold t-ink truncate">{r.descricao}</span>
+                            <Badge tone={st.tone}>{st.label}</Badge>
+                            {r.modo === 'lembrar' && <span className="badge badge-slate">só lembrete</span>}
+                          </div>
+                          <div className="text-xs t-soft mt-0.5">
+                            {r.categoria} · {freqInfo(r.frequencia).label}
+                            {r.diaVencimento ? ` · dia ${r.diaVencimento}` : ''}
+                            {prox ? ` · próx. ${fmtDate(prox.data)}` : ''}
+                            {restantes !== null ? ` · ${restantes} parcela(s) restante(s)` : ''}
+                          </div>
+                        </div>
+                        <div className="mono text-sm font-semibold" style={{ flexShrink: 0, color: r.tipo === 'entrada' ? '#16A34A' : '#DC2626' }}>
+                          {fmtBRL(r.valor)}
+                        </div>
+                        <div className="fe-rec-actions">
+                          <button className="ibtn" title="Editar" onClick={() => { setRecForm(r); setRecDrawer(null); }}><Pencil size={14} /></button>
+                          {r.status === 'ativa' && <button className="ibtn" title="Pausar" onClick={() => mudarStatusRec(r.id, 'pausada')}><Clock size={14} /></button>}
+                          {r.status === 'pausada' && <button className="ibtn" title="Reativar" onClick={() => mudarStatusRec(r.id, 'ativa')}><Check size={14} /></button>}
+                          {r.status !== 'encerrada' && <button className="ibtn" title="Encerrar" onClick={() => mudarStatusRec(r.id, 'encerrada')}><X size={14} /></button>}
+                          <button className="ibtn ibtn-del" title="Excluir" onClick={() => { setRecDel(r); setRecDrawer(null); }}><Trash2 size={14} /></button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* Formulário de recorrência */}
+      <Modal open={!!recForm} onClose={() => setRecForm(null)} title={recForm?.id ? 'Editar recorrência' : 'Nova recorrência'} wide>
+        {recForm && <RecorrenciaForm inicial={recForm} config={data.config} onSave={salvarRecorrencia} onCancel={() => setRecForm(null)} />}
+      </Modal>
+
+      {/* Confirmação de exclusão de recorrência */}
+      <Modal open={!!recDel} onClose={() => setRecDel(null)} title="Excluir recorrência">
+        {recDel && (
+          <div className="space-y-4">
+            <p className="text-sm t-ink">Excluir <b>{recDel.descricao}</b>? Escolha o que fazer com os lançamentos já gerados:</p>
+            <div className="space-y-2">
+              <button className="fe-del-op" onClick={() => excluirRecorrencia(recDel, 'somente')}>
+                <div className="font-semibold text-sm t-ink">Excluir só a recorrência</div>
+                <div className="text-xs t-soft">Os lançamentos já criados continuam no financeiro.</div>
+              </button>
+              <button className="fe-del-op danger" onClick={() => excluirRecorrencia(recDel, 'futuros')}>
+                <div className="font-semibold text-sm" style={{ color: '#DC2626' }}>Excluir a recorrência e os lançamentos futuros</div>
+                <div className="text-xs t-soft">Remove os lançamentos ainda não pagos daqui pra frente. Os pagos são preservados.</div>
+              </button>
+            </div>
+            <button className="btn btn-ghost w-full" onClick={() => setRecDel(null)}>Cancelar</button>
+          </div>
+        )}
+      </Modal>
+
+      {/* Detalhes do dia (calendário) */}
+      <Modal open={!!diaSel} onClose={() => setDiaSel(null)} title={diaSel ? `Movimentações · ${fmtDate(diaSel)}` : ''} wide>
+        {diaSel && (() => {
+          const itens = finEmpresa
+            .filter(x => x.data === diaSel && effStatus(x) !== 'cancelado')
+            .sort((a, b) => (b.valor || 0) - (a.valor || 0));
+          const entradas = itens.filter(x => x.tipo === 'entrada').reduce((a, b) => a + b.valor, 0);
+          const saidas = itens.filter(x => x.tipo === 'saida').reduce((a, b) => a + b.valor, 0);
+          return (
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-3">
+                <div className="metric-box"><div className="text-xs t-soft">Entradas</div><div className="text-sm font-semibold t-green mono">{fmtBRL(entradas)}</div></div>
+                <div className="metric-box"><div className="text-xs t-soft">Saídas</div><div className="text-sm font-semibold t-red mono">{fmtBRL(saidas)}</div></div>
+                <div className="metric-box"><div className="text-xs t-soft">Saldo do dia</div><div className={`text-sm font-semibold mono ${entradas - saidas >= 0 ? 't-ink' : 't-red'}`}>{fmtBRL(entradas - saidas)}</div></div>
+              </div>
+              {itens.length === 0 ? <EmptyState icon={Calendar} title="Nada neste dia." /> : (
+                <div className="space-y-1.5" style={{ maxHeight: 360, overflowY: 'auto' }}>
+                  {itens.map(x => {
+                    const isE = x.tipo === 'entrada';
+                    const sb = statusBadge(x);
+                    return (
+                      <div key={x.id} className="fe-cat-item">
+                        <div className={`pill ${isE ? 'pill-green' : 'pill-red'}`} style={{ flexShrink: 0 }}>{isE ? <ArrowUpRight size={15} /> : <ArrowDownRight size={15} />}</div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium t-ink truncate">{x.descricao}</div>
+                          <div className="text-xs t-soft">{x.categoria} · <Badge tone={sb.tone}>{sb.label}</Badge></div>
+                        </div>
+                        <span className={`mono text-sm font-semibold ${isE ? 't-green' : 't-red'}`} style={{ flexShrink: 0 }}>{isE ? '+ ' : '− '}{fmtBRL(x.valor)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* Lançamentos de uma categoria (ao clicar na rosca) */}
+      <Modal open={!!catSel} onClose={() => setCatSel(null)} title={catSel ? `Despesas · ${catSel}` : ''} wide>
+        {catSel && (() => {
+          const { start, end } = periodRange(periodo);
+          const itens = finEmpresa
+            .filter(x => x.tipo === 'saida' && x.categoria === catSel && effStatus(x) !== 'cancelado' && inRange(x.data, start, end))
+            .sort((a, b) => (b.data || '').localeCompare(a.data || ''));
+          const total = itens.reduce((a, b) => a + b.valor, 0);
+          return (
+            <div className="space-y-3" key={catSel}>
+              <div className="flex items-center justify-between">
+                <span className="text-sm t-soft">{itens.length} lançamento(s)</span>
+                <span className="mono font-bold t-red">{fmtBRL(total)}</span>
+              </div>
+              <div className="space-y-1.5" style={{ maxHeight: 380, overflowY: 'auto' }}>
+                {itens.map(x => (
+                  <div key={x.id} className="fe-cat-item">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium t-ink truncate">{x.descricao}</div>
+                      <div className="text-xs t-soft">{fmtDate(x.data)} · {effStatus(x)}</div>
+                    </div>
+                    <span className="mono text-sm font-semibold t-red" style={{ flexShrink: 0 }}>− {fmtBRL(x.valor)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
+
+      {/* Auditoria do caixa */}
+      <Modal open={auditOpen} onClose={() => setAuditOpen(false)} title="Auditoria do caixa" wide>
+        <div className="space-y-4">
+          <p className="text-sm t-soft">
+            Conferência completa do seu saldo: de onde vem cada real e o que pode estar distorcendo os números.
+          </p>
+
+          {/* Saldos separados */}
+          <div className="aud-saldos">
+            <div className="aud-saldo">
+              <div className="fis-metric-l">Saldo bancário</div>
+              <div className={`aud-saldo-v mono ${auditoria.saldoBancario >= 0 ? '' : 't-red'}`}>{fmtBRL(auditoria.saldoBancario)}</div>
+              <div className="text-xs t-mute">Só o que passou pela conta</div>
+            </div>
+            <div className="aud-saldo">
+              <div className="fis-metric-l">Fora do banco</div>
+              <div className={`aud-saldo-v mono ${auditoria.saldoForaDoBanco >= 0 ? 't-green' : 't-red'}`}>{fmtBRL(auditoria.saldoForaDoBanco)}</div>
+              <div className="text-xs t-mute">Dinheiro, manual, recorrências</div>
+            </div>
+            <div className="aud-saldo destaque">
+              <div className="fis-metric-l">Saldo total</div>
+              <div className={`aud-saldo-v mono ${auditoria.saldoTotal >= 0 ? '' : 't-red'}`}>{fmtBRL(auditoria.saldoTotal)}</div>
+              <div className="text-xs t-mute">{auditoria.totalPagos} lançamentos pagos</div>
+            </div>
+          </div>
+
+          {/* Composição por origem */}
+          <div>
+            <div className="label mb-2">De onde vem cada real</div>
+            <div className="space-y-1.5">
+              {Object.entries(auditoria.porOrigem)
+                .filter(([, v]) => v.qtd > 0)
+                .sort((a, b) => Math.abs(b[1].saldo) - Math.abs(a[1].saldo))
+                .map(([k, v]) => (
+                  <div key={k} className="aud-origem">
+                    <span className="aud-origem-dot" style={{ background: ORIGEM_INFO[k].cor }} />
+                    <span className="flex-1 min-w-0 text-sm t-ink">{ORIGEM_INFO[k].label}</span>
+                    <span className="text-xs t-mute">{v.qtd} lanç.</span>
+                    <span className="text-xs t-green mono">+{fmtBRL(v.entradas)}</span>
+                    <span className="text-xs t-red mono">−{fmtBRL(v.saidas)}</span>
+                    <span className={`text-sm mono font-semibold ${v.saldo >= 0 ? 't-ink' : 't-red'}`} style={{ minWidth: 90, textAlign: 'right' }}>
+                      {fmtBRL(v.saldo)}
+                    </span>
+                  </div>
+                ))}
+            </div>
+          </div>
+
+          {/* Problemas encontrados */}
+          {!auditoria.temProblema ? (
+            <div className="fis-proj-box ok">
+              <Check size={16} style={{ flexShrink: 0, color: '#16A34A' }} />
+              <span>Nenhum problema encontrado. Os números batem.</span>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {auditoria.fitidRepetido.length > 0 && (
+                <AuditProblema
+                  titulo={`${auditoria.fitidRepetido.length} transação(ões) do extrato importada(s) duas vezes`}
+                  desc="A mesma transação do banco entrou mais de uma vez — provavelmente o extrato foi importado 2×. Isso infla o saldo."
+                  itens={auditoria.fitidRepetido.map(g => g[0])}
+                  acao="Remover duplicatas"
+                  onAcao={() => {
+                    const remover = new Set();
+                    auditoria.fitidRepetido.forEach(g => g.slice(1).forEach(x => remover.add(x.id)));
+                    setData(d => ({ ...d, finEmpresa: d.finEmpresa.filter(x => !remover.has(x.id)) }));
+                    setToast(`${remover.size} duplicata(s) removida(s)`);
+                  }}
+                />
+              )}
+              {auditoria.duplicatas.length > 0 && (
+                <AuditProblema
+                  titulo={`${auditoria.duplicatas.length} possível(is) duplicata(s)`}
+                  desc="Lançamentos com a mesma data, valor e tipo. Pode ser coincidência (dois fretes iguais no mesmo dia) — confira antes de excluir."
+                  itens={auditoria.duplicatas.map(g => g[0])}
+                  aviso
+                />
+              )}
+              {auditoria.linhasSaldo.length > 0 && (
+                <AuditProblema
+                  titulo={`${auditoria.linhasSaldo.length} linha(s) de saldo do banco`}
+                  desc='Linhas como "SALDO TOTAL DISPONÍVEL" não são transações — distorcem o caixa.'
+                  itens={auditoria.linhasSaldo}
+                  acao="Remover linhas de saldo"
+                  onAcao={removerLinhasSaldo}
+                />
+              )}
+              {auditoria.invalidos.length > 0 && (
+                <AuditProblema
+                  titulo={`${auditoria.invalidos.length} lançamento(s) sem data ou valor`}
+                  desc="Registros incompletos que podem estar sendo ignorados nos cálculos."
+                  itens={auditoria.invalidos}
+                  aviso
+                />
+              )}
+            </div>
+          )}
+
+          {/* Baixas automáticas — o suspeito principal */}
+          {auditoria.baixasAutomaticas.length > 0 && (
+            <div className="aud-bloco" style={{ borderColor: '#FDE68A', background: '#FFFBEB' }}>
+              <div className="flex items-start gap-2">
+                <CircleAlert size={16} style={{ color: '#D97706', flexShrink: 0, marginTop: 2 }} />
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold" style={{ color: '#78350F' }}>
+                    {auditoria.baixasAutomaticas.length} lançamento(s) receberam baixa automática na importação
+                  </div>
+                  <p className="text-xs mt-1" style={{ color: '#92400E' }}>
+                    Estes já existiam no sistema e o extrato deu baixa neles (em vez de duplicar).
+                    <b> Se algum casou errado</b>, uma transação do extrato pode não ter sido criada — confira se os valores batem com o banco.
+                  </p>
+                  <div className="space-y-1 mt-2">
+                    {auditoria.baixasAutomaticas.slice(0, 8).map(x => (
+                      <div key={x.id} className="flex items-center justify-between gap-2 text-xs">
+                        <span className="truncate" style={{ color: '#78350F' }}>{fmtDate(x.data)} · {x.descricao}</span>
+                        <span className="mono font-semibold" style={{ color: '#78350F', flexShrink: 0 }}>{fmtBRL(x.valor)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </Modal>
+
+      {/* Painel de detalhes da Saúde Financeira */}
+      <Modal open={saudeOpen} onClose={() => setSaudeOpen(false)} title="Saúde financeira" wide>
+        <div className="space-y-4">
+          <div className="fe-saude-detail-top">
+            <div className="fe-saude-ring fe-saude-ring-lg" style={{ '--pct': `${saude.nota}%`, '--cor': saude.cor }}>
+              <div className="fe-saude-nota"><span className="mono">{saude.nota}</span><small>/100</small></div>
+            </div>
+            <div>
+              <div className="text-lg font-bold" style={{ color: saude.cor }}>{saude.nivel}</div>
+              <p className="text-sm t-soft mt-1" style={{ maxWidth: 320 }}>Nota calculada a partir de caixa, margem, contas em aberto, vencimentos e recorrência.</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="metric-box"><div className="text-xs t-soft">Margem</div><div className="text-sm font-semibold t-ink mono">{m.margem.toFixed(1)}%</div></div>
+            <div className="metric-box"><div className="text-xs t-soft">Lucro</div><div className={`text-sm font-semibold mono ${m.lucro >= 0 ? 't-green' : 't-red'}`}>{fmtBRL(m.lucro)}</div></div>
+            <div className="metric-box"><div className="text-xs t-soft">Caixa</div><div className={`text-sm font-semibold mono ${resumo.saldo >= 0 ? 't-ink' : 't-red'}`}>{fmtBRL(resumo.saldo)}</div></div>
+            <div className="metric-box"><div className="text-xs t-soft">Vencidas</div><div className={`text-sm font-semibold mono ${saude.vencidas > 0 ? 't-red' : 't-ink'}`}>{saude.vencidas}</div></div>
+          </div>
+
+          <div>
+            <div className="label mb-2">O que está pesando na nota</div>
+            <div className="space-y-1.5">
+              {saude.fatores.map((f, i) => (
+                <div key={i} className="fe-fator">
+                  <span className={`fe-fator-ico ${f.ok ? 'ok' : 'bad'}`}>{f.ok ? <Check size={12} /> : <X size={12} />}</span>
+                  <span className="text-sm t-ink">{f.txt}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="fe-sugestoes">
+            <div className="label mb-2" style={{ color: 'var(--color-primary)' }}>Sugestões</div>
+            <ul className="space-y-1.5">
+              {saude.sugestoes.map((s, i) => (
+                <li key={i} className="text-sm t-soft flex gap-2"><Lightbulb size={14} style={{ color: '#D97706', flexShrink: 0, marginTop: 2 }} /> {s}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </Modal>
 
       <Modal open={!!delTarget} onClose={() => setDelTarget(null)} title="Excluir lançamento">
         {delTarget && (
@@ -864,6 +2672,22 @@ function LancamentoForm({ item, veiculos, linhas, contratos, onSave, onCancel })
   const submitForm = () => { onSave({ ...f, valor: parseFloat(f.valor) || 0 }); };
   return (
     <div className="space-y-4">
+      <div className="scan-strip">
+        <ScanButton
+          label="Escanear recibo por foto"
+          size="md"
+          onExtracted={(text) => {
+            const dates = extractDates(text);
+            const vals = extractValues(text);
+            const patch = {};
+            if (dates.length > 0) patch.data = dates[dates.length - 1];
+            if (vals.length > 0) patch.valor = String(vals[0]);
+            if (Object.keys(patch).length === 0) alert('Não achei data nem valor na foto. Tenta uma foto mais nítida.');
+            else setF(prev => ({ ...prev, ...patch }));
+          }}
+        />
+        <span className="text-xs t-mute">Preenche data e valor a partir de recibo</span>
+      </div>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Tipo"><select className="inp" value={f.tipo} onChange={(e) => setF({ ...f, tipo: e.target.value, categoria: CAT_FIN_EMPRESA[e.target.value][0] })}><option value="entrada">Entrada</option><option value="saida">Saída</option></select></Field>
         <Field label="Data"><input type="date" className="inp" value={f.data} onChange={(e) => setF({ ...f, data: e.target.value })} required /></Field>
@@ -905,6 +2729,7 @@ const CAT_FIN_PESSOAL = {
   saida: ['Moradia', 'Alimentação', 'Transporte', 'Cartão de Crédito', 'Empréstimos', 'Dívidas', 'Lazer', 'Saúde', 'Educação', 'Outros'],
 };
 const CAT_DIVIDA = ['Cartão de Crédito', 'Empréstimos', 'Dívidas'];
+const CAT_DONUT_CORES = ['#2563EB', '#16A34A', '#F59E0B', '#9AA1AC', '#7C3AED', '#EC4899'];
 const CAT_COLORS_PESSOAL = {
   'Moradia': '#1D4ED8', 'Alimentação': '#087F5B', 'Transporte': '#D97706', 'Cartão de Crédito': '#B4234B',
   'Empréstimos': '#7C3AED', 'Dívidas': '#BE123C', 'Lazer': '#0891B2', 'Saúde': '#DB2777', 'Educação': '#4F46E5', 'Outros': '#6B7280',
@@ -1655,14 +3480,132 @@ function Combustivel({ data, setData }) {
     return Array.from(map.values());
   }, [combustivel]);
 
-  const handleSave = (item) => { const msg = editing ? 'Abastecimento atualizado com sucesso' : 'Abastecimento salvo com sucesso'; setData(d => ({ ...d, combustivel: editing ? d.combustivel.map(x => x.id === editing.id ? { ...item, id: editing.id } : x) : [...d.combustivel, { ...item, id: uid() }] })); setOpenForm(false); setEditing(null); setToast(msg); };
+  const handleSave = (item) => {
+    const msg = editing ? 'Abastecimento atualizado com sucesso' : 'Abastecimento salvo com sucesso';
+    // Se os litros foram preenchidos, o registro deixa de ser "incompleto"
+    const completo = (Number(item.litros) || 0) > 0;
+    const final = { ...item, incompleto: completo ? false : (editing?.incompleto || false) };
+    if (item.posto) salvarPosto(item.posto); // o posto entra na lista da empresa
+    setData(d => ({ ...d, combustivel: editing ? d.combustivel.map(x => x.id === editing.id ? { ...final, id: editing.id } : x) : [...d.combustivel, { ...final, id: uid() }] }));
+    setOpenForm(false); setEditing(null); setToast(msg);
+  };
   const [toast, setToast] = useToast();
   const [delTarget, setDelTarget] = useState(null);
   const handleDelete = (id) => { const item = combustivel.find(c => c.id === id); if (item) setDelTarget(item); };
   const confirmDelete = () => { if (delTarget) { setData(d => ({ ...d, combustivel: d.combustivel.filter(c => c.id !== delTarget.id) })); setToast('Abastecimento excluído com sucesso'); setDelTarget(null); } };
 
+  const incompletos = useMemo(() => (combustivel || []).filter(c => c.incompleto), [combustivel]);
+
+  // Lista de postos SALVA na empresa (config.postosSalvos).
+  // Nasce com os padrões, aprende com os abastecimentos e com o que vem do extrato.
+  const postosSalvos = useMemo(() => {
+    const salvos = data.config?.postosSalvos || [];
+    const usados = (combustivel || []).map(c => c.posto).filter(Boolean);
+    const todos = [...salvos, ...usados, ...POSTOS_SUGERIDOS];
+    // remove duplicados ignorando maiúsculas/acentos
+    const vistos = new Map();
+    todos.forEach(p => {
+      const k = p.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+      if (k && !vistos.has(k)) vistos.set(k, p);
+    });
+    return [...vistos.values()].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [data.config?.postosSalvos, combustivel]);
+
+  // Salva um posto novo na lista da empresa (fica pra sempre)
+  const salvarPosto = (nome) => {
+    const limpo = String(nome || '').trim();
+    if (!limpo) return;
+    setData(d => {
+      const atuais = d.config?.postosSalvos || [];
+      const jaTem = atuais.some(p => p.toLowerCase() === limpo.toLowerCase());
+      if (jaTem) return d;
+      return { ...d, config: { ...(d.config || {}), postosSalvos: [...atuais, limpo] } };
+    });
+  };
+
+  // Despesas de combustível que estão no Financeiro mas nunca viraram
+  // registro aqui (foram importadas/lançadas antes desta integração existir).
+  const semRegistro = useMemo(() => {
+    const jaTem = new Set((combustivel || []).map(c => c.id));
+    return (data.finEmpresa || []).filter(x =>
+      x.tipo === 'saida' &&
+      isAbastecimento(x.descricao, x.categoria) &&
+      !x.abastecimentoId &&
+      !jaTem.has(x.abastecimentoId)
+    );
+  }, [data.finEmpresa, combustivel]);
+
+  const importarDoFinanceiro = () => {
+    const qtd = semRegistro.length;
+    setData(d => {
+      const novos = [];
+      const postosNovos = [];
+      const fin = (d.finEmpresa || []).map(x => {
+        if (!semRegistro.some(s => s.id === x.id)) return x;
+        const novoId = uid();
+        const posto = extrairPosto(x.descricao);
+        if (posto) postosNovos.push(posto);
+        novos.push({
+          id: novoId,
+          data: x.data,
+          posto,
+          valor: x.valor,
+          litros: 0, valorLitro: 0, tipo: 'Diesel',
+          veiculoId: '', motoristaId: '', linhaId: '', kmVeiculo: 0,
+          incompleto: true,
+          obs: 'Vinculado a lançamento do Financeiro',
+        });
+        return { ...x, abastecimentoId: novoId, categoria: 'Combustível' };
+      });
+
+      // Os postos reconhecidos no extrato entram na lista salva da empresa
+      const atuais = d.config?.postosSalvos || [];
+      const merged = [...atuais];
+      postosNovos.forEach(p => {
+        if (p && !merged.some(m => m.toLowerCase() === p.toLowerCase())) merged.push(p);
+      });
+
+      return {
+        ...d,
+        finEmpresa: fin,
+        combustivel: [...(d.combustivel || []), ...novos],
+        config: { ...(d.config || {}), postosSalvos: merged },
+      };
+    });
+    setToast(`${qtd} abastecimento(s) trazido(s) — postos salvos na lista`);
+  };
+
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {semRegistro.length > 0 && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#EFF6FF,#DBEAFE)', borderColor: '#93C5FD' }}>
+          <div className="conc-banner-ico" style={{ background: 'var(--color-primary)' }}><Fuel size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">
+              <b>{semRegistro.length}</b> {semRegistro.length === 1 ? 'gasto com combustível' : 'gastos com combustível'} no Financeiro fora deste módulo
+            </div>
+            <div className="conc-banner-sub" style={{ color: '#1E3A8A' }}>
+              Total de {fmtBRL(semRegistro.reduce((a, b) => a + b.valor, 0))}. Traga para cá e veja o histórico completo de abastecimento.
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={importarDoFinanceiro} style={{ flexShrink: 0 }}>
+            <Check size={14} /> Trazer {semRegistro.length}
+          </button>
+        </div>
+      )}
+      {incompletos.length > 0 && (
+        <div className="conc-banner" style={{ background: 'linear-gradient(135deg,#FFFBEB,#FEF3C7)', borderColor: '#FDE68A' }}>
+          <div className="conc-banner-ico" style={{ background: '#D97706' }}><Fuel size={20} /></div>
+          <div className="flex-1 min-w-0">
+            <div className="conc-banner-title">
+              <b>{incompletos.length}</b> {incompletos.length === 1 ? 'abastecimento importado' : 'abastecimentos importados'} do extrato precisam ser completados
+            </div>
+            <div className="conc-banner-sub" style={{ color: '#92400E' }}>
+              Falta informar litros, veículo e quilometragem — sem isso o consumo (km/L) não é calculado. Clique no lápis para completar.
+            </div>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
         <div className="card card-hover p-4 sm:p-5" style={{ display: 'flex', flexDirection: 'column' }}>
           <div className="flex items-start justify-between gap-2">
@@ -1789,7 +3732,13 @@ function Combustivel({ data, setData }) {
       </div>
 
       <Modal open={openForm} onClose={() => { setOpenForm(false); setEditing(null); }} title={editing ? 'Editar abastecimento' : 'Novo abastecimento'} wide>
-        <AbastecimentoForm item={editing} veiculos={veiculos} linhas={linhas} motoristas={motoristas} onSave={handleSave} onCancel={() => { setOpenForm(false); setEditing(null); }} />
+        <AbastecimentoForm
+          item={editing} veiculos={veiculos} linhas={linhas} motoristas={motoristas}
+          postosConhecidos={postosSalvos}
+          onNovoPosto={salvarPosto}
+          onSave={handleSave}
+          onCancel={() => { setOpenForm(false); setEditing(null); }}
+        />
       </Modal>
       <ConfirmModal item={delTarget} title="Excluir abastecimento" message="Tem certeza que deseja excluir este abastecimento?" onCancel={() => setDelTarget(null)} onConfirm={confirmDelete} />
       <Toast msg={toast} />
@@ -1797,34 +3746,273 @@ function Combustivel({ data, setData }) {
   );
 }
 
-function AbastecimentoForm({ item, veiculos, linhas, motoristas, onSave, onCancel }) {
+// Postos mais comuns em SP (sugestões iniciais). A empresa vai criando os dela.
+const POSTOS_SUGERIDOS = [
+  'Posto Ipiranga', 'Posto Shell', 'Posto Petrobras (BR)', 'Posto Ale',
+  'Posto Texaco', 'Posto Raízen', 'Posto Rodoil', 'Posto Charrua',
+  'Auto Posto', 'Posto da Rodovia',
+];
+
+// Seletor de posto: dropdown com busca + botão de adicionar novo.
+// (Substitui o datalist, que quase não aparece no celular.)
+function PostoSelect({ value, onChange, postos = [], onNovoPosto }) {
+  const [aberto, setAberto] = useState(false);
+  const [busca, setBusca] = useState('');
+  const [criando, setCriando] = useState(false);
+  const [novo, setNovo] = useState('');
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const fora = (e) => { if (ref.current && !ref.current.contains(e.target)) { setAberto(false); setCriando(false); } };
+    document.addEventListener('mousedown', fora);
+    return () => document.removeEventListener('mousedown', fora);
+  }, []);
+
+  const lista = useMemo(() => {
+    const q = busca.trim().toLowerCase();
+    return postos.filter(p => !q || p.toLowerCase().includes(q));
+  }, [postos, busca]);
+
+  const escolher = (p) => { onChange(p); setAberto(false); setBusca(''); };
+  const salvarNovo = () => {
+    const nome = novo.trim();
+    if (!nome) return;
+    onNovoPosto?.(nome);
+    onChange(nome);
+    setNovo(''); setCriando(false); setAberto(false);
+  };
+
+  return (
+    <div className="posto-wrap" ref={ref}>
+      <button type="button" className="posto-btn" onClick={() => setAberto(v => !v)}>
+        <span className={value ? 'posto-val' : 'posto-ph'}>{value || 'Selecione o posto'}</span>
+        <ChevronDown size={16} className={`posto-chev ${aberto ? 'up' : ''}`} />
+      </button>
+
+      {aberto && (
+        <div className="posto-menu">
+          <div className="posto-busca">
+            <Search size={14} className="t-mute" />
+            <input
+              autoFocus className="posto-busca-inp" placeholder="Buscar posto…"
+              value={busca} onChange={(e) => setBusca(e.target.value)}
+            />
+          </div>
+
+          <div className="posto-lista">
+            {lista.length === 0 && (
+              <div className="posto-vazio">Nenhum posto encontrado</div>
+            )}
+            {lista.map(p => (
+              <button type="button" key={p} className={`posto-item ${value === p ? 'on' : ''}`} onClick={() => escolher(p)}>
+                <Fuel size={13} className="t-mute" />
+                <span className="truncate">{p}</span>
+                {value === p && <Check size={13} style={{ marginLeft: 'auto', color: 'var(--color-primary)' }} />}
+              </button>
+            ))}
+          </div>
+
+          {criando ? (
+            <div className="posto-novo">
+              <input
+                autoFocus className="inp" placeholder="Nome do novo posto"
+                value={novo} onChange={(e) => setNovo(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); salvarNovo(); } }}
+              />
+              <button type="button" className="btn btn-primary btn-sm" onClick={salvarNovo}>Salvar</button>
+            </div>
+          ) : (
+            <button type="button" className="posto-add" onClick={() => setCriando(true)}>
+              <Plus size={14} /> Adicionar novo posto
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AbastecimentoForm({ item, veiculos, linhas, motoristas, postosConhecidos = [], onNovoPosto, onSave, onCancel }) {
   const [f, setF] = useState({
-    data: item?.data || new Date().toISOString().slice(0, 10), veiculoId: item?.veiculoId || veiculos[0]?.id || '',
-    posto: item?.posto || '', tipo: item?.tipo || 'Gasolina', litros: item?.litros || '', valorLitro: item?.valorLitro || '',
-    kmVeiculo: item?.kmVeiculo || '', linhaId: item?.linhaId || '', motoristaId: item?.motoristaId || '',
+    data: item?.data || new Date().toISOString().slice(0, 10),
+    veiculoId: item?.veiculoId || veiculos[0]?.id || '',
+    posto: item?.posto || '',
+    tipo: item?.tipo || 'Diesel',
+    valor: item?.valor || '',        // AGORA é o campo principal
+    litros: item?.litros || '',
+    valorLitro: item?.valorLitro || '',
+    kmVeiculo: item?.kmVeiculo || '',
+    linhaId: item?.linhaId || '',
+    motoristaId: item?.motoristaId || '',
   });
-  const valorTotal = (+f.litros || 0) * (+f.valorLitro || 0);
-  const submitForm = () => { onSave({ ...f, litros: +f.litros, valorLitro: +f.valorLitro, valor: valorTotal, kmVeiculo: +f.kmVeiculo }); };
+  const [scanMsg, setScanMsg] = useState('');
+
+  // Deriva o terceiro campo quando dois estão preenchidos.
+  // Ex.: digitou valor + valor/litro → calcula os litros sozinho.
+  const setCampo = (campo, valorNovo) => {
+    setF(prev => {
+      const n = { ...prev, [campo]: valorNovo };
+      const v = parseFloat(n.valor) || 0;
+      const l = parseFloat(n.litros) || 0;
+      const vl = parseFloat(n.valorLitro) || 0;
+
+      if (campo === 'valor' || campo === 'valorLitro') {
+        // valor e preço/litro conhecidos → litros
+        if (v > 0 && vl > 0) n.litros = +(v / vl).toFixed(2);
+      }
+      if (campo === 'litros') {
+        // litros + preço/litro → valor ; senão litros + valor → preço/litro
+        if (l > 0 && vl > 0) n.valor = +(l * vl).toFixed(2);
+        else if (l > 0 && v > 0) n.valorLitro = +(v / l).toFixed(3);
+      }
+      if (campo === 'valor' && l > 0 && !vl) {
+        n.valorLitro = +(v / l).toFixed(3);
+      }
+      return n;
+    });
+  };
+
+  // OCR do comprovante do posto
+  const aplicarScan = (texto) => {
+    if (!texto) return;
+    const achados = [];
+    const T = texto.toUpperCase();
+
+    // Valor total: pega o MAIOR valor monetário do cupom (normalmente é o total)
+    const valores = extractValues(texto);
+    if (valores.length > 0) {
+      const maior = Math.max(...valores);
+      if (maior > 0) { setCampo('valor', maior); achados.push(`valor ${fmtBRL(maior)}`); }
+    }
+
+    // Data
+    const datas = extractDates(texto);
+    if (datas.length > 0) { setF(prev => ({ ...prev, data: datas[0] })); achados.push('data'); }
+
+    // Litros: procura padrões tipo "35,420 L" ou "LITROS 35,42"
+    const mLitros = texto.match(/(\d{1,3}[.,]\d{1,3})\s*(?:L\b|LT\b|LITROS?)/i)
+                 || texto.match(/(?:LITROS?|QTDE?)[:\s]+(\d{1,3}[.,]\d{1,3})/i);
+    if (mLitros) {
+      const l = parseFloat(mLitros[1].replace(',', '.'));
+      if (l > 0 && l < 999) { setCampo('litros', l); achados.push(`${l} litros`); }
+    }
+
+    // Tipo de combustível
+    const tipos = { DIESEL: 'Diesel', 'S-10': 'Diesel', S10: 'Diesel', GASOLINA: 'Gasolina', ETANOL: 'Etanol', ALCOOL: 'Etanol', GNV: 'GNV' };
+    for (const [k, v] of Object.entries(tipos)) {
+      if (T.includes(k)) { setF(prev => ({ ...prev, tipo: v })); achados.push(v); break; }
+    }
+
+    // Posto: primeira linha significativa do cupom costuma ser o nome
+    const linhasTxt = texto.split('\n').map(s => s.trim()).filter(s => s.length > 4);
+    const nomePosto = linhasTxt.find(l => /POSTO|AUTO|COMBUST|IPIRANGA|SHELL|PETROBRAS|RAIZEN|ALE\b/i.test(l));
+    if (nomePosto) {
+      const limpo = nomePosto.replace(/[^A-Za-zÀ-ú0-9 ]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+      if (limpo) { setF(prev => ({ ...prev, posto: limpo })); achados.push('posto'); }
+    }
+
+    setScanMsg(achados.length > 0
+      ? `Encontrei: ${achados.join(' · ')}. Confira antes de salvar.`
+      : 'Não consegui ler o comprovante. Preencha manualmente.');
+  };
+
+  const valorNum = parseFloat(f.valor) || 0;
+  const litrosNum = parseFloat(f.litros) || 0;
+  const podeSalvar = valorNum > 0;
+
+  const submitForm = () => {
+    onSave({
+      ...f,
+      valor: valorNum,
+      litros: litrosNum,
+      valorLitro: parseFloat(f.valorLitro) || 0,
+      kmVeiculo: +f.kmVeiculo || 0,
+    });
+  };
+
+  // Lista de postos já vem pronta e ordenada do módulo (salvos + usados + padrões)
+  const listaPostos = postosConhecidos;
+
   return (
     <div className="space-y-4">
+      {/* Scanner do comprovante */}
+      <div className="scan-box">
+        <div className="flex items-center gap-2 flex-wrap">
+          <ScanButton label="Escanear comprovante do posto" onExtracted={aplicarScan} />
+          <span className="text-xs t-mute">Tire uma foto do cupom fiscal — preenchemos os campos pra você.</span>
+        </div>
+        {scanMsg && <p className="text-xs mt-2" style={{ color: 'var(--color-primary)' }}>{scanMsg}</p>}
+      </div>
+
       <div className="grid grid-cols-2 gap-3">
         <Field label="Data"><input type="date" className="inp" value={f.data} onChange={(e) => setF({ ...f, data: e.target.value })} required /></Field>
-        <Field label="Veículo"><select className="inp" value={f.veiculoId} onChange={(e) => setF({ ...f, veiculoId: e.target.value })} required>{veiculos.map(v => <option key={v.id} value={v.id}>{v.placa}</option>)}</select></Field>
+        <Field label="Veículo">
+          <select className="inp" value={f.veiculoId} onChange={(e) => setF({ ...f, veiculoId: e.target.value })} required>
+            <option value="">Selecione…</option>
+            {veiculos.map(v => <option key={v.id} value={v.id}>{v.placa}</option>)}
+          </select>
+        </Field>
         <Field label="Motorista"><MotoristaSelect motoristas={motoristas} value={f.motoristaId} onChange={(val) => setF({ ...f, motoristaId: val })} /></Field>
-        <Field label="Posto"><input className="inp" value={f.posto} onChange={(e) => setF({ ...f, posto: e.target.value })} /></Field>
-        <Field label="Tipo"><select className="inp" value={f.tipo} onChange={(e) => setF({ ...f, tipo: e.target.value })}>{['Gasolina', 'Etanol', 'Diesel', 'GNV'].map(t => <option key={t}>{t}</option>)}</select></Field>
-        <Field label="Litros"><input type="number" step="0.01" className="inp" value={f.litros} onChange={(e) => setF({ ...f, litros: e.target.value })} required /></Field>
-        <Field label="Valor por litro"><input type="number" step="0.001" className="inp" value={f.valorLitro} onChange={(e) => setF({ ...f, valorLitro: e.target.value })} required /></Field>
-        <Field label="KM do veículo"><input type="number" className="inp" value={f.kmVeiculo} onChange={(e) => setF({ ...f, kmVeiculo: e.target.value })} /></Field>
-        <Field label="Linha / Frete"><select className="inp" value={f.linhaId} onChange={(e) => setF({ ...f, linhaId: e.target.value })}><option value="">—</option>{linhas.map(l => <option key={l.id} value={l.id}>{l.nome}</option>)}</select></Field>
-        <div className="col-span-2 metric-box flex items-center justify-between gap-3">
-          <span className="label">Total</span>
-          <span className="display t-ink total-val">{fmtBRL(valorTotal)}</span>
-        </div>
+
+        {/* Posto com dropdown + adicionar novo */}
+        <Field label="Posto">
+          <PostoSelect
+            value={f.posto}
+            onChange={(p) => setF({ ...f, posto: p })}
+            postos={listaPostos}
+            onNovoPosto={onNovoPosto}
+          />
+        </Field>
+
+        {/* VALOR é o campo principal agora */}
+        <Field label="Valor pago (R$) *">
+          <input type="number" step="0.01" min="0" className="inp mono" value={f.valor}
+            onChange={(e) => setCampo('valor', e.target.value)} placeholder="Ex.: 100,00" required />
+        </Field>
+        <Field label="Tipo">
+          <select className="inp" value={f.tipo} onChange={(e) => setF({ ...f, tipo: e.target.value })}>
+            {['Diesel', 'Diesel S-10', 'Gasolina', 'Etanol', 'GNV', 'Arla 32'].map(t => <option key={t}>{t}</option>)}
+          </select>
+        </Field>
+
+        <Field label="Valor por litro (opcional)">
+          <input type="number" step="0.001" min="0" className="inp mono" value={f.valorLitro}
+            onChange={(e) => setCampo('valorLitro', e.target.value)} placeholder="Ex.: 6,19" />
+        </Field>
+        <Field label="Litros (opcional)">
+          <input type="number" step="0.01" min="0" className="inp mono" value={f.litros}
+            onChange={(e) => setCampo('litros', e.target.value)} placeholder="calculado automático" />
+        </Field>
+
+        <Field label="KM do veículo"><input type="number" className="inp mono" value={f.kmVeiculo} onChange={(e) => setF({ ...f, kmVeiculo: e.target.value })} placeholder="odômetro" /></Field>
+        <Field label="Linha / Frete">
+          <select className="inp" value={f.linhaId} onChange={(e) => setF({ ...f, linhaId: e.target.value })}>
+            <option value="">—</option>
+            {linhas.map(l => <option key={l.id} value={l.id}>{l.nome}</option>)}
+          </select>
+        </Field>
       </div>
+
+      <div className="abast-dica">
+        <Lightbulb size={14} style={{ color: '#D97706', flexShrink: 0, marginTop: 1 }} />
+        <p className="text-xs t-soft">
+          Basta o <b>valor pago</b>. Se você souber também o preço por litro, os litros são calculados sozinhos —
+          e aí o sistema consegue medir o <b>consumo (km/L)</b> do veículo.
+        </p>
+      </div>
+
+      {litrosNum > 0 && valorNum > 0 && (
+        <div className="metric-box flex items-center justify-between gap-3">
+          <span className="label">Resumo</span>
+          <span className="text-sm t-ink mono">
+            {litrosNum.toFixed(2)} L × {fmtBRL(parseFloat(f.valorLitro) || 0)} = <b>{fmtBRL(valorNum)}</b>
+          </span>
+        </div>
+      )}
+
       <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 pt-2 form-foot">
         <button type="button" onClick={onCancel} className="btn btn-ghost">Cancelar</button>
-        <button type="button" onClick={submitForm} className="btn btn-primary">Salvar</button>
+        <button type="button" onClick={submitForm} className="btn btn-primary" disabled={!podeSalvar}>Salvar</button>
       </div>
     </div>
   );
@@ -2081,7 +4269,7 @@ function groupByCat(arr) {
 
 function reportSeries(base, periodo) {
   const { start, end } = periodRange(periodo);
-  const byMonth = periodo === 'ano';
+  const byMonth = periodo === 'ano' || periodo === 'trimestre' || periodo === 'semestre';
   const buckets = new Map();
   const cursor = new Date(start); cursor.setHours(0, 0, 0, 0);
   if (byMonth) {
@@ -2177,10 +4365,139 @@ function Relatorios({ data }) {
 
   const catOptions = useMemo(() => [...new Set([...CAT_FIN_EMPRESA.entrada, ...CAT_FIN_EMPRESA.saida])], []);
 
+  // ---------- Exportar relatório em PDF ----------
+  const [gerandoPDF, setGerandoPDF] = useState(false);
+  const [pdfOpen, setPdfOpen] = useState(false);
+
+  const exportarPDF = async (periodoPDF) => {
+    setGerandoPDF(true);
+    setPdfOpen(false);
+    try {
+      const { start, end, prevStart, prevEnd } = periodRange(periodoPDF);
+      // recalcula com o período escolhido (usa exatamente as mesmas funções da tela)
+      const baseP = finEmpresa.filter(x => { const d = new Date(x.data); return d >= start && d <= end && matchFilters(x); });
+      const prevP = finEmpresa.filter(x => { const d = new Date(x.data); return d >= prevStart && d <= prevEnd && matchFilters(x); });
+      const sumT = (arr, t) => arr.filter(x => x.tipo === t).reduce((a, b) => a + b.valor, 0);
+      const receita = sumT(baseP, 'entrada'), custo = sumT(baseP, 'saida'), lucro = receita - custo;
+      const pRec = sumT(prevP, 'entrada'), pCus = sumT(prevP, 'saida');
+      const resumoP = {
+        receita, custo, lucro,
+        margem: receita ? lucro / receita * 100 : 0,
+        gRec: pctChange(receita, pRec),
+        gCus: pctChange(custo, pCus),
+        gLuc: pctChange(lucro, pRec - pCus),
+      };
+      const rankingP = linhas.map(l => {
+        const vinc = baseP.filter(x => x.linhaId === l.id);
+        const rec = vinc.filter(x => x.tipo === 'entrada').reduce((a, b) => a + b.valor, 0);
+        const cus = vinc.filter(x => x.tipo === 'saida').reduce((a, b) => a + b.valor, 0);
+        return { nome: l.nome, receita: rec, custo: cus, lucro: rec - cus, margem: rec ? (rec - cus) / rec * 100 : 0, count: vinc.length };
+      }).filter(r => r.count > 0).sort((a, b) => b.lucro - a.lucro);
+
+      const recCatP = groupByCat(baseP.filter(x => x.tipo === 'entrada'));
+      const cusCatP = groupByCat(baseP.filter(x => x.tipo === 'saida'));
+
+      // indicadores operacionais do período
+      const combP = (data.combustivel || []).filter(c => { const d = new Date(c.data); return d >= start && d <= end; });
+      const litros = combP.reduce((a, b) => a + (Number(b.litros) || 0), 0);
+      const gastoComb = combP.reduce((a, b) => a + (Number(b.valor) || 0), 0);
+      const mudP = (data.mudancas || []).filter(m => m.status === 'concluido' && (() => { const d = new Date(m.dataPrevista); return d >= start && d <= end; })());
+      const vencidas = finEmpresa.filter(x => effStatus(x) === 'vencido');
+
+      const extras = {};
+      extras['Lançamentos no período'] = String(baseP.length);
+      if (gastoComb > 0) extras['Gasto com combustível'] = fmtBRL(gastoComb);
+      if (litros > 0) extras['Litros abastecidos'] = `${litros.toFixed(1)} L`;
+      if (mudP.length > 0) extras['Mudanças concluídas'] = `${mudP.length} (${fmtBRL(mudP.reduce((a, b) => a + (b.valorTotal || 0), 0))})`;
+      extras['Contas a receber em aberto'] = fmtBRL(finEmpresa.filter(x => x.tipo === 'entrada' && ['pendente', 'vencido'].includes(effStatus(x))).reduce((a, b) => a + b.valor, 0));
+      extras['Contas a pagar em aberto'] = fmtBRL(finEmpresa.filter(x => x.tipo === 'saida' && ['pendente', 'vencido'].includes(effStatus(x))).reduce((a, b) => a + b.valor, 0));
+      if (vencidas.length > 0) extras['Contas vencidas'] = `${vencidas.length} (${fmtBRL(vencidas.reduce((a, b) => a + b.valor, 0))})`;
+
+      // insights em texto
+      const insightsTxt = [];
+      const melhorP = rankingP[0];
+      const maisCaraP = [...rankingP].sort((a, b) => b.custo - a.custo)[0];
+      if (melhorP) insightsTxt.push(`${melhorP.nome} foi a operação mais lucrativa do período: ${fmtBRL(melhorP.lucro)} de lucro, com margem de ${melhorP.margem.toFixed(0)}%.`);
+      if (maisCaraP && maisCaraP.custo > 0) insightsTxt.push(`${maisCaraP.nome} concentrou o maior custo do período: ${fmtBRL(maisCaraP.custo)}.`);
+      const combCat = cusCatP.find(c => c.nome === 'Combustível')?.valor || 0;
+      if (custo > 0 && combCat > 0) insightsTxt.push(`Combustível representa ${(combCat / custo * 100).toFixed(0)}% de todos os custos do período.`);
+      if (cusCatP[0]) insightsTxt.push(`Maior categoria de despesa: ${cusCatP[0].nome}, somando ${fmtBRL(cusCatP[0].valor)}.`);
+      insightsTxt.push(`Receita ${resumoP.gRec >= 0 ? 'cresceu' : 'caiu'} ${Math.abs(resumoP.gRec).toFixed(0)}% em relação ao período anterior.`);
+      insightsTxt.push(
+        resumoP.margem >= 20 ? `Margem saudável de ${resumoP.margem.toFixed(1)}% — a operação está lucrativa.`
+        : resumoP.margem >= 0 ? `Margem de ${resumoP.margem.toFixed(1)}% — há espaço para reduzir custos ou reajustar preços.`
+        : `Atenção: a operação fechou o período no prejuízo (margem de ${resumoP.margem.toFixed(1)}%).`
+      );
+      if (vencidas.length > 0) insightsTxt.push(`Há ${vencidas.length} conta(s) vencida(s), totalizando ${fmtBRL(vencidas.reduce((a, b) => a + b.valor, 0))}. Regularize para melhorar o fluxo de caixa.`);
+
+      const cfg = data.config || {};
+      await gerarRelatorioPDF(
+        {
+          periodoLabel: PERIODO_LABEL[periodoPDF] || 'Período',
+          inicio: start, fim: end,
+          resumo: resumoP,
+          recCat: recCatP, cusCat: cusCatP,
+          ranking: rankingP,
+          extras, insights: insightsTxt,
+        },
+        {
+          nome: cfg.nomeEmpresa || 'Minha Empresa',
+          logoUrl: cfg.logoUrl || '',
+          cnpj: cfg.cnpj || '',
+          telefone: cfg.telefone || '',
+          cidade: cfg.cidade || '',
+          uf: cfg.uf || '',
+          corPrimaria: getPalette(cfg.paletteId || DEFAULT_PALETTE_ID).colors.primary,
+        }
+      );
+    } catch (e) {
+      console.error('[relatorio pdf]', e);
+      alert('Não consegui gerar o PDF. Tenta de novo.');
+    } finally {
+      setGerandoPDF(false);
+    }
+  };
+
   return (
     <div className="p-4 sm:p-7 space-y-5">
+      {/* Exportar relatório */}
+      <div className="rel-export">
+        <div className="min-w-0">
+          <h3 className="display h-card t-ink">Relatório executivo</h3>
+          <p className="text-sm t-soft">Gere um PDF completo com receitas, despesas, desempenho e análise do período.</p>
+        </div>
+        <button className="btn btn-primary" onClick={() => setPdfOpen(true)} disabled={gerandoPDF} style={{ flexShrink: 0 }}>
+          {gerandoPDF ? 'Gerando…' : <><FileSignature size={15} /> Gerar PDF</>}
+        </button>
+      </div>
+
+      {/* Modal: escolher o período do relatório */}
+      <Modal open={pdfOpen} onClose={() => setPdfOpen(false)} title="Gerar relatório em PDF">
+        <div className="space-y-3">
+          <p className="text-sm t-soft">Escolha o período que o relatório vai cobrir:</p>
+          <div className="rel-pdf-opts">
+            {[
+              { k: 'mes', label: 'Mensal', sub: 'Mês atual' },
+              { k: 'trimestre', label: 'Trimestral', sub: 'Últimos 3 meses' },
+              { k: 'semestre', label: 'Semestral', sub: 'Últimos 6 meses' },
+              { k: 'ano', label: 'Anual', sub: 'Ano corrente' },
+            ].map(o => (
+              <button key={o.k} className="rel-pdf-opt" onClick={() => exportarPDF(o.k)}>
+                <span className="rel-pdf-ico"><Calendar size={16} /></span>
+                <span className="min-w-0">
+                  <span className="rel-pdf-lbl">{o.label}</span>
+                  <span className="rel-pdf-sub">{o.sub}</span>
+                </span>
+                <ChevronRight size={15} className="t-mute" />
+              </button>
+            ))}
+          </div>
+          <p className="text-xs t-mute">O PDF sai com o logo e as cores da sua empresa.</p>
+        </div>
+      </Modal>
+
       {/* SEÇÃO 5 — Filtros */}
-      <div className="period-bar">{PERIODOS.map(p => <button key={p.k} onClick={() => setPeriodo(p.k)} className={`period-pill ${periodo === p.k ? 'on' : ''}`}>{p.label}</button>)}</div>
+      <div className="period-bar">{PERIODOS_REL.map(p => <button key={p.k} onClick={() => setPeriodo(p.k)} className={`period-pill ${periodo === p.k ? 'on' : ''}`}>{p.label}</button>)}</div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
         <select className="inp" value={fLinha} onChange={e => setFLinha(e.target.value)}><option value="todas">Todas as linhas</option>{linhas.map(l => <option key={l.id} value={l.id}>{l.nome}</option>)}</select>
         <select className="inp" value={fCategoria} onChange={e => setFCategoria(e.target.value)}><option value="todas">Todas categorias</option>{catOptions.map(c => <option key={c}>{c}</option>)}</select>
@@ -2283,7 +4600,7 @@ function Relatorios({ data }) {
               <Tooltip formatter={v => fmtBRL(v)} contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 11, padding: '6px 10px' }} wrapperStyle={{ zIndex: 30 }} />
               <Line type="monotone" dataKey="receita" name="Receita" stroke="#087F5B" strokeWidth={2} dot={false} />
               <Line type="monotone" dataKey="custo" name="Custo" stroke="#B4234B" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="lucro" name="Lucro" stroke="#0B1533" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="lucro" name="Lucro" stroke="var(--color-primary)" strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -2805,17 +5122,26 @@ function LeadForm({ item, onSave, onCancel }) {
 // MAIN APP
 // ============================================================
 function AppInner() {
-  const { user, company, logout, modulosPermitidos, isOwner } = useAuth();
+  const { user, company, logout, modulosPermitidos, isOwner, isGestor, papel } = useAuth();
   const [data, setData, loaded] = useFirestoreSync(company?.id);
   const [route, setRoute] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [logoutOpen, setLogoutOpen] = useState(false);
+  const openLogout = () => setLogoutOpen(true);
 
-  // Guard: if user hit a route they can't see (via memory of last route or direct URL), send to dashboard
+  // Aplica a paleta de cores da empresa assim que o config carrega (e quando muda).
   useEffect(() => {
-    if (isOwner || !modulosPermitidos) return;
+    applyPalette(data.config?.paletteId || DEFAULT_PALETTE_ID);
+  }, [data.config?.paletteId]);
+
+  // Guard: se caiu numa rota que não pode ver, volta pro dashboard
+  useEffect(() => {
+    // Financeiro Pessoal é exclusivo do dono
+    if (route === 'finPessoal' && !isOwner) { setRoute('dashboard'); return; }
+    if (isGestor || !modulosPermitidos) return;
     const allowed = new Set([...modulosPermitidos, 'dashboard', 'config']);
     if (!allowed.has(route)) setRoute('dashboard');
-  }, [route, modulosPermitidos, isOwner]);
+  }, [route, modulosPermitidos, isGestor, isOwner]);
 
   useEffect(() => {
     const link = document.createElement('link');
@@ -2838,6 +5164,8 @@ function AppInner() {
     crm: { t: 'CRM Comercial', s: 'Pipeline de leads e oportunidades' },
     wms: { t: 'Armazém (WMS)', s: 'Estoque, endereçamento e giro' },
     documentos: { t: 'Documentos', s: 'Organização e vencimentos' },
+    mudancas: { t: 'Mudanças', s: 'Cotações, orçamentos e serviços' },
+    fiscal: { t: 'Painel Fiscal', s: 'Situação tributária da empresa' },
     relatorios: { t: 'Relatórios', s: 'Análises detalhadas com filtros' },
     importacao: { t: 'Importação', s: 'OFX, boleto e CSV com conciliação' },
     config: { t: 'Configurações', s: 'Empresa, preços médios, categorias' },
@@ -2847,6 +5175,11 @@ function AppInner() {
   return (
     <div className="app-root">
       <style>{`
+        :root{
+          --color-primary:#0B1533; --color-primary-hover:#16224A; --color-secondary:#25376b;
+          --color-accent:#1D4ED8; --color-background:#F3F4F6; --color-surface:#FFFFFF;
+          --color-text:#0B1324; --color-text-muted:#6B7280; --color-primary-rgb:11,21,51;
+        }
         .app-root{ display:flex; min-height:100vh; background:#F3F4F6; font-family:'Geist',system-ui,-apple-system,sans-serif; color:#0B1324; }
         *{ -webkit-tap-highlight-color:transparent; box-sizing:border-box; }
 
@@ -2895,17 +5228,15 @@ function AppInner() {
 
         /* buttons */
         .btn{ display:inline-flex; align-items:center; justify-content:center; gap:6px; padding:11px 16px; border-radius:12px; font-size:14px; font-weight:500; transition:.15s; cursor:pointer; border:none; }
-        .btn-primary{ background:#0B1324; color:#fff; box-shadow:0 1px 2px rgba(11,19,36,.15); }
-        .btn-primary:hover{ background:#15233F; } .btn-primary:active{ transform:scale(.98); }
+        .btn-primary{ background:var(--color-primary); color:#fff; box-shadow:0 1px 2px rgba(var(--color-primary-rgb),.2); }
+        .btn-primary:hover{ background:var(--color-primary-hover); } .btn-primary:active{ transform:scale(.98); }
         .btn-ghost{ background:transparent; color:#0B1324; } .btn-ghost:hover{ background:#E5E7EB; }
 
         /* icon buttons */
         .ibtn{ display:inline-flex; padding:7px; border-radius:9px; transition:.15s; color:#6B7280; background:transparent; border:none; cursor:pointer; }
         .ibtn:hover{ background:#E5E7EB; color:#0B1324; }
         .ibtn-del:hover{ background:#FFF1F2; color:#B4234B; }
-        .row-actions{ opacity:.55; transition:.15s; }
-        .row:hover .row-actions{ opacity:1; }
-        @media(min-width:640px){ .row-actions{ opacity:0; } }
+        .row-actions{ opacity:1; transition:.15s; }
 
         /* inputs */
         .inp{ width:100%; padding:10px 12px; background:#fff; border:1px solid #D1D5DB; border-radius:12px; font-size:14px; color:#0B1324; transition:.15s; }
@@ -2922,7 +5253,7 @@ function AppInner() {
         .seg-btn.on{ background:#fff; color:#0B1324; box-shadow:0 1px 2px rgba(0,0,0,.06); }
 
         /* ===== SIDEBAR ===== */
-        .sidebar{ position:fixed; top:0; left:0; height:100vh; width:270px; background:#0B1533; z-index:50; display:flex; flex-direction:column; transform:translateX(-100%); transition:transform .28s cubic-bezier(.4,0,.2,1); box-shadow:2px 0 28px rgba(0,0,0,.28); }
+        .sidebar{ position:fixed; top:0; left:0; height:100vh; width:270px; background:var(--color-primary); z-index:50; display:flex; flex-direction:column; transform:translateX(-100%); transition:transform .28s cubic-bezier(.4,0,.2,1); box-shadow:2px 0 28px rgba(0,0,0,.28); }
         .sidebar.open{ transform:translateX(0); }
         .sb-overlay{ position:fixed; inset:0; z-index:40; background:rgba(0,0,0,.35); -webkit-backdrop-filter:blur(2px); backdrop-filter:blur(2px); }
         .sb-header{ padding:20px; border-bottom:1px solid rgba(255,255,255,.08); }
@@ -2930,13 +5261,13 @@ function AppInner() {
         .sb-logo{ width:38px; height:38px; border-radius:11px; background:rgba(255,255,255,.1); display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; overflow:hidden; }
         .sb-logo-emp{ background:#fff; padding:0; }
         .sb-logo-emp img{ width:100%; height:100%; object-fit:cover; }
-        .sb-logo-txt{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:14px; letter-spacing:-.01em; }
+        .sb-logo-txt{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,var(--color-primary),var(--color-secondary)); color:#fff; font-weight:700; font-size:14px; letter-spacing:-.01em; }
         .sb-name{ color:#fff; font-size:1.05rem; font-weight:600; line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
         .sb-sub{ color:#7C89A3; font-size:11px; letter-spacing:.03em; margin-top:2px; }
         .sb-nav{ flex:1; overflow-y:auto; padding:16px 12px; display:flex; flex-direction:column; gap:4px; }
         .sb-item{ display:flex; align-items:center; gap:12px; width:100%; padding:11px 12px; border-radius:11px; font-size:14px; color:#CBD5E1; transition:.15s; text-align:left; background:transparent; border:none; cursor:pointer; }
         .sb-item:hover{ background:rgba(255,255,255,.08); color:#fff; }
-        .sb-item.on{ background:#fff; color:#0B1324; font-weight:600; }
+        .sb-item.on{ background:#fff; color:var(--color-primary); font-weight:600; }
         .sb-foot{ padding:16px 20px; border-top:1px solid rgba(255,255,255,.08); color:#5B6781; font-size:11px; }
         @media(min-width:1024px){
           .sidebar{ position:sticky; transform:translateX(0); box-shadow:none; }
@@ -2951,15 +5282,332 @@ function AppInner() {
         .user-chip{ margin-left:auto; display:inline-flex; align-items:center; gap:10px; flex-shrink:0; background:#F4F6F8; border:1px solid #E5E7EB; border-radius:999px; padding:4px 5px 4px 5px; }
         .user-chip-avatar{ width:32px; height:32px; border-radius:999px; overflow:hidden; flex-shrink:0; background:#fff; border:1px solid #E5E7EB; display:flex; align-items:center; justify-content:center; }
         .user-chip-avatar img{ width:100%; height:100%; object-fit:cover; }
-        .user-chip-avatar span{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:12px; letter-spacing:-.01em; }
+        .user-chip-avatar span{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,var(--color-primary),var(--color-secondary)); color:#fff; font-weight:700; font-size:12px; letter-spacing:-.01em; }
         .user-chip-info{ display:flex; flex-direction:column; line-height:1.1; min-width:0; margin-left:2px; }
         .user-chip-emp{ font-size:10.5px; color:#6B7280; text-transform:uppercase; letter-spacing:.04em; font-weight:500; }
-        .user-chip-name{ font-size:12.5px; color:#0B1324; font-weight:600; max-width:140px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .user-chip-name{ font-size:12.5px; color:#0B1324; font-weight:600; max-width:180px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; }
+
+        /* Badge de papel (Dono / Sócio / Funcionário) */
+        .papel-badge{ display:inline-flex; align-items:center; padding:2px 8px; border-radius:99px; font-size:10.5px; font-weight:700; white-space:nowrap; }
+        .papel-badge-xs{ padding:1px 6px; font-size:9.5px; margin-left:6px; flex-shrink:0; }
+        .mb-papel{ margin-bottom:12px; }
         .user-chip-out{ width:28px; height:28px; border-radius:999px; background:#fff; border:1px solid #E5E7EB; color:#6B7280; display:inline-flex; align-items:center; justify-content:center; cursor:pointer; transition:color .15s, background .15s, border-color .15s; }
         .user-chip-out:hover{ color:#B4234B; border-color:#FBC8D2; background:#FFF5F7; }
         @media(max-width:520px){ .user-chip-info{ display:none; } .user-chip{ padding:4px; } }
         .cfg-logo-preview{ width:64px; height:64px; border-radius:14px; overflow:hidden; background:#fff; border:1px solid #E5E7EB; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
         .cfg-logo-preview img{ width:100%; height:100%; object-fit:cover; }
+        .cfg-logo-wrap{ position:relative; flex-shrink:0; display:inline-block; }
+        .cfg-logo-edit{
+          position:absolute; bottom:-4px; right:-4px;
+          width:28px; height:28px; border-radius:99px;
+          background:linear-gradient(135deg,#1D4ED8,#0EA5E9);
+          color:#fff;
+          display:flex; align-items:center; justify-content:center;
+          cursor:pointer;
+          box-shadow:0 3px 8px rgba(29,78,216,.35);
+          border:2px solid #fff;
+          transition:transform .12s, box-shadow .12s;
+        }
+        .cfg-logo-edit:hover{ transform:scale(1.08); box-shadow:0 4px 12px rgba(29,78,216,.45); }
+        .cfg-logo-edit:active{ transform:scale(.96); }
+        .cfg-logo-remove{
+          background:none; border:0; padding:0; margin-top:6px;
+          color:#B4234B; font-family:inherit; font-size:11.5px;
+          cursor:pointer; text-decoration:underline;
+          display:inline-block;
+        }
+        .cfg-logo-remove:hover{ color:#8B1834; }
+
+        /* Mudanças */
+        .mud-tabs{ display:flex; gap:4px; background:#EDEFF2; padding:5px; border-radius:14px; flex-wrap:wrap; max-width:640px; }
+        .mud-tab{ flex:1; min-width:130px; padding:11px 16px; border-radius:10px; border:0; background:transparent; color:#5B6472; font-family:inherit; font-size:13.5px; font-weight:600; cursor:pointer; transition:all .18s; }
+        .mud-tab:hover{ color:#0B1324; background:rgba(255,255,255,.5); }
+        .mud-tab.on{ background:var(--color-primary); color:#fff; box-shadow:0 4px 14px rgba(11,21,51,.28); }
+        .mud-money{ position:relative; }
+        .mud-money-cur{ position:absolute; left:12px; top:50%; transform:translateY(-50%); font-size:12.5px; color:#9CA3AF; font-weight:600; pointer-events:none; z-index:1; }
+        .mud-escada-grid{ display:grid; grid-template-columns:1.4fr 1fr 1fr 1fr; gap:10px; align-items:center; }
+        .mud-escada-head{ font-size:11px; font-weight:600; color:#6B7280; text-transform:uppercase; letter-spacing:.04em; text-align:center; }
+        .mud-escada-lbl{ font-size:13px; font-weight:500; color:#0B1324; }
+        @media(max-width:640px){
+          .mud-escada-grid{ grid-template-columns:1fr 1fr; }
+          .mud-escada-head:first-child{ display:none; }
+          .mud-escada-lbl{ grid-column:1 / -1; margin-top:6px; font-weight:600; color:var(--color-primary); }
+        }
+        .mud-save-bar{ position:sticky; bottom:0; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; background:rgba(255,255,255,.92); backdrop-filter:blur(8px); border:1px solid #EFF0F2; border-radius:12px; box-shadow:0 -4px 16px rgba(11,19,36,.06); }
+        /* botão primário do módulo mudança usa bordô */
+        .mud-tab.on, .mud-save-bar .btn-primary{ }
+
+        /* Cotação wizard */
+        .cot-wrap{ display:grid; grid-template-columns:1fr 320px; gap:16px; align-items:start; }
+        @media(max-width:900px){ .cot-wrap{ grid-template-columns:1fr; } }
+        .cot-assistente{ margin-bottom:22px; }
+        .cot-assistente-head{ display:flex; align-items:center; gap:11px; margin-bottom:18px; }
+        .cot-assistente-ico{ width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--color-primary),var(--color-secondary)); color:#fff; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .cot-assistente-titulo{ font-size:16px; font-weight:700; color:#0B1324; letter-spacing:-.01em; }
+        .cot-assistente-sub{ font-size:12px; color:#9CA3AF; margin-top:1px; }
+        .cot-stepper{ display:flex; align-items:flex-start; margin-bottom:20px; }
+        .cot-step-wrap{ display:flex; flex-direction:column; align-items:center; gap:6px; flex-shrink:0; }
+        .cot-step{ width:32px; height:32px; border-radius:99px; border:2px solid #E5E7EB; background:#fff; color:#9CA3AF; font-family:inherit; font-weight:700; font-size:13px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; transition:all .15s; }
+        .cot-step.on{ border-color:var(--color-primary); background:var(--color-primary); color:#fff; }
+        .cot-step.done{ border-color:var(--color-primary); background:#fff; color:var(--color-primary); }
+        .cot-step-lbl{ font-size:11px; font-weight:500; color:#9CA3AF; white-space:nowrap; transition:color .15s; }
+        .cot-step-lbl.on{ color:var(--color-primary); font-weight:600; }
+        .cot-step-line{ flex:1; height:2px; background:#E5E7EB; margin:16px 4px 0; transition:background .15s; }
+        .cot-step-line.done{ background:var(--color-primary); }
+        .cot-seg{ display:flex; gap:6px; background:#F1F2F4; padding:4px; border-radius:10px; }
+        .cot-seg-btn{ flex:1; padding:9px; border-radius:7px; border:0; background:transparent; color:#4B5563; font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; transition:all .15s; }
+        .cot-seg-btn.on{ background:var(--color-primary); color:#fff; }
+        .cot-andar-box{ background:#F9FAFB; border:1px solid #EFF0F2; border-radius:12px; padding:14px; }
+        .cot-check{ display:flex; align-items:center; gap:8px; font-size:13px; color:#0B1324; cursor:pointer; }
+        .cot-check input{ width:16px; height:16px; accent-color:var(--color-primary); }
+        .cot-item-list{ display:flex; flex-direction:column; gap:2px; }
+        .cot-item-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 11px; border-radius:9px; transition:background .1s; }
+        .cot-item-row:hover{ background:#F9FAFB; }
+        .cot-counter{ display:flex; align-items:center; gap:0; border:1px solid #E5E7EB; border-radius:9px; overflow:hidden; flex-shrink:0; }
+        .cot-counter-btn{ width:32px; height:32px; border:0; background:#F4F6F8; color:#0B1324; font-size:17px; font-weight:600; cursor:pointer; transition:background .1s; font-family:inherit; }
+        .cot-counter-btn:hover{ background:#E5E7EB; }
+        .cot-counter-val{ min-width:36px; text-align:center; font-size:14px; font-weight:600; }
+        .cot-svc-grid{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+        @media(max-width:640px){ .cot-svc-grid{ grid-template-columns:1fr; } }
+        .cot-svc-item{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; background:#F9FAFB; border:1px solid #EFF0F2; border-radius:10px; }
+        .cot-side{ position:sticky; top:16px; }
+        .cot-total-box{ background:linear-gradient(135deg,var(--color-primary),var(--color-secondary)); border-radius:12px; padding:14px 16px; color:#fff; margin:12px 0; }
+        .cot-total{ font-size:26px; font-weight:700; letter-spacing:-.02em; line-height:1.1; margin:2px 0; }
+        .cot-total-box .t-green{ color:#86EFAC !important; }
+        .cot-resumo-list{ display:flex; flex-direction:column; gap:5px; max-height:280px; overflow-y:auto; padding:2px 0; }
+        .cot-resumo-list::-webkit-scrollbar{ width:5px; }
+        .cot-resumo-list::-webkit-scrollbar-thumb{ background:#D1D5DB; border-radius:99px; }
+        .cot-resumo-line{ display:flex; justify-content:space-between; gap:10px; align-items:baseline; }
+        .cot-resumo-sep{ font-size:10.5px; font-weight:600; color:#6B7280; text-transform:uppercase; letter-spacing:.05em; margin-top:8px; padding-top:6px; border-top:1px dashed #E5E7EB; }
+        .cot-resumo-total{ display:flex; justify-content:space-between; align-items:center; margin-top:12px; padding-top:12px; border-top:2px solid #F1F2F4; font-weight:700; font-size:16px; color:#0B1324; }
+
+        /* ===== Mudanças — UI premium ===== */
+        @keyframes fadeIn{ from{ opacity:0; transform:translateY(6px); } to{ opacity:1; transform:none; } }
+        .fade-in{ animation:fadeIn .32s ease both; }
+
+        /* KPIs */
+        .mud-kpi-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+        @media(max-width:900px){ .mud-kpi-grid{ grid-template-columns:repeat(2,1fr); } }
+        @media(max-width:480px){ .mud-kpi-grid{ grid-template-columns:repeat(2,1fr); gap:10px; } }
+        .mud-kpi{ background:#fff; border:1px solid #EFF0F2; border-radius:16px; padding:16px; position:relative; overflow:hidden; transition:transform .18s, box-shadow .18s, border-color .18s; text-align:left; font-family:inherit; cursor:pointer; width:100%; display:flex; flex-direction:column; min-height:142px; }
+        .mud-kpi::before{ content:''; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--kc,#1D4ED8); }
+        .mud-kpi:hover{ transform:translateY(-3px); box-shadow:0 12px 28px rgba(11,19,36,.08); }
+        .mud-kpi:active{ transform:translateY(-1px) scale(.99); }
+        .mud-kpi.active{ border-color:var(--kc,#1D4ED8); box-shadow:0 0 0 2px var(--kc,#1D4ED8), 0 12px 28px rgba(11,19,36,.1); }
+        .mud-kpi.active::before{ width:5px; }
+        .mud-kpi.active .mud-kpi-sub{ color:var(--kc,#1D4ED8); font-weight:600; }
+        .mud-kpi-ico{ width:38px; height:38px; border-radius:11px; display:flex; align-items:center; justify-content:center; margin-bottom:10px; }
+        .mud-kpi-num{ font-size:26px; font-weight:700; letter-spacing:-.03em; color:#0B1324; line-height:1.15; overflow-wrap:anywhere; }
+        .mud-kpi-lbl{ font-size:12.5px; font-weight:600; color:#0B1324; margin-top:3px; }
+        .mud-kpi-sub{ font-size:11px; color:#9CA3AF; margin-top:auto; padding-top:5px; line-height:1.3; }
+
+        /* Faixa de filtro ativo */
+        .orc-filtro-ativo{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 14px; margin-bottom:14px; background:#EEF2FF; border:1px solid #C7D2FE; border-radius:10px; font-size:13px; color:#1E3A8A; }
+        .orc-filtro-limpar{ display:inline-flex; align-items:center; gap:4px; padding:4px 10px; border-radius:7px; background:#fff; border:1px solid #C7D2FE; color:#1E3A8A; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; transition:background .14s; }
+        .orc-filtro-limpar:hover{ background:#DBEAFE; }
+
+        /* Status chip */
+        .status-chip{ display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:99px; font-size:11px; font-weight:600; white-space:nowrap; }
+        .status-chip-lg{ padding:5px 13px; font-size:12.5px; }
+        .status-dot{ width:6px; height:6px; border-radius:99px; flex-shrink:0; }
+
+        /* Card de orçamento compacto */
+        /* Container central do módulo */
+        .mud-container{ max-width:1240px; margin:0 auto; }
+
+        /* Barra de busca moderna */
+        .orc-search-bar{ display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap; }
+        .orc-search-input{ flex:1; min-width:200px; display:flex; align-items:center; gap:9px; padding:0 14px; background:#F6F7F9; border:1px solid #E4E7EC; border-radius:11px; transition:border-color .15s, background .15s; }
+        .orc-search-input:focus-within{ background:#fff; border-color:var(--color-primary); box-shadow:0 0 0 3px rgba(11,21,51,.08); }
+        .orc-search-ico{ color:#9CA3AF; flex-shrink:0; }
+        .orc-search-field{ flex:1; min-width:0; border:0; background:transparent; outline:none; padding:11px 0; font-family:inherit; font-size:14px; color:#0B1324; }
+        .orc-search-status{ padding:11px 14px; border:1px solid #E4E7EC; border-radius:11px; background:#fff; font-family:inherit; font-size:13.5px; color:#374151; cursor:pointer; min-width:170px; }
+        .orc-search-status:focus{ outline:none; border-color:var(--color-primary); box-shadow:0 0 0 3px rgba(11,21,51,.08); }
+        @media(max-width:520px){ .orc-search-status{ flex:1; } }
+
+        .orc-grid{ display:grid; grid-template-columns:repeat(2,1fr); gap:16px; }
+        @media(min-width:1400px){ .orc-grid{ grid-template-columns:repeat(3,1fr); } }
+        @media(max-width:760px){ .orc-grid{ grid-template-columns:1fr; } }
+        .orc-card{ background:#fff; border:1px solid #E4E7EC; border-radius:16px; padding:16px; display:flex; flex-direction:column; gap:11px; box-shadow:0 1px 3px rgba(11,19,36,.04); transition:transform .16s, box-shadow .16s, border-color .16s; }
+        .orc-card:hover{ transform:translateY(-2px); box-shadow:0 10px 26px rgba(11,19,36,.08); border-color:#E5E7EB; }
+        .orc-card-top{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px; }
+        .orc-cliente{ font-size:14.5px; font-weight:700; color:#0B1324; }
+        .orc-tipo{ font-size:11.5px; color:#9CA3AF; margin-top:1px; }
+        .orc-rota{ display:flex; align-items:center; gap:7px; padding:7px 10px; background:#F8F9FB; border-radius:9px; }
+        .orc-rota-cidade{ font-size:12.5px; font-weight:500; color:#374151; flex:1; min-width:0; }
+        .orc-rota-arrow{ color:var(--color-primary); flex-shrink:0; }
+        .orc-meta{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+        @media(max-width:420px){ .orc-meta{ grid-template-columns:repeat(2,1fr); } }
+        .orc-meta-item{ display:flex; flex-direction:column; gap:1px; }
+        .orc-meta-l{ font-size:10px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
+        .orc-meta-v{ font-size:13px; color:#374151; font-weight:500; }
+        .orc-card-actions{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:10px; border-top:1px solid #F4F5F7; }
+        .orc-advance{ display:inline-flex; align-items:center; gap:4px; padding:6px 11px; border-radius:8px; background:var(--color-primary); color:#fff; border:0; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; transition:transform .14s, box-shadow .14s; }
+        .orc-advance:hover{ transform:translateY(-1px); box-shadow:0 6px 14px rgba(11,21,51,.28); }
+        .orc-advance:active{ transform:scale(.97); }
+        .orc-icons{ display:flex; gap:2px; }
+        .orc-card-clickable{ cursor:pointer; display:flex; flex-direction:column; gap:10px; border-radius:10px; margin:-4px; padding:4px; transition:background .14s; outline:none; }
+        .orc-card-clickable:hover{ background:#FAFBFC; }
+        .orc-card-clickable:focus-visible{ box-shadow:0 0 0 2px var(--color-primary); }
+        .orc-ver-mais{ display:flex; align-items:center; justify-content:center; gap:5px; padding:7px; margin-top:2px; border-radius:8px; background:#EEF1F8; color:var(--color-primary); font-size:12px; font-weight:600; transition:background .14s; }
+        .orc-card-clickable:hover .orc-ver-mais{ background:#DEE4F2; }
+
+        /* Card de rota */
+        .rota-card{ background:#fff; border:1px solid #EFF0F2; border-radius:14px; padding:16px; }
+        .rota-linha{ display:flex; align-items:center; gap:12px; }
+        .rota-ponto{ display:flex; align-items:center; gap:9px; flex:1; min-width:0; }
+        .rota-pin{ width:26px; height:26px; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
+        .rota-pin-origem{ background:#16A34A; }
+        .rota-pin-destino{ background:#DC2626; }
+        .rota-lbl{ font-size:10px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.04em; }
+        .rota-cidade{ font-size:13.5px; font-weight:600; color:#0B1324; }
+        .rota-seta{ color:#9CA3AF; flex-shrink:0; transform:rotate(45deg); }
+        .rota-metrics{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:14px 0; }
+        .rota-metric{ background:#F8F9FB; border-radius:10px; padding:10px 12px; text-align:center; }
+        .rota-metric-v{ font-size:16px; font-weight:700; color:#0B1324; }
+        .rota-metric-l{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; margin-top:2px; }
+        .rota-btn{ display:flex; align-items:center; justify-content:center; gap:7px; width:100%; padding:11px; border-radius:10px; background:var(--color-primary); color:#fff; text-decoration:none; font-size:13px; font-weight:600; transition:background .15s, transform .14s; }
+        .rota-btn:hover{ background:#16224A; transform:translateY(-1px); }
+        .rota-btn:active{ transform:scale(.99); }
+
+        /* Detalhe da cotação premium */
+        .det-wrap{ display:flex; flex-direction:column; gap:16px; }
+        .det-head{ background:linear-gradient(135deg,var(--color-primary),var(--color-primary-hover)); border-radius:16px; padding:18px; color:#fff; }
+        .det-head-top{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:16px; }
+        .det-cliente{ font-size:19px; font-weight:700; letter-spacing:-.01em; }
+        .det-sub{ font-size:12.5px; color:rgba(255,255,255,.6); margin-top:2px; }
+        .det-fin{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+        .det-fin-item{ background:rgba(255,255,255,.08); border-radius:11px; padding:11px 13px; }
+        .det-fin-l{ font-size:10.5px; color:rgba(255,255,255,.55); text-transform:uppercase; letter-spacing:.04em; }
+        .det-fin-v{ font-size:17px; font-weight:700; margin-top:3px; }
+        .det-fin-v.t-green{ color:#86EFAC; }
+        .det-actions{ display:flex; gap:10px; flex-wrap:wrap; }
+        .det-actions .btn{ flex:1; min-width:140px; justify-content:center; }
+        .det-wpp{ flex:1; min-width:140px; display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:10px 16px; border-radius:12px; background:#25D366; color:#fff; border:0; font-family:inherit; font-size:14px; font-weight:600; cursor:pointer; transition:transform .14s, box-shadow .14s; }
+        .det-wpp:hover{ transform:translateY(-1px); box-shadow:0 8px 18px rgba(37,211,102,.32); }
+        .item-chip{ display:inline-flex; align-items:center; gap:4px; padding:5px 11px; border-radius:99px; background:#F1F3F5; color:#374151; font-size:12.5px; }
+        .item-chip b{ color:#0B1324; }
+
+        /* Resumo financeiro card */
+        .fin-resumo{ display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:#EFF0F2; border:1px solid #EFF0F2; border-radius:14px; overflow:hidden; }
+        @media(max-width:520px){ .fin-resumo{ grid-template-columns:repeat(2,1fr); } }
+        .fin-resumo-item{ background:#fff; padding:14px; text-align:center; }
+        .fin-resumo-l{ font-size:11px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
+        .fin-resumo-v{ font-size:17px; font-weight:700; color:#0B1324; margin-top:4px; }
+
+        /* Vínculo Mudanças → Financeiro */
+        .mud-fin-card{ display:flex; align-items:center; gap:11px; padding:13px 15px; border:1px solid; border-radius:12px; flex-wrap:wrap; }
+        .mud-fin-card.pendente{ background:#FFFBEB; border-color:#FDE68A; }
+        .mud-fin-card.pago{ background:#F0FDF4; border-color:#86EFAC; }
+        .mud-fin-card.aviso{ background:#F8FAFC; border-color:#E4E7EC; }
+        .mud-fin-ico{ width:30px; height:30px; border-radius:9px; display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
+        .mud-fin-card.pendente .mud-fin-ico{ background:#D97706; }
+        .mud-fin-card.pago .mud-fin-ico{ background:#16A34A; }
+        .mud-fin-card.aviso .mud-fin-ico{ background:#9CA3AF; }
+        .mud-fin-titulo{ font-size:14px; font-weight:700; color:#0B1324; }
+        .mud-fin-sub{ font-size:12px; color:#6B7280; margin-top:1px; }
+        .mud-fin-btn{ display:inline-flex; align-items:center; gap:5px; padding:8px 13px; border-radius:9px; background:#16A34A; color:#fff; border:0; font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer; flex-shrink:0; transition:transform .14s, box-shadow .14s; }
+        .mud-fin-btn:hover{ transform:translateY(-1px); box-shadow:0 6px 14px rgba(22,163,74,.3); }
+
+        /* Config de preços — grid 2 colunas */
+        .preco-grid{ display:grid; grid-template-columns:1fr 1fr; gap:14px 16px; }
+        @media(max-width:560px){ .preco-grid{ grid-template-columns:1fr; } }
+        /* Materiais em cards */
+        .mat-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; }
+        .mat-card{ background:#F8F9FB; border:1px solid #EFF0F2; border-radius:12px; padding:12px; transition:border-color .15s, box-shadow .15s; }
+        .mat-card:hover{ border-color:#E0E3E8; box-shadow:0 4px 12px rgba(11,19,36,.05); }
+        .mat-card-nome{ font-size:12.5px; font-weight:600; color:#374151; margin-bottom:8px; line-height:1.3; }
+
+        /* Accordion Tabela de Preços */
+        .acc-card{ background:#fff; border:1px solid #E4E7EC; border-radius:16px; overflow:hidden; box-shadow:0 1px 3px rgba(11,19,36,.04); }
+        .acc-head{ width:100%; display:flex; align-items:center; gap:13px; padding:16px 18px; background:transparent; border:0; cursor:pointer; font-family:inherit; text-align:left; transition:background .14s; }
+        .acc-head:hover{ background:#FAFBFC; }
+        .acc-head-ico{ width:40px; height:40px; border-radius:11px; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .acc-head-txt{ flex:1; min-width:0; }
+        .acc-head-titulo{ font-size:14.5px; font-weight:700; color:#0B1324; }
+        .acc-head-sub{ font-size:12px; color:#9CA3AF; margin-top:1px; }
+        .acc-head-chev{ color:#9CA3AF; flex-shrink:0; transition:transform .22s; }
+        .acc-head.open .acc-head-chev{ transform:rotate(180deg); }
+        .acc-body{ padding:4px 18px 20px; animation:accOpen .24s ease; }
+
+        /* Móveis e itens personalizados */
+        .mv-table{ display:flex; flex-direction:column; gap:7px; }
+        .mv-head{ display:grid; grid-template-columns:1.6fr 1fr 1fr 34px; gap:10px; font-size:10.5px; font-weight:600; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; padding:0 2px; }
+        .mv-row{ display:grid; grid-template-columns:1.6fr 1fr 1fr 34px; gap:10px; align-items:center; }
+        @media(max-width:640px){
+          .mv-head{ display:none; }
+          .mv-row{ grid-template-columns:1fr 1fr; gap:8px; padding:10px; background:#F9FAFB; border-radius:10px; }
+          .mv-row > :first-child{ grid-column:1 / -1; }
+        }
+        .sc-list{ display:flex; flex-direction:column; gap:8px; }
+        .sc-row{ display:grid; grid-template-columns:1.6fr 90px 1fr 34px; gap:10px; align-items:center; }
+        @media(max-width:640px){
+          .sc-row{ grid-template-columns:1fr 1fr; padding:10px; background:#F9FAFB; border-radius:10px; }
+          .sc-row > :first-child{ grid-column:1 / -1; }
+        }
+        .mat-card-custom{ border-style:dashed; border-color:#C7D2FE; background:#F8FAFF; }
+        .cust-head{ display:flex; align-items:center; gap:6px; margin-bottom:8px; }
+        .cust-nome{ flex:1; min-width:0; border:0; background:transparent; font-family:inherit; font-size:12.5px; font-weight:600; color:#374151; outline:none; border-bottom:1px dashed #C7D2FE; padding:2px 0; }
+        .cust-nome:focus{ border-bottom-color:var(--color-primary); }
+        .cust-del{ background:none; border:0; color:#9CA3AF; cursor:pointer; padding:2px; flex-shrink:0; }
+        .cust-del:hover{ color:#DC2626; }
+        /* linha de móvel no wizard */
+        .mv-cot-row{ display:flex; align-items:center; gap:10px; padding:9px 11px; border-radius:9px; transition:background .1s; flex-wrap:wrap; }
+        .mv-cot-row:hover{ background:#F9FAFB; }
+        .mv-cot-checks{ display:flex; gap:11px; flex-shrink:0; }
+        .mv-cot-checks .cot-check{ font-size:12px; }
+        @keyframes accOpen{ from{ opacity:0; transform:translateY(-6px); } to{ opacity:1; transform:none; } }
+
+        /* Aparência — seletor de paletas */
+        .pal-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+        @media(max-width:900px){ .pal-grid{ grid-template-columns:repeat(2,1fr); } }
+        @media(max-width:560px){ .pal-grid{ grid-template-columns:1fr; } }
+        .pal-card{ border:2px solid #E4E7EC; border-radius:14px; padding:14px; cursor:pointer; transition:border-color .16s, box-shadow .16s, transform .16s; background:#fff; outline:none; }
+        .pal-card:hover{ transform:translateY(-2px); box-shadow:0 10px 24px rgba(11,19,36,.08); }
+        .pal-card:focus-visible{ border-color:var(--color-primary); }
+        .pal-card.ativa{ border-color:var(--color-primary); box-shadow:0 0 0 3px rgba(var(--color-primary-rgb),.12); }
+        .pal-card.preview{ border-color:#CBD5E1; }
+        .pal-card.locked{ cursor:default; }
+        .pal-card.locked:hover{ transform:none; box-shadow:none; }
+        .pal-card-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:12px; }
+        .pal-nome{ font-size:14px; font-weight:700; color:#0B1324; }
+        .pal-desc{ font-size:11.5px; color:#9CA3AF; margin-top:1px; }
+        .pal-ativa-badge{ display:inline-flex; align-items:center; gap:3px; padding:3px 9px; border-radius:99px; background:var(--color-primary); color:#fff; font-size:10.5px; font-weight:600; white-space:nowrap; flex-shrink:0; }
+        .pal-dots{ display:flex; gap:7px; margin-bottom:12px; }
+        .pal-dot{ width:22px; height:22px; border-radius:99px; flex-shrink:0; }
+        .pal-preview{ display:flex; height:74px; border-radius:10px; overflow:hidden; border:1px solid #EFF0F2; }
+        .pal-preview-side{ width:30%; padding:9px 7px; display:flex; flex-direction:column; gap:5px; }
+        .pal-preview-side span{ height:6px; border-radius:99px; display:block; }
+        .pal-preview-side span:first-child{ width:100%; }
+        .pal-preview-side span:nth-child(2){ width:75%; }
+        .pal-preview-side span:nth-child(3){ width:60%; }
+        .pal-preview-body{ flex:1; padding:10px; display:flex; flex-direction:column; gap:7px; }
+        .pal-preview-btn{ height:14px; width:52px; border-radius:5px; }
+        .pal-preview-card{ flex:1; border-radius:6px; box-shadow:0 1px 3px rgba(0,0,0,.06); padding:7px; display:flex; flex-direction:column; gap:5px; justify-content:center; }
+        .pal-preview-card span{ height:5px; border-radius:99px; display:block; }
+        .pal-preview-card span:first-child{ width:40%; }
+        .pal-preview-card span:last-child{ width:70%; }
+
+        /* Skeleton loading */
+        @keyframes shimmer{ 0%{ background-position:-400px 0; } 100%{ background-position:400px 0; } }
+        .skel-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:14px; }
+        @media(max-width:900px){ .skel-grid{ grid-template-columns:repeat(2,1fr); } }
+        .skel-card{ height:104px; border-radius:16px; }
+        .skel-line, .skel-card{ background:linear-gradient(90deg,#EFF1F4 25%,#F7F8FA 50%,#EFF1F4 75%); background-size:800px 100%; animation:shimmer 1.4s infinite linear; border-radius:12px; }
+
+        /* Polimento responsivo módulo Mudanças */
+        @media(max-width:640px){
+          .det-head{ padding:15px; }
+          .det-cliente{ font-size:17px; }
+          .det-fin-v{ font-size:15px; }
+          .cot-total{ font-size:23px; }
+          .mud-kpi-num{ font-size:22px; }
+        }
+        @media(max-width:380px){
+          .det-fin{ gap:7px; }
+          .det-fin-item{ padding:9px 10px; }
+          .orc-meta{ grid-template-columns:repeat(2,1fr); }
+        }
         .cfg-logo-fallback{ width:100%; height:100%; display:flex; align-items:center; justify-content:center; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); color:#fff; font-weight:700; font-size:22px; letter-spacing:-.02em; }
 
         /* financeiro premium */
@@ -3005,6 +5653,403 @@ function AppInner() {
         .meta-ico{ width:26px; height:26px; border-radius:8px; background:#EFF4FF; color:#1D4ED8; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
         .btn-sm{ padding:6px 12px !important; font-size:13px !important; }
         .pf-tile{ padding:13px 14px !important; min-height:84px; display:flex; flex-direction:column; transition:transform .25s ease, box-shadow .25s ease; will-change:transform; }
+
+        /* Anti-duplicidade na importação */
+        .dup-banner{ background:linear-gradient(135deg,#F0FDF4,#DCFCE7); border:1px solid #86EFAC; border-radius:14px; padding:14px; margin-bottom:16px; }
+        .dup-head{ display:flex; align-items:flex-start; gap:11px; margin-bottom:11px; }
+        .dup-ico{ width:32px; height:32px; border-radius:9px; background:#16A34A; color:#fff; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .dup-titulo{ font-size:14px; font-weight:700; color:#14532D; }
+        .dup-sub{ font-size:12.5px; color:#166534; margin-top:2px; }
+        .dup-list{ display:flex; flex-direction:column; gap:6px; }
+        .dup-item{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 11px; background:rgba(255,255,255,.75); border-radius:9px; flex-wrap:wrap; }
+        .dup-match{ display:flex; align-items:center; gap:7px; flex:1; min-width:0; }
+        .dup-extrato{ font-size:12.5px; color:#6B7280; max-width:42%; }
+        .dup-seta{ color:#16A34A; flex-shrink:0; }
+        .dup-existente{ font-size:12.5px; font-weight:600; color:#0B1324; display:flex; align-items:center; gap:5px; min-width:0; }
+        .dup-tag{ padding:1px 6px; border-radius:99px; background:#DBEAFE; color:#1E40AF; font-size:9.5px; font-weight:600; white-space:nowrap; }
+        .dup-right{ display:flex; align-items:center; gap:9px; flex-shrink:0; }
+        .dup-conf{ padding:2px 7px; border-radius:99px; font-size:10px; font-weight:600; }
+        .dup-conf.alta{ background:#DCFCE7; color:#15803D; }
+        .dup-conf.media{ background:#FEF3C7; color:#B45309; }
+        .dup-desfazer{ font-size:11px; font-weight:600; color:#6B7280; background:none; border:0; cursor:pointer; font-family:inherit; text-decoration:underline; }
+        .dup-desfazer:hover{ color:#0B1324; }
+        .imp-row-match{ background:#F0FDF4; border-radius:9px; }
+        .imp-baixa-tag{ margin-left:7px; padding:1px 7px; border-radius:99px; background:#DCFCE7; color:#15803D; font-size:9.5px; font-weight:600; white-space:nowrap; }
+
+        /* Abastecimentos detectados na importação */
+        .abast-banner{ background:linear-gradient(135deg,#FFFBEB,#FEF3C7); border:1px solid #FDE68A; border-radius:14px; padding:14px; margin-bottom:16px; }
+        .abast-toggle{ display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:#92400E; cursor:pointer; flex-shrink:0; }
+        .abast-toggle input{ width:16px; height:16px; accent-color:#D97706; }
+        .tag-abast{ display:inline-flex; align-items:center; gap:3px; padding:1px 7px; border-radius:99px; background:#FEF3C7; color:#B45309; font-size:10px; font-weight:600; white-space:nowrap; }
+
+        /* Formulário de abastecimento */
+        .scan-box{ padding:12px 14px; background:#F8FAFC; border:1px dashed #CBD5E1; border-radius:11px; }
+        .abast-dica{ display:flex; gap:8px; padding:11px 13px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:10px; }
+
+        /* Seletor de posto */
+        .posto-wrap{ position:relative; }
+        .posto-btn{ width:100%; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 12px; border:1px solid #E5E7EB; border-radius:10px; background:#fff; font-family:inherit; font-size:14px; cursor:pointer; text-align:left; transition:border-color .14s; }
+        .posto-btn:hover{ border-color:#CBD5E1; }
+        .posto-val{ color:#0B1324; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .posto-ph{ color:#9CA3AF; }
+        .posto-chev{ color:#9CA3AF; flex-shrink:0; transition:transform .2s; }
+        .posto-chev.up{ transform:rotate(180deg); }
+        .posto-menu{ position:absolute; top:calc(100% + 5px); left:0; right:0; z-index:60; background:#fff; border:1px solid #E5E7EB; border-radius:12px; box-shadow:0 12px 32px rgba(11,19,36,.14); overflow:hidden; }
+        .posto-busca{ display:flex; align-items:center; gap:7px; padding:9px 12px; border-bottom:1px solid #F1F2F4; }
+        .posto-busca-inp{ flex:1; min-width:0; border:0; outline:none; font-family:inherit; font-size:13.5px; color:#0B1324; background:transparent; }
+        .posto-lista{ max-height:200px; overflow-y:auto; padding:4px; }
+        .posto-item{ width:100%; display:flex; align-items:center; gap:8px; padding:9px 10px; border:0; border-radius:8px; background:none; font-family:inherit; font-size:13.5px; color:#374151; cursor:pointer; text-align:left; transition:background .1s; }
+        .posto-item:hover{ background:#F6F7F9; }
+        .posto-item.on{ background:rgba(var(--color-primary-rgb),.07); color:var(--color-primary); font-weight:600; }
+        .posto-vazio{ padding:14px; text-align:center; font-size:12.5px; color:#9CA3AF; }
+        .posto-add{ width:100%; display:flex; align-items:center; justify-content:center; gap:6px; padding:11px; border:0; border-top:1px solid #F1F2F4; background:#FAFBFC; color:var(--color-primary); font-family:inherit; font-size:13px; font-weight:600; cursor:pointer; transition:background .12s; }
+        .posto-add:hover{ background:#F1F3F5; }
+        .posto-novo{ display:flex; gap:6px; padding:9px; border-top:1px solid #F1F2F4; background:#FAFBFC; }
+        .posto-novo .inp{ flex:1; min-width:0; }
+
+        /* Exportar relatório em PDF */
+        .rel-export{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:16px 18px; background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; flex-wrap:wrap; box-shadow:0 1px 3px rgba(11,19,36,.04); }
+        .rel-pdf-opts{ display:flex; flex-direction:column; gap:8px; }
+        .rel-pdf-opt{ display:flex; align-items:center; gap:11px; padding:13px 14px; border:1px solid #E4E7EC; border-radius:12px; background:#fff; cursor:pointer; font-family:inherit; text-align:left; transition:border-color .14s, background .14s, transform .14s; }
+        .rel-pdf-opt:hover{ border-color:var(--color-primary); background:#FAFBFF; transform:translateY(-1px); }
+        .rel-pdf-ico{ width:34px; height:34px; border-radius:10px; background:rgba(var(--color-primary-rgb),.1); color:var(--color-primary); display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .rel-pdf-lbl{ display:block; font-size:14px; font-weight:700; color:#0B1324; }
+        .rel-pdf-sub{ display:block; font-size:12px; color:#9CA3AF; margin-top:1px; }
+        .rel-pdf-opt > span:nth-child(2){ flex:1; min-width:0; }
+
+        /* Configuração fiscal */
+        .fiscal-aviso{ display:flex; gap:9px; padding:12px 14px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:11px; }
+        .fiscal-regimes{ display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:9px; }
+        .fiscal-regime{ position:relative; display:flex; flex-direction:column; gap:2px; padding:12px 13px; border:1.5px solid #E4E7EC; border-radius:11px; background:#fff; cursor:pointer; font-family:inherit; text-align:left; transition:border-color .15s, background .15s, transform .15s; }
+        .fiscal-regime:hover:not(:disabled){ border-color:#CBD5E1; transform:translateY(-1px); }
+        .fiscal-regime.on{ border-color:var(--color-primary); background:rgba(var(--color-primary-rgb),.04); }
+        .fiscal-regime:disabled{ cursor:default; opacity:.75; }
+        .fiscal-regime-nome{ font-size:13.5px; font-weight:700; color:#0B1324; }
+        .fiscal-regime-desc{ font-size:11px; color:#9CA3AF; line-height:1.3; }
+        .fiscal-regime-check{ position:absolute; top:10px; right:10px; color:var(--color-primary); }
+
+        /* ===== PAINEL FISCAL ===== */
+        .fis-head{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:18px 20px; background:var(--color-surface); border:1px solid #E4E7EC; border-left:4px solid var(--st); border-radius:16px; flex-wrap:wrap; box-shadow:0 1px 3px rgba(11,19,36,.04); }
+        .fis-head-titulo{ font-family:'Fraunces',Georgia,serif; font-size:20px; font-weight:600; color:#0B1324; }
+        .fis-regime{ padding:2px 9px; border-radius:99px; background:rgba(var(--color-primary-rgb),.1); color:var(--color-primary); font-size:11px; font-weight:700; }
+        .fis-head-sub{ font-size:13px; color:#6B7280; margin-top:2px; }
+        .fis-status{ display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:99px; color:#fff; font-size:13px; font-weight:700; flex-shrink:0; }
+        .fis-status-dot{ width:7px; height:7px; border-radius:99px; background:#fff; animation:pulse 2s infinite; }
+        @keyframes pulse{ 0%,100%{ opacity:1; } 50%{ opacity:.4; } }
+
+        .fis-grid-2{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+        @media(max-width:900px){ .fis-grid-2{ grid-template-columns:1fr; } }
+
+        /* Card limite */
+        .fis-pct{ font-size:26px; font-weight:700; letter-spacing:-.02em; }
+        .fis-limite-valores{ margin:6px 0 12px; }
+        .fis-limite-atual{ font-size:22px; font-weight:700; color:#0B1324; }
+        .fis-bar{ height:12px; background:#EFF1F4; border-radius:99px; overflow:hidden; position:relative; }
+        .fis-bar-fill{ height:100%; border-radius:99px; transition:width 1s cubic-bezier(.4,0,.2,1), background .4s; }
+        .fis-bar-legend{ position:relative; height:8px; margin-top:2px; }
+        .fis-bar-tick{ position:absolute; top:0; width:1px; height:5px; background:#D1D5DB; }
+
+        /* Projeção */
+        .fis-proj-metrics{ display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px; }
+        .fis-metric-l{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; font-weight:600; }
+        .fis-metric-v{ font-size:17px; font-weight:700; color:#0B1324; margin-top:2px; }
+        .fis-proj-box{ display:flex; align-items:flex-start; gap:9px; padding:12px 14px; border-radius:11px; font-size:13px; line-height:1.45; }
+        .fis-proj-box.ok{ background:#F0FDF4; border:1px solid #BBF7D0; color:#14532D; }
+        .fis-proj-box.alerta{ background:#FFFBEB; border:1px solid #FDE68A; color:#78350F; }
+
+        /* Obrigações (DAS / declaração) */
+        .fis-obr{ display:flex; align-items:center; gap:13px; }
+        .fis-obr-data{ width:52px; height:52px; border-radius:12px; background:#F4F6F8; display:flex; flex-direction:column; align-items:center; justify-content:center; flex-shrink:0; }
+        .fis-obr-dia{ font-size:19px; font-weight:700; color:#0B1324; line-height:1; }
+        .fis-obr-mes{ font-size:9.5px; color:#9CA3AF; text-transform:uppercase; margin-top:1px; }
+        .fis-obr-valor{ font-size:19px; font-weight:700; color:#0B1324; }
+
+        /* Timeline do calendário fiscal */
+        .fis-timeline{ display:flex; flex-direction:column; gap:2px; position:relative; }
+        .fis-tl-item{ display:flex; align-items:center; gap:12px; padding:11px 10px 11px 22px; border-radius:10px; position:relative; transition:background .12s; }
+        .fis-tl-item:hover{ background:#FAFBFC; }
+        .fis-tl-dot{ position:absolute; left:5px; width:9px; height:9px; border-radius:99px; background:#CBD5E1; }
+        .fis-tl-item.pendente .fis-tl-dot{ background:#D97706; }
+        .fis-tl-item.atrasado .fis-tl-dot, .fis-tl-item.atrasada .fis-tl-dot{ background:#DC2626; }
+        .fis-tl-item.pago .fis-tl-dot{ background:#16A34A; }
+        .fis-tl-data{ display:flex; flex-direction:column; align-items:center; width:34px; flex-shrink:0; }
+        .fis-tl-data span:first-child{ font-size:15px; font-weight:700; color:#0B1324; line-height:1; }
+        .fis-tl-data span:last-child{ font-size:9.5px; color:#9CA3AF; text-transform:uppercase; }
+        .fis-tl-titulo{ font-size:13.5px; font-weight:600; color:#0B1324; }
+        .fis-tl-sub{ font-size:11.5px; color:#9CA3AF; }
+        .fis-tl-right{ display:flex; align-items:center; gap:10px; flex-shrink:0; }
+        .fis-tl-dias{ padding:2px 9px; border-radius:99px; background:#F1F3F5; color:#6B7280; font-size:11px; font-weight:600; white-space:nowrap; }
+        .fis-tl-dias.urgente{ background:#FEF3C7; color:#B45309; }
+        .fis-tl-dias.atrasado{ background:#FEE2E2; color:#DC2626; }
+
+        /* Alertas */
+        .fis-alerta{ display:flex; align-items:flex-start; gap:10px; padding:11px 13px; border-radius:11px; line-height:1.45; }
+        .fis-alerta.critico{ background:#FEF2F2; border:1px solid #FECACA; color:#7F1D1D; }
+        .fis-alerta.alerta{ background:#FFFBEB; border:1px solid #FDE68A; color:#78350F; }
+        .fis-alerta.info{ background:#EFF6FF; border:1px solid #BFDBFE; color:#1E3A8A; }
+        .fis-alerta-ico{ width:24px; height:24px; border-radius:7px; display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; }
+        .fis-alerta.critico .fis-alerta-ico{ background:#DC2626; }
+        .fis-alerta.alerta .fis-alerta-ico{ background:#D97706; }
+        .fis-alerta.info .fis-alerta-ico{ background:#2563EB; }
+
+        /* Comparativo + checklist */
+        .fis-comp{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+        .fis-comp-item{ background:#F8F9FB; border-radius:11px; padding:12px 13px; }
+        .fis-check{ display:flex; align-items:center; gap:8px; }
+        .fis-check-ico{ width:18px; height:18px; border-radius:6px; display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; }
+        .fis-check-ico.ok{ background:#16A34A; }
+        .fis-check-ico.bad{ background:#DC2626; }
+
+        /* Widget fiscal no Financeiro */
+        .fe-venc-fiscal-grid{ display:grid; grid-template-columns:1.3fr 1fr; gap:16px; align-items:start; }
+        @media(max-width:1000px){ .fe-venc-fiscal-grid{ grid-template-columns:1fr; } }
+        .fis-widget{ display:flex; flex-direction:column; }
+        .fis-w-lbl{ font-size:11px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; font-weight:600; }
+        .fis-w-limite{ font-size:20px; font-weight:700; color:#0B1324; margin-top:2px; margin-bottom:14px; }
+        .fis-w-row{ display:flex; align-items:flex-end; justify-content:space-between; gap:10px; }
+        .fis-w-valor{ font-size:18px; font-weight:700; color:#0B1324; margin-top:2px; }
+        .fis-w-pct{ font-size:24px; font-weight:700; letter-spacing:-.02em; line-height:1; }
+        .fis-w-projecao{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:14px; padding:11px 13px; background:#FFFBEB; border:1px solid #FDE68A; border-radius:11px; }
+        .fis-w-mes{ font-size:15px; font-weight:700; color:#78350F; text-transform:capitalize; margin-top:1px; }
+        .fis-w-obrigacoes{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:14px; }
+        @media(max-width:420px){ .fis-w-obrigacoes{ grid-template-columns:1fr; } }
+        .fis-w-obr{ display:flex; flex-direction:column; gap:2px; padding:12px; border:1px solid #EFF0F2; border-radius:11px; background:#FAFBFC; min-height:118px; }
+        .fis-w-obr-titulo{ font-size:11.5px; font-weight:700; color:#0B1324; line-height:1.3; }
+        .fis-w-obr-sub{ font-size:10.5px; color:#9CA3AF; line-height:1.3; }
+        .fis-w-obr-data{ font-size:12px; color:#374151; font-weight:600; margin-top:2px; }
+        .fis-w-obr-valor{ font-size:14px; font-weight:700; color:#0B1324; margin-top:auto; margin-bottom:5px; }
+        .fis-w-obr .status-chip{ align-self:flex-start; margin-top:auto; }
+        .fis-w-obr-valor + .status-chip{ margin-top:0; }
+        .fis-w-link{ display:flex; align-items:center; justify-content:center; gap:4px; width:100%; margin-top:14px; padding:9px; border:0; background:none; color:var(--color-primary); font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer; border-radius:9px; transition:background .14s; }
+        .fis-w-link:hover{ background:rgba(var(--color-primary-rgb),.06); }
+
+        /* Financeiro Empresa — cards principais premium */
+        .fe-cards-grid{ display:grid; grid-template-columns:repeat(6,1fr); gap:14px; }
+        @media(max-width:1280px){ .fe-cards-grid{ grid-template-columns:repeat(3,1fr); } }
+        @media(max-width:720px){ .fe-cards-grid{ grid-template-columns:repeat(2,1fr); } }
+        .fe-card{ background:var(--color-surface); border:1px solid #E4E7EC; border-radius:16px; padding:15px; box-shadow:0 1px 3px rgba(11,19,36,.04); transition:transform .18s, box-shadow .18s, border-color .18s; text-align:left; font-family:inherit; cursor:pointer; width:100%; display:flex; flex-direction:column; min-height:140px; }
+        .fe-card:hover{ transform:translateY(-3px); box-shadow:0 12px 28px rgba(11,19,36,.09); }
+        .fe-card:active{ transform:translateY(-1px) scale(.99); }
+        .fe-card.on{ border-color:var(--color-primary); box-shadow:0 0 0 2px var(--color-primary), 0 12px 28px rgba(11,19,36,.1); }
+        .fe-card.on .fe-card-sub{ color:var(--color-primary); font-weight:600; }
+        .fe-card-ico{ width:34px; height:34px; border-radius:10px; display:flex; align-items:center; justify-content:center; color:#fff; margin-bottom:11px; flex-shrink:0; }
+        .fe-card-lbl{ font-size:11.5px; color:var(--color-text-muted); text-transform:uppercase; letter-spacing:.03em; font-weight:600; line-height:1.25; }
+        .fe-card-val{ font-size:19px; font-weight:700; color:var(--color-text); letter-spacing:-.03em; margin-top:3px; line-height:1.15; overflow-wrap:anywhere; }
+        /* o rodapé sempre encostado embaixo → todos os cards alinham */
+        .fe-card-sub{ font-size:11px; color:#9CA3AF; margin-top:auto; padding-top:6px; line-height:1.3; }
+        .fe-card-saldos{ display:flex; flex-direction:column; gap:1px; margin-top:auto; padding-top:6px; }
+
+        /* Saldos separados no card */
+        .fe-card-saldos span{ font-size:10.5px; color:#9CA3AF; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .fe-card-saldos b{ font-weight:600; color:#6B7280; }
+
+        /* Auditoria do caixa */
+        .aud-saldos{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+        @media(max-width:560px){ .aud-saldos{ grid-template-columns:1fr; } }
+        .aud-saldo{ background:#F8F9FB; border:1px solid #EFF0F2; border-radius:12px; padding:13px 14px; }
+        .aud-saldo.destaque{ background:rgba(var(--color-primary-rgb),.05); border-color:rgba(var(--color-primary-rgb),.2); }
+        .aud-saldo-v{ font-size:19px; font-weight:700; color:#0B1324; margin:3px 0 2px; }
+        .aud-origem{ display:flex; align-items:center; gap:9px; padding:8px 10px; border-radius:9px; background:#FAFBFC; }
+        .aud-origem-dot{ width:9px; height:9px; border-radius:99px; flex-shrink:0; }
+        .aud-bloco{ border:1px solid #FECACA; background:#FEF2F2; border-radius:12px; padding:13px 14px; }
+
+        /* ==========================================================
+           POLIMENTO MOBILE — padroniza altura, fonte e alinhamento
+           dos cards em telas pequenas.
+           ========================================================== */
+        @media(max-width:720px){
+          /* Cards do Financeiro: 2 colunas, altura e fonte consistentes */
+          .fe-card{ min-height:132px; padding:13px; }
+          .fe-card-ico{ width:30px; height:30px; border-radius:9px; margin-bottom:9px; }
+          .fe-card-lbl{ font-size:10.5px; }
+          .fe-card-val{ font-size:16px; }
+          .fe-card-sub{ font-size:10px; }
+          .fe-card-saldos span{ font-size:9.5px; }
+
+          /* KPIs do módulo Mudanças */
+          .mud-kpi{ min-height:130px; padding:13px; }
+          .mud-kpi-ico{ width:32px; height:32px; margin-bottom:8px; }
+          .mud-kpi-num{ font-size:21px; }
+          .mud-kpi-lbl{ font-size:11.5px; }
+
+          /* Cards de rota/orçamento */
+          .orc-card{ padding:14px; }
+          .orc-meta-v{ font-size:12.5px; }
+
+          /* Painel Fiscal */
+          .fis-head{ padding:15px 16px; }
+          .fis-head-titulo{ font-size:17px; }
+          .fis-pct{ font-size:22px; }
+          .fis-limite-atual{ font-size:19px; }
+          .fis-metric-v{ font-size:15px; }
+          .fis-obr-valor{ font-size:17px; }
+          .fis-w-limite{ font-size:17px; }
+          .fis-w-valor{ font-size:16px; }
+          .fis-w-pct{ font-size:20px; }
+
+          /* Recorrências */
+          .fe-rec-m-val{ font-size:16px; }
+
+          /* Fluxo de caixa */
+          .fe-flux-saldo{ font-size:20px; }
+          .fe-flux-stat-val{ font-size:13px; }
+
+          /* Auditoria */
+          .aud-saldo-v{ font-size:17px; }
+
+          /* Métricas genéricas não estouram */
+          .metric-box{ padding:11px; }
+        }
+
+        @media(max-width:400px){
+          .fe-card-val{ font-size:14.5px; }
+          .fe-card{ min-height:124px; }
+          .mud-kpi-num{ font-size:19px; }
+          .fis-pct{ font-size:19px; }
+        }
+
+        /* Valores monetários nunca estouram o card */
+        .mono{ font-variant-numeric:tabular-nums; }
+        .fe-card-val, .mud-kpi-num, .fis-metric-v, .aud-saldo-v, .fe-rec-m-val,
+        .fis-w-limite, .fis-w-valor, .fe-flux-saldo{ min-width:0; max-width:100%; }
+
+        /* Saúde Financeira — velocímetro */
+        .fe-gauge-card{ transition:transform .2s, box-shadow .2s; }
+        .fe-gauge-card:hover{ transform:translateY(-2px); box-shadow:0 14px 32px rgba(11,19,36,.08); }
+        .fe-gauge-head{ margin-bottom:8px; }
+        .gauge-wrap{ max-width:330px; margin:0 auto; }
+        .gauge-svg{ width:100%; height:auto; display:block; overflow:visible; }
+        .gauge-tick{ font-size:10px; fill:#9CA3AF; font-family:'Geist Mono',ui-monospace,monospace; }
+        .gauge-svg-status{ font-size:14px; font-weight:700; font-family:'Geist',system-ui,sans-serif; }
+        .gauge-svg-nota{ font-size:40px; font-weight:700; fill:#0B1324; font-family:'Geist Mono',ui-monospace,monospace; letter-spacing:-.02em; }
+        .gauge-svg-max{ font-size:12px; fill:#9CA3AF; font-family:'Geist',system-ui,sans-serif; }
+        .fe-gauge-legend{ display:flex; flex-wrap:wrap; justify-content:center; gap:6px; margin-top:10px; }
+        .fe-gauge-leg{ display:flex; align-items:center; gap:5px; padding:5px 10px; border-radius:99px; background:#F6F7F9; transition:background .2s, transform .2s; }
+        .fe-gauge-leg.on{ background:#0B13240D; transform:scale(1.04); box-shadow:0 0 0 1.5px currentColor inset; }
+        .fe-gauge-leg-dot{ width:8px; height:8px; border-radius:99px; flex-shrink:0; }
+        .fe-gauge-leg-faixa{ font-size:10.5px; color:#9CA3AF; }
+        .fe-gauge-leg-lbl{ font-size:11.5px; font-weight:600; color:#374151; }
+        .fe-gauge-resumo{ display:flex; align-items:center; gap:11px; margin-top:16px; padding:13px 15px; border:1px solid; border-radius:12px; flex-wrap:wrap; }
+        .fe-gauge-resumo-ico{ width:30px; height:30px; border-radius:9px; display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
+        .fe-gauge-resumo-txt{ flex:1; min-width:160px; font-size:13.5px; color:#0B1324; font-weight:500; }
+        .fe-saude-btn{ display:inline-flex; align-items:center; gap:3px; font-size:12.5px; font-weight:600; color:var(--color-primary); background:none; border:0; cursor:pointer; font-family:inherit; }
+        .fe-saude-btn:hover{ text-decoration:underline; }
+        @media(max-width:520px){
+          .fe-gauge-leg-faixa{ display:none; }
+          .fe-gauge-legend{ gap:5px; }
+        }
+
+        /* Botão fechar dos banners */
+        .conc-fechar{ width:28px; height:28px; border-radius:8px; border:0; background:rgba(255,255,255,.6); color:#6B7280; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; transition:background .14s, color .14s; }
+        .conc-fechar:hover{ background:#fff; color:#0B1324; }
+
+        /* Legenda do fluxo de caixa */
+        .fe-flux-legenda{ display:flex; flex-wrap:wrap; gap:14px; justify-content:center; margin-top:10px; }
+        .fe-flux-legenda span{ display:inline-flex; align-items:center; gap:6px; font-size:11.5px; color:#6B7280; }
+        .fe-flux-legenda i{ width:11px; height:3px; border-radius:2px; display:inline-block; }
+        .fe-flux-legenda i.dash{ background:repeating-linear-gradient(90deg,currentColor 0 4px,transparent 4px 7px) !important; height:2px; }
+        /* anel usado no painel de detalhes */
+        .fe-saude-ring{ position:relative; width:74px; height:74px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:conic-gradient(var(--cor) var(--pct), #EFF1F4 0); }
+        .fe-saude-ring::before{ content:''; position:absolute; width:58px; height:58px; border-radius:50%; background:var(--color-surface); }
+        .fe-saude-nota{ position:relative; z-index:1; display:flex; align-items:baseline; gap:1px; }
+        .fe-saude-nota span{ font-size:22px; font-weight:700; color:var(--color-text); }
+        .fe-saude-nota small{ font-size:10px; color:#9CA3AF; }
+        .fe-saude-ring-lg{ width:96px; height:96px; flex-shrink:0; }
+        .fe-saude-ring-lg::before{ width:76px; height:76px; }
+        .fe-saude-ring-lg .fe-saude-nota span{ font-size:28px; }
+        .fe-saude-detail-top{ display:flex; align-items:center; gap:18px; }
+        .fe-fator{ display:flex; align-items:center; gap:9px; }
+        .fe-fator-ico{ width:20px; height:20px; border-radius:6px; display:flex; align-items:center; justify-content:center; flex-shrink:0; color:#fff; }
+        .fe-fator-ico.ok{ background:#16A34A; }
+        .fe-fator-ico.bad{ background:#DC2626; }
+        .fe-sugestoes{ background:#F8FAFC; border:1px solid #EEF1F5; border-radius:12px; padding:14px; }
+
+        /* Fluxo + categorias grid */
+        .fe-mid-grid{ display:grid; grid-template-columns:1.5fr 1fr; gap:16px; }
+        @media(max-width:1000px){ .fe-mid-grid{ grid-template-columns:1fr; } }
+
+        /* Cabeçalho e métricas do fluxo de caixa */
+        .fe-flux-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:10px; flex-wrap:wrap; }
+        .fe-flux-lbl{ font-size:11px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; font-weight:600; margin-top:6px; }
+        .fe-flux-saldo-row{ display:flex; align-items:center; gap:9px; margin-top:2px; }
+        .fe-flux-saldo{ font-size:23px; font-weight:700; color:#0B1324; letter-spacing:-.02em; line-height:1.1; }
+        .fe-flux-delta{ display:inline-flex; align-items:center; gap:2px; padding:2px 8px; border-radius:99px; font-size:11.5px; font-weight:700; }
+        .fe-flux-delta.up{ background:#DCFCE7; color:#16A34A; }
+        .fe-flux-delta.down{ background:#FEE2E2; color:#DC2626; }
+        .fe-flux-leg{ margin-top:4px; }
+        .fe-flux-stats{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:14px; padding-top:14px; border-top:1px solid #F1F2F4; }
+        @media(max-width:640px){ .fe-flux-stats{ grid-template-columns:repeat(2,1fr); } .fe-flux-leg{ display:none; } }
+        .fe-flux-stat{ display:flex; align-items:center; gap:8px; min-width:0; }
+        .fe-flux-stat-ico{ width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .fe-flux-stat-lbl{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.02em; white-space:nowrap; }
+        .fe-flux-stat-val{ font-size:14px; font-weight:700; line-height:1.2; }
+        /* Rosca de categorias */
+        .fe-donut-wrap{ display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+        .fe-donut{ position:relative; width:190px; height:190px; flex-shrink:0; margin:0 auto; }
+        .fe-donut-center{ position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; pointer-events:none; }
+        .fe-donut-lbl{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.04em; }
+        .fe-donut-val{ font-size:14px; font-weight:700; color:#0B1324; line-height:1.2; max-width:104px; text-align:center; word-break:break-word; }
+        .fe-donut-legend{ flex:1; min-width:180px; display:flex; flex-direction:column; gap:4px; }
+        .fe-leg-item{ display:grid; grid-template-columns:auto 1fr auto auto; align-items:center; gap:8px; padding:5px 7px; border-radius:8px; background:none; border:0; cursor:pointer; font-family:inherit; text-align:left; transition:background .14s; }
+        .fe-leg-item:hover{ background:#F6F7F9; }
+        .fe-leg-dot{ width:9px; height:9px; border-radius:99px; flex-shrink:0; }
+        .fe-leg-nome{ font-size:12.5px; color:#374151; font-weight:500; }
+        .fe-leg-pct{ font-size:12px; color:#9CA3AF; }
+        .fe-leg-val{ font-size:12px; font-weight:600; color:#0B1324; }
+        /* Vencimentos */
+        .fe-venc-list{ display:flex; flex-direction:column; gap:2px; }
+        .fe-venc-row{ display:flex; align-items:center; gap:12px; padding:9px 6px; border-radius:9px; transition:background .12s; }
+        .fe-venc-row:hover{ background:#F9FAFB; }
+        .fe-venc-data{ width:42px; height:42px; border-radius:10px; background:#F1F3F5; display:flex; flex-direction:column; align-items:center; justify-content:center; flex-shrink:0; }
+        .fe-venc-dia{ font-size:15px; font-weight:700; color:#0B1324; line-height:1; }
+        .fe-venc-mes{ font-size:9.5px; color:#9CA3AF; text-transform:uppercase; }
+        .fe-venc-badge{ display:inline-block; margin-top:2px; padding:1px 7px; border-radius:99px; font-size:9.5px; font-weight:600; }
+        .fe-venc-badge.pend{ background:#FEF3C7; color:#B45309; }
+        .fe-venc-badge.venc{ background:#FEE2E2; color:#DC2626; }
+        .fe-link-btn{ font-size:12.5px; font-weight:600; color:var(--color-primary); background:none; border:0; cursor:pointer; font-family:inherit; }
+        .fe-link-btn:hover{ text-decoration:underline; }
+        .fe-cat-item{ display:flex; align-items:center; gap:12px; padding:9px 11px; border-radius:9px; background:#F9FAFB; }
+
+        /* Recorrências */
+        .fe-rec-grid{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+        @media(max-width:820px){ .fe-rec-grid{ grid-template-columns:1fr; } }
+        .fe-rec-ico{ width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#fff; flex-shrink:0; }
+        .fe-rec-metrics{ display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+        .fe-rec-m-lbl{ font-size:10.5px; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; }
+        .fe-rec-m-val{ font-size:18px; font-weight:700; color:#0B1324; margin-top:2px; line-height:1.15; }
+        .fe-rec-row{ display:flex; align-items:center; gap:12px; padding:11px 12px; border:1px solid #EFF0F2; border-radius:11px; background:#fff; transition:border-color .14s; }
+        .fe-rec-row:hover{ border-color:#E0E3E8; }
+        .fe-rec-actions{ display:flex; gap:1px; flex-shrink:0; }
+        .fe-previa{ background:#F8FAFC; border:1px solid #EEF1F5; border-radius:11px; padding:12px; }
+        .fe-del-op{ width:100%; text-align:left; padding:12px 14px; border:1px solid #E4E7EC; border-radius:11px; background:#fff; cursor:pointer; font-family:inherit; transition:border-color .14s, background .14s; }
+        .fe-del-op:hover{ border-color:var(--color-primary); background:#FAFBFF; }
+        .fe-del-op.danger:hover{ border-color:#DC2626; background:#FEF2F2; }
+
+        /* Calendário financeiro */
+        .fe-cal-nav{ display:flex; align-items:center; gap:8px; }
+        .fe-cal-navbtn{ width:30px; height:30px; border-radius:8px; border:1px solid #E4E7EC; background:#fff; color:#374151; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .14s; }
+        .fe-cal-navbtn:hover{ background:#F3F4F6; }
+        .fe-cal-mes{ font-size:14px; font-weight:600; color:#0B1324; min-width:130px; text-align:center; }
+        .fe-cal-hoje{ padding:6px 12px; border-radius:8px; border:1px solid #E4E7EC; background:#fff; font-family:inherit; font-size:12.5px; font-weight:600; color:var(--color-primary); cursor:pointer; transition:background .14s; }
+        .fe-cal-hoje:hover{ background:#F3F4F6; }
+        .fe-cal-grid{ display:grid; grid-template-columns:repeat(7,1fr); gap:5px; }
+        .fe-cal-wd{ text-align:center; font-size:10.5px; font-weight:600; color:#9CA3AF; text-transform:uppercase; letter-spacing:.03em; padding:4px 0; }
+        .fe-cal-cell{ aspect-ratio:1; border:1px solid #EFF0F2; border-radius:9px; background:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px; font-family:inherit; cursor:default; padding:2px; transition:border-color .14s, background .14s, transform .12s; }
+        .fe-cal-cell.empty{ border:0; background:transparent; }
+        .fe-cal-cell.ativo{ cursor:pointer; }
+        .fe-cal-cell.ativo:hover{ border-color:var(--color-primary); background:#FAFBFF; transform:translateY(-1px); }
+        .fe-cal-cell.hoje{ border-color:var(--color-primary); box-shadow:0 0 0 1.5px var(--color-primary) inset; }
+        .fe-cal-dia{ font-size:13px; font-weight:600; color:#374151; }
+        .fe-cal-cell.hoje .fe-cal-dia{ color:var(--color-primary); font-weight:700; }
+        .fe-cal-dots{ display:flex; gap:2.5px; height:6px; align-items:center; }
+        .fe-cal-dot{ width:6px; height:6px; border-radius:99px; display:inline-block; flex-shrink:0; }
+        .fe-cal-legend{ display:flex; flex-wrap:wrap; gap:14px; margin-top:14px; padding-top:12px; border-top:1px solid #F1F2F4; }
+        .fe-cal-legend span{ display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:#6B7280; }
+        @media(max-width:640px){
+          .fe-cal-grid{ gap:3px; }
+          .fe-cal-dia{ font-size:11.5px; }
+          .fe-cal-cell{ border-radius:7px; }
+        }
         .pf-tile:hover{ transform:translateY(-4px); box-shadow:0 8px 16px rgba(11,19,36,.07),0 22px 50px rgba(11,19,36,.10); }
         .pf-tile:active{ transform:scale(.985); }
         .pf-tile-head{ display:flex; align-items:center; justify-content:space-between; gap:6px; min-height:18px; }
@@ -3050,7 +6095,7 @@ function AppInner() {
         .fin-card::before{ content:''; position:absolute; top:0; left:0; right:0; height:3px; }
         .fin-green::before{ background:linear-gradient(90deg,#087F5B,#34D399); }
         .fin-red::before{ background:linear-gradient(90deg,#B4234B,#FB7185); }
-        .fin-blue::before{ background:linear-gradient(90deg,#0B1533,#3B82F6); }
+        .fin-blue::before{ background:linear-gradient(90deg,var(--color-primary),var(--color-accent)); }
         .fin-card:hover{ transform:translateY(-2px); box-shadow:0 6px 12px rgba(11,19,36,.07),0 18px 44px rgba(11,19,36,.09); }
         .fin-spark{ height:52px; margin-top:10px; }
         .fin-ico{ display:inline-flex; padding:8px; border-radius:10px; }
@@ -3066,8 +6111,9 @@ function AppInner() {
         .mini-label{ font-size:clamp(.6rem,1.8vw,.68rem); letter-spacing:.04em; text-transform:uppercase; font-weight:500; color:#6B7280; line-height:1.2; }
         .mini-val{ font-size:clamp(.85rem,3vw,1.05rem); font-weight:600; margin-top:5px; word-break:break-word; line-height:1.1; }
         .tx-list{ display:flex; flex-direction:column; gap:6px; padding:10px; }
-        .tx-item{ display:flex; align-items:center; gap:11px; padding:9px 11px; border:1px solid #EFF0F2; border-radius:11px; background:#fff; transition:transform .15s,box-shadow .15s,border-color .15s; }
+        .tx-item{ display:flex; align-items:center; gap:11px; padding:9px 11px; border:1px solid #EFF0F2; border-radius:11px; background:#fff; transition:transform .15s,box-shadow .15s,border-color .15s; position:relative; }
         .tx-item:hover{ border-color:#E5E7EB; box-shadow:0 4px 16px rgba(11,19,36,.07); transform:translateY(-1px); }
+        .tx-item:has(.cat-drop-menu){ z-index:60; transform:none !important; box-shadow:0 10px 30px rgba(11,19,36,.16); }
         .tx-overdue{ border-color:#FECDD3; background:linear-gradient(0deg,#FFF5F6,#fff); box-shadow:inset 3px 0 0 #B4234B; }
         .tx-overdue:hover{ border-color:#FDA4AF; box-shadow:inset 3px 0 0 #B4234B,0 4px 16px rgba(180,35,75,.12); }
         .tx-canc{ text-decoration:line-through; color:#9CA3AF; }
@@ -3175,6 +6221,58 @@ function AppInner() {
         .imp-preview::-webkit-scrollbar-thumb{ background:#D1D5DB; border-radius:99px; }
         .imp-row{ display:flex; align-items:center; gap:10px; padding:9px 11px; background:#fff; border:1px solid #EFF0F2; border-radius:11px; transition:border-color .15s, box-shadow .15s; }
         .imp-row:hover{ border-color:#E5E7EB; box-shadow:0 3px 12px rgba(11,19,36,.05); }
+        .imp-log{ padding:9px 12px; border-radius:10px; border:1px solid; }
+        .imp-log.ok{ background:#ECFDF5; border-color:#A7F3D0; color:#065F46; }
+        .imp-log.err{ background:#FEF3F2; border-color:#FBC8D2; color:#9F1239; }
+
+        /* OCR Scan */
+        .scan-strip{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:11px 14px; background:linear-gradient(135deg,#EEF2FF,#F5F3FF); border:1px solid #E0E7FF; border-radius:12px; }
+        .scan-btn{ display:inline-flex; align-items:center; gap:6px; padding:7px 12px; border-radius:10px; font-size:12.5px; font-weight:600; color:#fff; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); cursor:pointer; border:0; font-family:inherit; transition:transform .15s, box-shadow .15s; }
+        .scan-btn:hover:not(.busy){ transform:translateY(-1px); box-shadow:0 8px 20px rgba(29,78,216,.32); }
+        .scan-btn:active:not(.busy){ transform:scale(.98); }
+        .scan-btn-md{ padding:9px 14px; font-size:13px; }
+        .scan-btn.busy{ opacity:.85; cursor:wait; background:linear-gradient(135deg,#6B7280,#9CA3AF); }
+        .scan-spin{ display:inline-block; width:12px; height:12px; border-radius:99px; border:2px solid rgba(255,255,255,.4); border-top-color:#fff; animation:scan-rot .8s linear infinite; }
+        @keyframes scan-rot{ to{ transform:rotate(360deg); } }
+
+        /* Conciliação */
+        .conc-banner{ display:flex; align-items:flex-start; gap:14px; padding:14px 16px; background:linear-gradient(135deg,#FFF7ED,#FEF3C7); border:1px solid #FCD34D; border-radius:14px; flex-wrap:wrap; }
+        .conc-banner-ico{ width:38px; height:38px; border-radius:10px; background:#F59E0B; color:#fff; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
+        .conc-banner-title{ font-size:14px; font-weight:600; color:#0B1324; line-height:1.3; }
+        .conc-banner-sub{ font-size:12.5px; color:#78350F; margin-top:3px; line-height:1.4; }
+        .conc-btn{ display:inline-flex; align-items:center; gap:5px; padding:5px 11px; border-radius:8px; background:#087F5B; color:#fff; border:0; font-family:inherit; font-size:12.5px; font-weight:600; cursor:pointer; transition:transform .15s, box-shadow .15s; }
+        .conc-btn:hover{ transform:translateY(-1px); box-shadow:0 6px 14px rgba(8,127,91,.28); background:#0B815E; }
+        .conc-btn:active{ transform:scale(.98); }
+
+        /* Categoria dropdown */
+        .cat-drop-wrap{ position:relative; display:inline-flex; }
+        .cat-drop-btn{ display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:99px; background:#EEF0F3; color:#3F4756; border:1px solid transparent; font-family:inherit; font-size:11px; font-weight:500; letter-spacing:.02em; cursor:pointer; transition:background .12s, border-color .12s; }
+        .cat-drop-btn:hover{ background:#E1E4EA; border-color:#C9CDD3; }
+        .cat-drop-menu{ position:absolute; top:calc(100% + 6px); left:0; z-index:40; min-width:230px; max-width:280px; background:#fff; border:1px solid #E5E7EB; border-radius:12px; box-shadow:0 12px 32px rgba(11,19,36,.14); padding:6px; }
+        .cat-drop-header{ font-size:10.5px; font-weight:600; color:#6B7280; text-transform:uppercase; letter-spacing:.06em; padding:6px 8px 4px; }
+        .cat-drop-list{ max-height:220px; overflow-y:auto; }
+        .cat-drop-list::-webkit-scrollbar{ width:5px; }
+        .cat-drop-list::-webkit-scrollbar-thumb{ background:#D1D5DB; border-radius:99px; }
+        .cat-drop-item{ display:flex; align-items:center; gap:6px; width:100%; padding:7px 9px; border:0; background:transparent; color:#0B1324; font-family:inherit; font-size:12.5px; text-align:left; border-radius:7px; cursor:pointer; transition:background .1s; }
+        .cat-drop-item:hover{ background:#F4F6F8; }
+        .cat-drop-item.on{ background:#EEF2FF; color:#1D4ED8; font-weight:600; }
+        .cat-drop-item.on svg{ margin-left:auto; }
+        .cat-drop-suggested{ color:#1D4ED8; font-weight:500; }
+        .cat-drop-hint{ margin-left:auto; font-size:10px; color:#9CA3AF; font-weight:400; }
+        .cat-drop-sep{ height:1px; background:#F1F2F4; margin:5px 0; }
+        .cat-drop-add{ color:#087F5B; font-weight:600; }
+        .cat-drop-add:hover{ background:#ECFDF5; }
+        .cat-drop-new{ display:flex; gap:5px; padding:6px 8px; }
+        .cat-drop-new .inp{ flex:1; min-width:0; }
+
+        /* Logo editor */
+        .logo-editor-preview{ position:relative; width:240px; height:240px; margin:0 auto; border-radius:99px; overflow:hidden; background:#F4F6F8; border:2px solid #E5E7EB; cursor:grab; display:flex; align-items:center; justify-content:center; touch-action:none; }
+        .logo-editor-preview:active{ cursor:grabbing; }
+        .zoom-slider{ flex:1; min-width:0; -webkit-appearance:none; appearance:none; height:5px; background:#E5E7EB; border-radius:99px; outline:none; }
+        .zoom-slider::-webkit-slider-thumb{ -webkit-appearance:none; appearance:none; width:20px; height:20px; border-radius:99px; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); cursor:pointer; border:2px solid #fff; box-shadow:0 2px 6px rgba(11,19,36,.2); }
+        .zoom-slider::-moz-range-thumb{ width:20px; height:20px; border-radius:99px; background:linear-gradient(135deg,#1D4ED8,#0EA5E9); cursor:pointer; border:2px solid #fff; }
+        .zoom-btn{ width:32px; height:32px; border-radius:8px; background:#F4F6F8; color:#0B1324; border:1px solid #E5E7EB; font-family:inherit; font-size:16px; font-weight:600; cursor:pointer; flex-shrink:0; transition:background .12s; }
+        .zoom-btn:hover{ background:#E5E7EB; }
 
         /* WMS */
         .wms-list{ display:flex; flex-direction:column; gap:6px; }
@@ -3193,7 +6291,7 @@ function AppInner() {
         .btn-sm{ padding:5px 11px; font-size:12.5px; }
       `}</style>
 
-      <Sidebar current={route} onNav={setRoute} open={sidebarOpen} onClose={() => setSidebarOpen(false)} nomeEmpresa={data.config?.nomeEmpresa || company?.nome || 'Empresa'} logoUrl={data.config?.logoUrl} permitidos={isOwner ? null : modulosPermitidos} />
+      <Sidebar current={route} onNav={setRoute} open={sidebarOpen} onClose={() => setSidebarOpen(false)} nomeEmpresa={data.config?.nomeEmpresa || company?.nome || 'Empresa'} logoUrl={data.config?.logoUrl} permitidos={isGestor ? null : modulosPermitidos} isOwner={isOwner} />
 
       <main className="flex-1 min-w-0">
         <TopBar
@@ -3203,26 +6301,39 @@ function AppInner() {
           empresa={data.config?.nomeEmpresa || company?.nome}
           logoUrl={data.config?.logoUrl}
           userName={user?.displayName || user?.email}
-          onLogout={logout}
+          papel={papel}
+          onLogout={openLogout}
         />
-        {!loaded ? <div className="p-10 t-soft text-sm">Carregando dados…</div> : <>
+        {!loaded ? (
+          <div className="p-4 sm:p-6 space-y-4">
+            <div className="skel-grid">
+              {[0, 1, 2, 3].map(i => <div key={i} className="skel-card" />)}
+            </div>
+            <div className="skel-line" style={{ width: '100%', height: 120 }} />
+            <div className="skel-line" style={{ width: '100%', height: 120 }} />
+          </div>
+        ) : <>
           {route === 'dashboard' && <Dashboard data={data} />}
-          {route === 'finEmpresa' && <FinanceiroEmpresa data={data} setData={setData} />}
+          {route === 'finEmpresa' && <FinanceiroEmpresa data={data} setData={setData} onNav={setRoute} />}
           {route === 'linhas' && <Linhas data={data} setData={setData} />}
           {route === 'veiculos' && <Veiculos data={data} setData={setData} />}
           {route === 'combustivel' && <Combustivel data={data} setData={setData} />}
           {route === 'manutencao' && <Manutencao data={data} setData={setData} />}
-          {route === 'finPessoal' && <FinanceiroPessoal data={data} setData={setData} />}
+          {route === 'finPessoal' && isOwner && <FinanceiroPessoal data={data} setData={setData} />}
           {route === 'motoristas' && <Motoristas data={data} setData={setData} />}
           {route === 'contratos' && <Contratos data={data} setData={setData} />}
           {route === 'crm' && <CrmComercial data={data} setData={setData} />}
           {route === 'wms' && <ArmazemWMS data={data} setData={setData} />}
           {route === 'documentos' && <Documentos data={data} setData={setData} />}
+          {route === 'mudancas' && <Mudancas data={data} setData={setData} />}
+          {route === 'entregas' && <Entregas data={data} setData={setData} />}
+          {route === 'fiscal' && <PainelFiscal data={data} setData={setData} />}
           {route === 'relatorios' && <Relatorios data={data} />}
           {route === 'importacao' && <Importacao data={data} setData={setData} />}
-          {route === 'config' && <Configuracoes data={data} setData={setData} />}
+          {route === 'config' && <Configuracoes data={data} setData={setData} onRequestLogout={openLogout} />}
         </>}
       </main>
+      <LogoutConfirm open={logoutOpen} onCancel={() => setLogoutOpen(false)} onConfirm={() => { setLogoutOpen(false); logout(); }} />
     </div>
   );
 }
@@ -3231,6 +6342,120 @@ function AppInner() {
 // IMPORTAÇÃO (OFX + Boleto + CSV)
 // ============================================================
 const BANCOS_IMP = ['Itaú', 'Cora', 'BTG Pactual', 'Santander', 'Bradesco', 'Banco do Brasil', 'Caixa', 'Sicoob', 'Sicredi', 'Inter', 'Nubank', 'C6 Bank', 'Safra', 'Original', 'Outro'];
+
+// ============================================================
+// CONCILIAÇÃO POR CORRESPONDÊNCIA (anti-duplicidade)
+// ============================================================
+// Quando a pessoa importa o extrato, um pagamento que já existe no sistema
+// (ex.: gerado por uma despesa recorrente, ou lançado à mão) NÃO deve virar
+// um lançamento novo — deve dar BAIXA no que já existe.
+// Aqui detectamos essas correspondências antes de importar.
+
+// Normaliza texto pra comparação (sem acento, maiúsculas, sem ruído de banco)
+function normalizarDesc(s) {
+  return (s || '')
+    .toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\b(PAGAMENTO|PAGTO|PGTO|DEBITO|DEB|CREDITO|CRED|TED|DOC|PIX|BOLETO|TRANSFERENCIA|TRANSF|COMPRA|CARTAO)\b/g, ' ')
+    .replace(/[^A-Z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Similaridade simples: quantas palavras significativas as duas descrições compartilham
+function similaridade(a, b) {
+  const pa = normalizarDesc(a).split(' ').filter(w => w.length >= 3);
+  const pb = normalizarDesc(b).split(' ').filter(w => w.length >= 3);
+  if (pa.length === 0 || pb.length === 0) return 0;
+  const setB = new Set(pb);
+  const comuns = pa.filter(w => setB.has(w)).length;
+  return comuns / Math.min(pa.length, pb.length);
+}
+
+// Diferença de dias entre duas datas ISO
+function diffDias(isoA, isoB) {
+  const a = new Date(isoA + 'T00:00:00');
+  const b = new Date(isoB + 'T00:00:00');
+  return Math.abs(Math.round((a - b) / 86400000));
+}
+
+/**
+ * Procura, entre os lançamentos existentes em aberto, um que corresponda
+ * à linha do extrato. Casa por: mesmo tipo + valor exato + data próxima
+ * (janela de dias) + descrição parecida OU mesma categoria.
+ * Retorna { lancamento, confianca } ou null.
+ */
+function acharCorrespondente(linha, existentes, janelaDias = 5) {
+  const candidatos = existentes.filter(x => {
+    if (x.tipo !== linha.tipo) return false;
+    const st = effStatus(x);
+    if (st !== 'pendente' && st !== 'vencido') return false;   // só o que está em aberto
+    if (Math.abs((x.valor || 0) - (linha.valor || 0)) > 0.01) return false; // valor exato
+    if (!x.data || !linha.data) return false;
+    return diffDias(x.data, linha.data) <= janelaDias;
+  });
+  if (candidatos.length === 0) return null;
+
+  // Escolhe o de maior similaridade de descrição; desempata pela data mais próxima
+  let melhor = null, melhorScore = -1;
+  candidatos.forEach(x => {
+    const sim = similaridade(x.descricao, linha.descricao);
+    const proximidade = 1 - (diffDias(x.data, linha.data) / (janelaDias + 1));
+    const score = sim * 0.75 + proximidade * 0.25;
+    if (score > melhorScore) { melhorScore = score; melhor = x; }
+  });
+
+  // Confiança: alta se a descrição bate bem; média se só valor+data batem
+  const sim = similaridade(melhor.descricao, linha.descricao);
+  let confianca = 'media';
+  if (sim >= 0.5) confianca = 'alta';
+  else if (melhor.recorrenciaId) confianca = 'alta'; // recorrência com valor e data batendo é forte indício
+  return { lancamento: melhor, confianca, similaridade: sim };
+}
+
+// ============================================================
+// DETECÇÃO DE ABASTECIMENTO NO EXTRATO
+// ============================================================
+// Um abastecimento aparece no extrato como despesa (e continua lá — é um gasto
+// real). Mas ele também é um registro OPERACIONAL: serve pra calcular km/L,
+// custo por km e consumo por veículo. Aqui detectamos as compras em posto e
+// oferecemos criar também o registro no módulo Combustível.
+// Obs.: o módulo Combustível não entra na soma de despesas do Financeiro,
+// então não há risco de contar o gasto duas vezes.
+
+const REDES_COMBUSTIVEL = [
+  'IPIRANGA', 'SHELL', 'PETROBRAS', 'BR DISTRIBUIDORA', 'ALE', 'RAIZEN',
+  'TEXACO', 'ESSO', 'GASBARRA', 'RODOIL', 'CHARRUA', 'SIM REDE',
+];
+
+// Reconhece uma linha de extrato que é compra de combustível
+function isAbastecimento(descricao, categoria) {
+  const d = (descricao || '').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (categoria === 'Combustível') return true;
+  if (/\bPOSTO\b|\bAUTO\s*POSTO\b|\bCOMBUSTIVEL\b|\bABASTEC/.test(d)) return true;
+  return REDES_COMBUSTIVEL.some(r => d.includes(r));
+}
+
+// Extrai um nome de posto legível da descrição do banco
+function extrairPosto(descricao) {
+  let d = (descricao || '')
+    .toUpperCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    // tira ruído bancário
+    .replace(/\b(COMPRA|CARTAO|DEBITO|DEB|CREDITO|CRED|AUTOMATICO|AUT|PAGAMENTO|PAGTO|PGTO|PIX|TED|DOC|ELO|VISA|MASTER|MASTERCARD|TRANSFERENCIA)\b/g, ' ')
+    .replace(/\b(LTDA|ME|EIRELI|SA|S\/A|EPP|CIA|COM|COMERCIO|DERIVADOS|PETROLEO|COMBUSTIVEIS|DISTRIBUIDORA)\b/g, ' ')
+    .replace(/\d{2}\/\d{2}/g, ' ')     // datas coladas
+    .replace(/[^A-Z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!d) return 'Posto não identificado';
+  // Title Case
+  const titulo = d.toLowerCase().split(' ')
+    .filter(Boolean)
+    .map(w => w.length <= 2 ? w : w[0].toUpperCase() + w.slice(1))
+    .join(' ');
+  return titulo.charAt(0).toUpperCase() + titulo.slice(1);
+}
 
 function Importacao({ data, setData }) {
   const [banco, setBanco] = useState('Itaú');
@@ -3246,42 +6471,91 @@ function Importacao({ data, setData }) {
   const entradas = preview.filter(x => x.tipo === 'entrada').reduce((a, b) => a + b.valor, 0);
   const saidas = preview.filter(x => x.tipo === 'saida').reduce((a, b) => a + b.valor, 0);
 
+  // Detecta linhas do extrato que correspondem a lançamentos JÁ existentes em aberto
+  // (recorrências geradas ou lançamentos manuais). Evita duplicar o mesmo pagamento.
+  const [ignorados, setIgnorados] = useState({}); // idx -> true (usuário optou por importar como novo)
+  const correspondencias = useMemo(() => {
+    const usados = new Set();
+    return preview.map((linha, idx) => {
+      const disponiveis = (data.finEmpresa || []).filter(x => !usados.has(x.id));
+      const match = acharCorrespondente(linha, disponiveis);
+      if (match) usados.add(match.lancamento.id);
+      return match ? { idx, linha, ...match } : null;
+    }).filter(Boolean).filter(c => !ignorados[c.idx]);
+  }, [preview, data.finEmpresa, ignorados]);
+
+  const idxComMatch = useMemo(() => new Set(correspondencias.map(c => c.idx)), [correspondencias]);
+
+  // Abastecimentos detectados no extrato (viram também registro no módulo Combustível)
+  const [criarAbast, setCriarAbast] = useState(true);
+  const abastecimentos = useMemo(() => {
+    return preview
+      .map((linha, idx) => ({ idx, linha }))
+      .filter(({ linha }) => linha.tipo === 'saida' && isAbastecimento(linha.descricao, linha.categoria))
+      .map(({ idx, linha }) => ({ idx, linha, posto: extrairPosto(linha.descricao) }));
+  }, [preview]);
+
+  const [importLog, setImportLog] = useState([]);
+
   const processFiles = async (files) => {
     if (!files || files.length === 0) return;
     setBusy(true);
     const all = [];
     const empresaCnpj = data.config?.cnpj || '';
+    const log = [];
     for (const f of files) {
       try {
-        const ext = f.name.split('.').pop().toLowerCase();
+        const ext = (f.name.split('.').pop() || '').toLowerCase();
+        const mime = (f.type || '').toLowerCase();
+        // Rejeitar formatos que não sabemos ler
+        if (mime.startsWith('image/') || ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif'].includes(ext)) {
+          log.push({ nome: f.name, ok: false, msg: 'Foto/imagem — o app não lê texto de foto (OCR ainda não implementado). Envie o arquivo original (OFX/CSV/XLSX/XML).' });
+          continue;
+        }
+        if (mime === 'application/pdf' || ext === 'pdf') {
+          log.push({ nome: f.name, ok: false, msg: 'PDF ainda não suportado. Use o OFX/CSV/Excel do internet banking ou o XML da nota.' });
+          continue;
+        }
         if (ext === 'xlsx' || ext === 'xls') {
           const buffer = await f.arrayBuffer();
           const parsed = parseXLSX(buffer, banco);
           setSource('xlsx');
           all.push(...parsed);
+          log.push({ nome: f.name, ok: parsed.length > 0, msg: parsed.length > 0 ? `Excel · ${parsed.length} lançamento(s) extraídos` : 'Excel lido, mas não encontrei colunas de data/valor. Confira o cabeçalho.' });
           continue;
         }
         const text = await f.text();
-        if (ext === 'xml' || /<(?:[\w-]+:)?(?:nfeProc|cteProc|NFe|CTe)\b/.test(text)) {
-          const parsed = parseXML(text, banco, empresaCnpj);
-          setSource('xml');
-          all.push(...parsed);
-        } else if (ext === 'ofx' || text.includes('<OFX') || text.includes('<STMTTRN>')) {
+        const isOfx = ext === 'ofx' || /<OFX|<STMTTRN>/i.test(text);
+        const isXml = ext === 'xml' || /<(?:[\w-]+:)?(?:nfeProc|cteProc|NFe|CTe)\b/.test(text);
+        const isCsv = ['csv', 'txt', 'tsv'].includes(ext);
+        if (isOfx) {
           const parsed = parseOFX(text, banco);
           setSource('ofx');
           all.push(...parsed);
-        } else if (['csv', 'txt', 'tsv'].includes(ext)) {
+          log.push({ nome: f.name, ok: parsed.length > 0, msg: parsed.length > 0 ? `OFX · ${parsed.length} transação(ões) extraídas` : 'OFX lido, mas sem transações reconhecidas.' });
+        } else if (isXml) {
+          const parsed = parseXML(text, banco, empresaCnpj);
+          setSource('xml');
+          all.push(...parsed);
+          log.push({ nome: f.name, ok: parsed.length > 0, msg: parsed.length > 0 ? `${parsed[0].tipoDoc === 'cte' ? 'CT-e' : 'NF-e'} · valor R$ ${parsed[0].valor.toFixed(2)}` : 'XML reconhecido mas sem valor válido.' });
+        } else if (isCsv) {
           const parsed = parseCSV(text, banco);
           setSource('csv');
           all.push(...parsed);
+          log.push({ nome: f.name, ok: parsed.length > 0, msg: parsed.length > 0 ? `CSV · ${parsed.length} linha(s) processadas` : 'CSV lido, mas não encontrei colunas de data/valor. Confira o cabeçalho (deve ter "Data", "Descrição" e "Valor").' });
+        } else {
+          log.push({ nome: f.name, ok: false, msg: `Formato "${ext}" não reconhecido. Suportados: OFX, CSV, TSV, XLSX/XLS, XML de NF-e/CT-e.` });
         }
       } catch (e) {
         console.error('[import] erro processando', f.name, e);
+        log.push({ nome: f.name, ok: false, msg: `Erro ao processar: ${e.message || e}` });
       }
     }
+    setImportLog(log);
     setPreview(all);
     setBusy(false);
-    setToast(`${all.length} lançamento(s) prontos para importar`);
+    if (all.length > 0) setToast(`${all.length} lançamento(s) prontos para importar`);
+    else setToast('Nenhum lançamento reconhecido — veja detalhes na tela');
   };
 
   const processBoleto = () => {
@@ -3307,36 +6581,108 @@ function Importacao({ data, setData }) {
 
   const confirmarImport = () => {
     if (preview.length === 0) return;
-    const novos = preview.map(x => ({
-      id: uid(),
-      data: x.data || todayISO(),
-      tipo: x.tipo,
-      categoria: x.categoria || 'Outras',
-      descricao: x.descricao,
-      valor: x.valor,
-      cliente: x.cliente || '',
-      forma: source === 'boleto' ? 'Boleto' : source === 'xml' ? 'Boleto' : 'Transferência',
-      veiculoId: '',
-      linhaId: '',
-      contratoId: '',
-      obs: source === 'ofx' ? `Importado de OFX (${x.banco || banco})`
-         : source === 'csv' ? `Importado de CSV (${x.banco || banco})`
-         : source === 'xlsx' ? `Importado de Excel (${x.banco || banco})`
-         : source === 'xml' ? `${x.tipoDoc === 'cte' ? 'CT-e' : 'NF-e'} ${x.numero || ''}${x.emitNome ? ' · ' + x.emitNome : ''}`
-         : `Boleto · ${x.linhaDigitavel || ''}`,
-      status: source === 'boleto' || source === 'xml' ? 'pendente' : 'pago',
-      vencimento: x.vencimento || '',
-      dataPagamento: source === 'boleto' || source === 'xml' ? '' : x.data,
-      recorrente: false,
-      statusConc: source === 'boleto' || source === 'xml' ? 'manual' : 'pendente',
-      fitid: x.fitid || '',
+    const memoria = data.config?.categoryMemory || {};
+
+    // Linhas que correspondem a lançamentos existentes → dão BAIXA (não duplicam)
+    const baixas = new Map(); // idLancamentoExistente -> dataPagamento
+    correspondencias.forEach(c => baixas.set(c.lancamento.id, c.linha.data || todayISO()));
+
+    // Só as linhas SEM correspondência viram lançamentos novos
+    // Índice: qual linha do preview vira abastecimento (pra vincular os dois registros)
+    const abastPorIdx = new Map(abastecimentos.map(a => [a.idx, a]));
+    const idsAbast = new Map(); // idx -> id do registro de combustível
+
+    const novos = preview
+      .map((x, idx) => ({ x, idx }))
+      .filter(({ idx }) => !idxComMatch.has(idx))
+      .map(({ x, idx }) => {
+        const sug = suggestCategoria(x.descricao, x.tipo, memoria);
+        let categoriaFinal = sug ? sug.categoria : (x.categoria || 'Outros');
+
+        // Se é abastecimento, garante a categoria certa e cria o vínculo
+        const ehAbast = criarAbast && abastPorIdx.has(idx);
+        let abastecimentoId = '';
+        if (ehAbast) {
+          categoriaFinal = 'Combustível';
+          abastecimentoId = uid();
+          idsAbast.set(idx, abastecimentoId);
+        }
+
+        return {
+          id: uid(),
+          data: x.data || todayISO(),
+          tipo: x.tipo,
+          categoria: categoriaFinal,
+          descricao: x.descricao,
+          valor: x.valor,
+          cliente: x.cliente || '',
+          forma: source === 'boleto' ? 'Boleto' : source === 'xml' ? 'Boleto' : 'Transferência',
+          veiculoId: '',
+          linhaId: '',
+          contratoId: '',
+          abastecimentoId, // vínculo com o módulo Combustível
+          obs: source === 'ofx' ? `Importado de OFX (${x.banco || banco})`
+             : source === 'csv' ? `Importado de CSV (${x.banco || banco})`
+             : source === 'xlsx' ? `Importado de Excel (${x.banco || banco})`
+             : source === 'xml' ? `${x.tipoDoc === 'cte' ? 'CT-e' : 'NF-e'} ${x.numero || ''}${x.emitNome ? ' · ' + x.emitNome : ''}`
+             : `Boleto · ${x.linhaDigitavel || ''}`,
+          status: source === 'boleto' || source === 'xml' ? 'pendente' : 'pago',
+          vencimento: x.vencimento || '',
+          dataPagamento: source === 'boleto' || source === 'xml' ? '' : x.data,
+          recorrente: false,
+          statusConc: source === 'boleto' || source === 'xml' ? 'manual' : 'pendente',
+          fitid: x.fitid || '',
+        };
+      });
+
+    const qtdBaixas = baixas.size;
+
+    // Registros de abastecimento (módulo Combustível). Só o que o extrato sabe:
+    // data, posto e valor. Litros/veículo/km ficam em branco pra completar depois.
+    const novosAbast = criarAbast
+      ? abastecimentos
+          .filter(a => !idxComMatch.has(a.idx)) // se deu baixa, o gasto já existia
+          .map(a => ({
+            id: idsAbast.get(a.idx) || uid(), // mesmo id referenciado pelo lançamento
+            data: a.linha.data || todayISO(),
+            posto: a.posto,
+            valor: a.linha.valor,
+            litros: 0,
+            valorLitro: 0,
+            tipo: 'Diesel',
+            veiculoId: '',
+            motoristaId: '',
+            linhaId: '',
+            kmVeiculo: 0,
+            incompleto: true, // pendente de completar litros/veículo/km
+            obs: 'Importado do extrato bancário',
+          }))
+      : [];
+
+    setData(d => ({
+      ...d,
+      combustivel: [...(d.combustivel || []), ...novosAbast],
+      finEmpresa: [
+        // dá baixa nos que já existiam: marca como pago + conciliado
+        ...(d.finEmpresa || []).map(x => baixas.has(x.id)
+          ? { ...x, status: 'pago', dataPagamento: baixas.get(x.id), statusConc: 'conciliado' }
+          : x),
+        ...novos,
+      ],
     }));
-    setData(d => ({ ...d, finEmpresa: [...(d.finEmpresa || []), ...novos] }));
     setPreview([]);
+    setIgnorados({});
     setLinhaDig('');
     setSource('');
+    setImportLog([]);
     if (fileRef.current) fileRef.current.value = '';
-    setToast(`${novos.length} lançamento(s) importados para o Financeiro`);
+    setToast(
+      [
+        `${novos.length} novo(s) importado(s)`,
+        qtdBaixas > 0 ? `${qtdBaixas} baixa(s)` : '',
+        novosAbast.length > 0 ? `${novosAbast.length} abastecimento(s)` : '',
+      ].filter(Boolean).join(' · ')
+    );
   };
 
   return (
@@ -3377,11 +6723,37 @@ function Importacao({ data, setData }) {
           </p>
           {busy && <div className="text-xs t-soft mt-2">Processando…</div>}
         </div>
+
+        {importLog.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {importLog.map((r, i) => (
+              <div key={i} className={`imp-log ${r.ok ? 'ok' : 'err'}`}>
+                <div className="mono text-xs" style={{ fontWeight: 600 }}>{r.ok ? '✓' : '✕'} {r.nome}</div>
+                <div className="text-xs" style={{ marginTop: 2 }}>{r.msg}</div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card p-5">
         <h3 className="display h-card t-ink mb-1">Boleto por linha digitável</h3>
-        <p className="text-sm t-soft mb-3">Cole os <b>47 dígitos</b> (título bancário) ou <b>48 dígitos</b> (concessionária/tributo). O sistema extrai valor e vencimento.</p>
+        <p className="text-sm t-soft mb-3">Cole os <b>47 dígitos</b> (título bancário) ou <b>48 dígitos</b> (concessionária/tributo), <b>ou tire uma foto</b> do boleto que o app lê. O sistema extrai valor e vencimento.</p>
+        <div className="flex gap-2 flex-wrap mb-3">
+          <ScanButton
+            label="Escanear boleto por foto"
+            size="md"
+            onExtracted={(text) => {
+              const linha = extractBoletoLinha(text);
+              if (linha) {
+                setLinhaDig(linha);
+                setToast('Linha digitável extraída da foto — confira e clique em Decodificar');
+              } else {
+                setToast('Não consegui achar os 47/48 dígitos na foto. Tenta com mais luz e sem tremer.');
+              }
+            }}
+          />
+        </div>
         <div className="flex gap-2 flex-wrap">
           <input
             className="inp mono"
@@ -3401,6 +6773,83 @@ function Importacao({ data, setData }) {
             <span className="badge badge-slate">{preview.length} {preview.length === 1 ? 'lançamento' : 'lançamentos'}</span>
           </div>
 
+          {/* Anti-duplicidade: lançamentos que já existem no sistema */}
+          {correspondencias.length > 0 && (
+            <div className="dup-banner">
+              <div className="dup-head">
+                <span className="dup-ico"><Check size={17} /></span>
+                <div className="flex-1 min-w-0">
+                  <div className="dup-titulo">
+                    {correspondencias.length} {correspondencias.length === 1 ? 'pagamento já existe' : 'pagamentos já existem'} no sistema
+                  </div>
+                  <div className="dup-sub">
+                    Em vez de duplicar, vamos <b>dar baixa</b> nesses lançamentos (marcar como pagos e conciliados).
+                  </div>
+                </div>
+              </div>
+              <div className="dup-list">
+                {correspondencias.map(c => (
+                  <div key={c.idx} className="dup-item">
+                    <div className="dup-match">
+                      <span className="dup-extrato truncate">{c.linha.descricao}</span>
+                      <ChevronRight size={13} className="dup-seta" />
+                      <span className="dup-existente truncate">
+                        {c.lancamento.descricao}
+                        {c.lancamento.recorrenciaId && <span className="dup-tag">recorrente</span>}
+                      </span>
+                    </div>
+                    <div className="dup-right">
+                      <span className="mono text-sm font-semibold t-ink">{fmtBRL(c.linha.valor)}</span>
+                      <span className={`dup-conf ${c.confianca}`}>{c.confianca === 'alta' ? 'alta' : 'média'}</span>
+                      <button className="dup-desfazer" title="Importar como lançamento novo (não dar baixa)"
+                        onClick={() => setIgnorados(prev => ({ ...prev, [c.idx]: true }))}>
+                        Importar assim mesmo
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Abastecimentos detectados */}
+          {abastecimentos.length > 0 && (
+            <div className="abast-banner">
+              <div className="dup-head">
+                <span className="dup-ico" style={{ background: '#D97706' }}><Fuel size={17} /></span>
+                <div className="flex-1 min-w-0">
+                  <div className="dup-titulo" style={{ color: '#78350F' }}>
+                    {abastecimentos.length} {abastecimentos.length === 1 ? 'abastecimento detectado' : 'abastecimentos detectados'}
+                  </div>
+                  <div className="dup-sub" style={{ color: '#92400E' }}>
+                    A despesa continua no Financeiro. Quer também registrar no módulo <b>Combustível</b> (pra calcular km/L)?
+                  </div>
+                </div>
+                <label className="abast-toggle">
+                  <input type="checkbox" checked={criarAbast} onChange={(e) => setCriarAbast(e.target.checked)} />
+                  <span>Registrar</span>
+                </label>
+              </div>
+              {criarAbast && (
+                <div className="dup-list">
+                  {abastecimentos.map(a => (
+                    <div key={a.idx} className="dup-item">
+                      <div className="dup-match">
+                        <Fuel size={13} style={{ color: '#D97706', flexShrink: 0 }} />
+                        <span className="dup-existente truncate">{a.posto}</span>
+                        <span className="text-xs t-mute">{fmtDate(a.linha.data)}</span>
+                      </div>
+                      <span className="mono text-sm font-semibold t-ink">{fmtBRL(a.linha.valor)}</span>
+                    </div>
+                  ))}
+                  <p className="text-xs t-mute mt-1">
+                    Litros, veículo e quilometragem ficam em branco — complete no módulo Combustível para o cálculo de consumo.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-3 gap-3 mb-4">
             <div className="metric-box">
               <div className="text-xs t-soft">Entradas</div>
@@ -3417,30 +6866,40 @@ function Importacao({ data, setData }) {
           </div>
 
           <div className="imp-preview">
-            {preview.map((x, i) => (
-              <div key={i} className="imp-row">
-                <div className={`pill ${x.tipo === 'entrada' ? 'pill-green' : 'pill-red'}`} style={{ flexShrink: 0 }}>
-                  {x.tipo === 'entrada' ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium t-ink truncate">{x.descricao}</div>
-                  <div className="text-xs t-soft mt-0.5 flex flex-wrap gap-1.5">
-                    <span>{fmtDate(x.data)}</span>
-                    <span>·</span>
-                    <span>{x.categoria}</span>
-                    {x.banco && <><span>·</span><span>{x.banco}</span></>}
+            {preview.map((x, i) => {
+              const temMatch = idxComMatch.has(i);
+              return (
+                <div key={i} className={`imp-row ${temMatch ? 'imp-row-match' : ''}`}>
+                  <div className={`pill ${x.tipo === 'entrada' ? 'pill-green' : 'pill-red'}`} style={{ flexShrink: 0 }}>
+                    {x.tipo === 'entrada' ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium t-ink truncate">
+                      {x.descricao}
+                      {temMatch && <span className="imp-baixa-tag">dará baixa</span>}
+                    </div>
+                    <div className="text-xs t-soft mt-0.5 flex flex-wrap gap-1.5">
+                      <span>{fmtDate(x.data)}</span>
+                      <span>·</span>
+                      <span>{x.categoria}</span>
+                      {x.banco && <><span>·</span><span>{x.banco}</span></>}
+                    </div>
+                  </div>
+                  <div className={`mono text-sm font-semibold ${x.tipo === 'entrada' ? 't-green' : 't-red'}`} style={{ flexShrink: 0 }}>
+                    {x.tipo === 'entrada' ? '+ ' : '− '}{fmtBRL(x.valor)}
                   </div>
                 </div>
-                <div className={`mono text-sm font-semibold ${x.tipo === 'entrada' ? 't-green' : 't-red'}`} style={{ flexShrink: 0 }}>
-                  {x.tipo === 'entrada' ? '+ ' : '− '}{fmtBRL(x.valor)}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           <div className="flex gap-2 mt-4 justify-end flex-wrap">
-            <button className="btn btn-ghost" onClick={() => { setPreview([]); setSource(''); if (fileRef.current) fileRef.current.value = ''; }}>Descartar</button>
-            <button className="btn btn-primary" onClick={confirmarImport}>Importar {preview.length} {preview.length === 1 ? 'lançamento' : 'lançamentos'} → Financeiro</button>
+            <button className="btn btn-ghost" onClick={() => { setPreview([]); setIgnorados({}); setSource(''); setImportLog([]); if (fileRef.current) fileRef.current.value = ''; }}>Descartar</button>
+            <button className="btn btn-primary" onClick={confirmarImport}>
+              {correspondencias.length > 0
+                ? `Importar ${preview.length - correspondencias.length} novo(s) + ${correspondencias.length} baixa(s)`
+                : `Importar ${preview.length} ${preview.length === 1 ? 'lançamento' : 'lançamentos'} → Financeiro`}
+            </button>
           </div>
         </div>
       )}
@@ -3456,6 +6915,1554 @@ function Importacao({ data, setData }) {
       </div>
 
       <Toast msg={toast} />
+    </div>
+  );
+}
+
+// ============================================================
+// MUDANÇAS — Tabela de Preços + Cotações + Serviços
+// ============================================================
+
+// Estrutura padrão da tabela de preços (fica salva em config.tabelaMudancas).
+// Todos os valores são editáveis pelo dono da empresa.
+const TABELA_MUDANCAS_DEFAULT = {
+  precoKm: 4.5,
+  valorMinimo: 250,
+  ajudanteHora: 60,
+  ajudanteDiaria: 150,
+  // Faixas de andar (subida e descida): valor por andar em cada faixa
+  escadaSubida: { faixa1a2: 40, faixa3a4: 55, faixa5plus: 70 }, // por andar
+  escadaDescida: { faixa1a2: 30, faixa3a4: 40, faixa5plus: 55 },
+  icamento: 200,          // valor fixo por içamento
+  horaParada: 50,         // por hora de espera
+  desmontagemPeca: 40,    // por peça
+  montagemPeca: 40,       // por peça
+  embalagemMovelPeca: 30, // por peça
+  embalagemMiudezaCaixa: 15, // por caixa
+  // Materiais — preço unitário
+  materiais: {
+    fita: 8,
+    caixaP: 4,
+    caixaM: 6,
+    caixaG: 9,
+    plasticoBolha: 25,
+    filmeStretch: 30,
+    capaColchao: 12,
+    cobertor: 20,
+    cantoneira: 3,
+    papelao: 5,
+  },
+  margemLucro: 30, // % sobre o custo, sugestão de lucro
+
+  // ---- NOVO: móveis com preço próprio de montagem/desmontagem ----
+  // Cada móvel tem seu valor, porque desmontar um guarda-roupa de 6 portas
+  // dá muito mais trabalho que uma mesinha de canto.
+  moveis: [
+    { id: 'mv_gr6', nome: 'Guarda-roupa 6 portas', desmontagem: 120, montagem: 150 },
+    { id: 'mv_gr3', nome: 'Guarda-roupa 3 portas', desmontagem: 70, montagem: 90 },
+    { id: 'mv_gr2', nome: 'Guarda-roupa 2 portas', desmontagem: 50, montagem: 65 },
+    { id: 'mv_cama', nome: 'Cama box casal', desmontagem: 40, montagem: 50 },
+    { id: 'mv_camas', nome: 'Cama solteiro', desmontagem: 30, montagem: 40 },
+    { id: 'mv_mesa', nome: 'Mesa de jantar', desmontagem: 50, montagem: 60 },
+    { id: 'mv_berco', nome: 'Berço', desmontagem: 45, montagem: 55 },
+    { id: 'mv_rack', nome: 'Rack / painel de TV', desmontagem: 40, montagem: 50 },
+    { id: 'mv_escr', nome: 'Escrivaninha', desmontagem: 35, montagem: 45 },
+    { id: 'mv_estante', nome: 'Estante', desmontagem: 40, montagem: 50 },
+  ],
+  // ---- NOVO: serviços extras personalizados (ex.: cabideiro, piano, cofre) ----
+  servicosCustom: [],   // [{ id, nome, preco, unidade }]
+  // ---- NOVO: materiais personalizados (ex.: manta térmica, caixa de TV) ----
+  materiaisCustom: [],  // [{ id, nome, preco }]
+};
+
+// Catálogo de itens de mudança (contadores) e materiais para os wizards.
+const ITENS_MUDANCA_CATALOGO = [
+  'Sofá', 'Cama', 'Guarda-roupa', 'Geladeira', 'Fogão', 'Mesa',
+  'Cadeiras', 'Máquina de lavar', 'TV', 'Armário', 'Estante', 'Caixas',
+];
+const MATERIAIS_LABEL = {
+  fita: 'Fita adesiva (rolo)',
+  caixaP: 'Caixa de papelão P (un.)',
+  caixaM: 'Caixa de papelão M (un.)',
+  caixaG: 'Caixa de papelão G (un.)',
+  plasticoBolha: 'Plástico bolha (rolo)',
+  filmeStretch: 'Filme stretch (rolo)',
+  capaColchao: 'Capa para colchão (un.)',
+  cobertor: 'Cobertor para móveis (un.)',
+  cantoneira: 'Cantoneira (un.)',
+  papelao: 'Papelão avulso (un.)',
+};
+
+function getTabelaMudancas(config = {}) {
+  const t = config.tabelaMudancas || {};
+  // merge profundo com defaults pra nunca quebrar se faltar campo novo
+  return {
+    ...TABELA_MUDANCAS_DEFAULT,
+    ...t,
+    escadaSubida: { ...TABELA_MUDANCAS_DEFAULT.escadaSubida, ...(t.escadaSubida || {}) },
+    escadaDescida: { ...TABELA_MUDANCAS_DEFAULT.escadaDescida, ...(t.escadaDescida || {}) },
+    materiais: { ...TABELA_MUDANCAS_DEFAULT.materiais, ...(t.materiais || {}) },
+    // Arrays novos: se a empresa ainda não tem, usa o padrão; se tem, respeita o dela
+    moveis: Array.isArray(t.moveis) ? t.moveis : TABELA_MUDANCAS_DEFAULT.moveis,
+    servicosCustom: Array.isArray(t.servicosCustom) ? t.servicosCustom : [],
+    materiaisCustom: Array.isArray(t.materiaisCustom) ? t.materiaisCustom : [],
+  };
+}
+
+function Mudancas({ data, setData }) {
+  const [aba, setAba] = useState('tabela');
+  const [editItem, setEditItem] = useState(null);
+  const [toast, setToast] = useToast();
+
+  const irParaCotacao = (item = null) => { setEditItem(item); setAba('cotacao'); };
+
+  return (
+    <div className="p-4 sm:p-6">
+      <div className="mud-container space-y-4">
+        <div className="mud-tabs">
+          <button className={`mud-tab ${aba === 'tabela' ? 'on' : ''}`} onClick={() => setAba('tabela')}>Tabela de Preços</button>
+          <button className={`mud-tab ${aba === 'cotacao' ? 'on' : ''}`} onClick={() => { setEditItem(null); setAba('cotacao'); }}>Nova Cotação</button>
+          <button className={`mud-tab ${aba === 'servicos' ? 'on' : ''}`} onClick={() => setAba('servicos')}>Orçamentos & Serviços</button>
+        </div>
+
+        {aba === 'tabela' && <TabelaPrecos data={data} setData={setData} setToast={setToast} />}
+        {aba === 'cotacao' && (
+          <NovaCotacao
+            key={editItem?.id || 'nova'}
+            data={data} setData={setData} setToast={setToast}
+            editItem={editItem}
+            onSalvou={() => { setEditItem(null); setAba('servicos'); }}
+          />
+        )}
+        {aba === 'servicos' && (
+          <ListaServicos data={data} setData={setData} setToast={setToast} onEditar={irParaCotacao} onNova={() => irParaCotacao(null)} />
+        )}
+      </div>
+      <Toast msg={toast} />
+    </div>
+  );
+}
+
+// Motor de cálculo: recebe a cotação (estado do wizard) + tabela de preços
+// e devolve o detalhamento de valores. Puro, sem efeitos colaterais.
+function calcularOrcamento(cot, tabela) {
+  const t = tabela;
+  const linhas = [];
+
+  // 1) Distância (km × preço/km)
+  const km = Number(cot.distanciaKm) || 0;
+  const vKm = km * t.precoKm;
+  if (vKm > 0) linhas.push({ label: `Deslocamento (${km} km × ${fmtBRL(t.precoKm)})`, valor: vKm });
+
+  // 2) Mão de obra (ajudantes)
+  const nAjud = Number(cot.ajudantes) || 0;
+  let vAjud = 0;
+  if (cot.ajudanteModo === 'diaria') {
+    vAjud = nAjud * t.ajudanteDiaria * (Number(cot.diarias) || 1);
+    if (vAjud > 0) linhas.push({ label: `${nAjud} ajudante(s) × ${Number(cot.diarias) || 1} diária(s)`, valor: vAjud });
+  } else {
+    vAjud = nAjud * t.ajudanteHora * (Number(cot.horas) || 0);
+    if (vAjud > 0) linhas.push({ label: `${nAjud} ajudante(s) × ${Number(cot.horas) || 0}h`, valor: vAjud });
+  }
+
+  // 3) Escadas (subida e descida por andar/faixa)
+  const faixaValor = (tabelaEscada, andares) => {
+    const n = Number(andares) || 0;
+    if (n <= 0) return 0;
+    if (n <= 2) return tabelaEscada.faixa1a2 * n;
+    if (n <= 4) return tabelaEscada.faixa3a4 * n;
+    return tabelaEscada.faixa5plus * n;
+  };
+  const vSubida = cot.temElevadorOrigem ? 0 : faixaValor(t.escadaSubida, cot.andaresOrigem);
+  const vDescida = cot.temElevadorDestino ? 0 : faixaValor(t.escadaDescida, cot.andaresDestino);
+  if (vSubida > 0) linhas.push({ label: `Escada subida (${cot.andaresOrigem} andar/es na origem)`, valor: vSubida });
+  if (vDescida > 0) linhas.push({ label: `Escada descida (${cot.andaresDestino} andar/es no destino)`, valor: vDescida });
+
+  // 4) Serviços extras
+  const desmont = (Number(cot.desmontagemQtd) || 0) * t.desmontagemPeca;
+  const mont = (Number(cot.montagemQtd) || 0) * t.montagemPeca;
+  const embMovel = (Number(cot.embalagemMovelQtd) || 0) * t.embalagemMovelPeca;
+  const embMiud = (Number(cot.embalagemMiudezaQtd) || 0) * t.embalagemMiudezaCaixa;
+  const icamento = cot.icamento ? t.icamento : 0;
+  const horaParada = (Number(cot.horasParada) || 0) * t.horaParada;
+  if (desmont > 0) linhas.push({ label: `Desmontagem (${cot.desmontagemQtd} peça/s)`, valor: desmont });
+  if (mont > 0) linhas.push({ label: `Montagem (${cot.montagemQtd} peça/s)`, valor: mont });
+  if (embMovel > 0) linhas.push({ label: `Embalagem de móveis (${cot.embalagemMovelQtd} peça/s)`, valor: embMovel });
+  if (embMiud > 0) linhas.push({ label: `Embalagem de miudezas (${cot.embalagemMiudezaQtd} caixa/s)`, valor: embMiud });
+  if (icamento > 0) linhas.push({ label: 'Içamento', valor: icamento });
+  if (horaParada > 0) linhas.push({ label: `Hora parada (${cot.horasParada}h)`, valor: horaParada });
+
+  // 4b) NOVO — Montagem/desmontagem POR MÓVEL (cada móvel tem seu preço).
+  //     Coexiste com o contador genérico acima: cotações antigas continuam
+  //     calculando igual; as novas podem usar os dois.
+  let vMoveis = 0;
+  const moveisDetalhe = [];
+  const moveisSel = cot.moveis || {}; // { idMovel: { qtd, desmontar, montar } }
+  (t.moveis || []).forEach(mv => {
+    const sel = moveisSel[mv.id];
+    if (!sel) return;
+    const qtd = Number(sel.qtd) || 0;
+    if (qtd <= 0) return;
+    if (sel.desmontar) {
+      const v = qtd * (Number(mv.desmontagem) || 0);
+      if (v > 0) { vMoveis += v; moveisDetalhe.push({ label: `Desmontagem — ${mv.nome} × ${qtd}`, valor: v }); }
+    }
+    if (sel.montar) {
+      const v = qtd * (Number(mv.montagem) || 0);
+      if (v > 0) { vMoveis += v; moveisDetalhe.push({ label: `Montagem — ${mv.nome} × ${qtd}`, valor: v }); }
+    }
+  });
+  moveisDetalhe.forEach(l => linhas.push(l));
+
+  // 4c) NOVO — Serviços extras personalizados (ex.: cabideiro, piano, cofre)
+  let vServCustom = 0;
+  const servCustomSel = cot.servicosCustom || {}; // { idServico: qtd }
+  (t.servicosCustom || []).forEach(s => {
+    const qtd = Number(servCustomSel[s.id]) || 0;
+    if (qtd <= 0) return;
+    const v = qtd * (Number(s.preco) || 0);
+    if (v > 0) {
+      vServCustom += v;
+      linhas.push({ label: `${s.nome} × ${qtd}${s.unidade ? ' ' + s.unidade : ''}`, valor: v });
+    }
+  });
+
+  // 5) Materiais
+  let vMateriais = 0;
+  const matDetalhe = [];
+  Object.keys(cot.materiais || {}).forEach(k => {
+    const qtd = Number(cot.materiais[k]) || 0;
+    if (qtd > 0 && t.materiais[k] != null) {
+      const v = qtd * t.materiais[k];
+      vMateriais += v;
+      matDetalhe.push({ label: `${MATERIAIS_LABEL[k]} × ${qtd}`, valor: v });
+    }
+  });
+
+  // 5b) NOVO — Materiais personalizados
+  const matCustomSel = cot.materiaisCustom || {}; // { idMaterial: qtd }
+  (t.materiaisCustom || []).forEach(mc => {
+    const qtd = Number(matCustomSel[mc.id]) || 0;
+    if (qtd <= 0) return;
+    const v = qtd * (Number(mc.preco) || 0);
+    if (v > 0) {
+      vMateriais += v;
+      matDetalhe.push({ label: `${mc.nome} × ${qtd}`, valor: v });
+    }
+  });
+
+  const subtotalServicos = vKm + vAjud + vSubida + vDescida + desmont + mont + embMovel + embMiud
+                         + icamento + horaParada + vMoveis + vServCustom;
+  let subtotal = subtotalServicos + vMateriais;
+
+  // Valor mínimo do frete
+  const aplicouMinimo = subtotal < t.valorMinimo && subtotal > 0;
+  if (aplicouMinimo) subtotal = t.valorMinimo;
+
+  // Desconto
+  const desconto = Number(cot.desconto) || 0;
+  const totalComDesc = Math.max(0, subtotal - desconto);
+
+  // Lucro estimado (margem sobre o subtotal)
+  const lucroEstimado = totalComDesc * (t.margemLucro / 100);
+
+  return {
+    linhas, matDetalhe,
+    subtotalServicos, vMateriais,
+    subtotal, aplicouMinimo, desconto,
+    total: totalComDesc,
+    lucroEstimado,
+  };
+}
+
+// Estado inicial de uma nova cotação
+function novaCotacaoVazia() {
+  return {
+    // passo 1
+    tipoServico: 'Mudança', // Mudança | Frete | Carreto
+    clienteNome: '', clienteTelefone: '',
+    dataPrevista: todayISO(), horaPrevista: '',
+    origem: '', destino: '', distanciaKm: '',
+    tipoImovel: 'Casa', // Casa | Apartamento | Comércio
+    andaresOrigem: 0, temElevadorOrigem: false,
+    andaresDestino: 0, temElevadorDestino: false,
+    // passo 2 — itens
+    itens: {}, // { 'Sofá': 2, ... }
+    itensCustom: [], // [{ nome, qtd }]
+    // passo 3 — serviços extras
+    ajudantes: 2, ajudanteModo: 'diaria', diarias: 1, horas: 0,
+    desmontagemQtd: 0, montagemQtd: 0,
+    embalagemMovelQtd: 0, embalagemMiudezaQtd: 0,
+    icamento: false, horasParada: 0,
+    moveis: {},           // { idMovel: { qtd, desmontar, montar } }
+    servicosCustom: {},   // { idServico: qtd }
+    materiaisCustom: {},  // { idMaterial: qtd }
+    // passo 4 — materiais
+    materiais: {},
+    // resumo
+    desconto: 0, obs: '',
+  };
+}
+
+function NovaCotacao({ data, setData, setToast, onSalvou, editItem }) {
+  const { isOwner } = useAuth();
+  const tabela = getTabelaMudancas(data.config);
+  const [step, setStep] = useState(1);
+  const [cot, setCot] = useState(() => editItem ? { ...novaCotacaoVazia(), ...editItem } : novaCotacaoVazia());
+  const [novoItemNome, setNovoItemNome] = useState('');
+
+  const upd = (patch) => setCot(prev => ({ ...prev, ...patch }));
+  const calc = useMemo(() => calcularOrcamento(cot, tabela), [cot, tabela]);
+
+  const setItem = (nome, delta) => {
+    setCot(prev => {
+      const itens = { ...prev.itens };
+      const atual = itens[nome] || 0;
+      const novo = Math.max(0, atual + delta);
+      if (novo === 0) delete itens[nome];
+      else itens[nome] = novo;
+      return { ...prev, itens };
+    });
+  };
+  const setMaterial = (k, delta) => {
+    setCot(prev => {
+      const materiais = { ...prev.materiais };
+      const atual = materiais[k] || 0;
+      const novo = Math.max(0, atual + delta);
+      if (novo === 0) delete materiais[k];
+      else materiais[k] = novo;
+      return { ...prev, materiais };
+    });
+  };
+  // Móvel: { qtd, desmontar, montar }
+  const setMovel = (id, patch) => {
+    setCot(prev => {
+      const moveis = { ...(prev.moveis || {}) };
+      const atual = moveis[id] || { qtd: 0, desmontar: false, montar: false };
+      const novo = { ...atual, ...patch };
+      // se marcou desmontar/montar e a qtd está zerada, assume 1
+      if ((novo.desmontar || novo.montar) && (!novo.qtd || novo.qtd <= 0)) novo.qtd = 1;
+      // se zerou tudo, remove
+      if ((!novo.desmontar && !novo.montar) || novo.qtd <= 0) delete moveis[id];
+      else moveis[id] = novo;
+      return { ...prev, moveis };
+    });
+  };
+  const setServCustom = (id, delta) => {
+    setCot(prev => {
+      const sc = { ...(prev.servicosCustom || {}) };
+      const novo = Math.max(0, (sc[id] || 0) + delta);
+      if (novo === 0) delete sc[id]; else sc[id] = novo;
+      return { ...prev, servicosCustom: sc };
+    });
+  };
+  const setMatCustom = (id, delta) => {
+    setCot(prev => {
+      const mc = { ...(prev.materiaisCustom || {}) };
+      const novo = Math.max(0, (mc[id] || 0) + delta);
+      if (novo === 0) delete mc[id]; else mc[id] = novo;
+      return { ...prev, materiaisCustom: mc };
+    });
+  };
+  const addItemCustom = () => {
+    const nome = novoItemNome.trim();
+    if (!nome) return;
+    setCot(prev => ({ ...prev, itens: { ...prev.itens, [nome]: (prev.itens[nome] || 0) + 1 } }));
+    setNovoItemNome('');
+  };
+
+  const salvarCotacao = (statusFinal = 'orcamento') => {
+    const registro = {
+      ...cot,
+      id: editItem?.id || uid(),
+      // Ao editar, preserva o status atual (não rebaixa um serviço confirmado p/ orçamento)
+      status: editItem?.status || statusFinal,
+      valorTotal: calc.total,
+      lucroEstimado: calc.lucroEstimado,
+      criadoEm: editItem?.criadoEm || new Date().toISOString(),
+      atualizadoEm: new Date().toISOString(),
+    };
+    setData(d => {
+      const mudancas = editItem
+        ? (d.mudancas || []).map(x => x.id === editItem.id ? registro : x)
+        : [...(d.mudancas || []), registro];
+      // Se já é faturável (ex.: editou uma cotação confirmada), atualiza o lançamento
+      const finEmpresa = sincronizarFinanceiroMudanca(registro, d.finEmpresa || []);
+      return { ...d, mudancas, finEmpresa };
+    });
+    setToast(editItem ? 'Cotação atualizada' : 'Cotação salva');
+    onSalvou?.(registro);
+  };
+
+  const STEP_LABELS = ['Rota', 'Itens', 'Serviços', 'Materiais'];
+  const Stepper = () => (
+    <div className="cot-assistente">
+      <div className="cot-assistente-head">
+        <div className="cot-assistente-ico"><Sparkles size={15} /></div>
+        <div>
+          <div className="cot-assistente-titulo">Assistente de cotação</div>
+          <div className="cot-assistente-sub">Passo {step} de 4 · {STEP_LABELS[step - 1]}</div>
+        </div>
+      </div>
+      <div className="cot-stepper">
+        {[1, 2, 3, 4].map(n => (
+          <React.Fragment key={n}>
+            <div className="cot-step-wrap">
+              <button className={`cot-step ${step === n ? 'on' : ''} ${step > n ? 'done' : ''}`} onClick={() => setStep(n)}>
+                {step > n ? <Check size={13} /> : n}
+              </button>
+              <span className={`cot-step-lbl ${step === n ? 'on' : ''}`}>{STEP_LABELS[n - 1]}</span>
+            </div>
+            {n < 4 && <div className={`cot-step-line ${step > n ? 'done' : ''}`} />}
+          </React.Fragment>
+        ))}
+      </div>
+    </div>
+  );
+
+  const Counter = ({ value, onMinus, onPlus }) => (
+    <div className="cot-counter">
+      <button onClick={onMinus} className="cot-counter-btn">−</button>
+      <span className="cot-counter-val mono">{value || 0}</span>
+      <button onClick={onPlus} className="cot-counter-btn">+</button>
+    </div>
+  );
+
+  return (
+    <div className="cot-wrap">
+      <div className="cot-main">
+        <div className="card p-5">
+          <Stepper />
+
+          {/* PASSO 1 — Dados da mudança */}
+          {step === 1 && (
+            <div className="space-y-4">
+              <h3 className="display h-card t-ink">Dados da mudança</h3>
+              <div>
+                <span className="label">Tipo de serviço</span>
+                <div className="cot-seg">
+                  {['Mudança', 'Frete', 'Carreto'].map(ts => (
+                    <button key={ts} className={`cot-seg-btn ${cot.tipoServico === ts ? 'on' : ''}`} onClick={() => upd({ tipoServico: ts })}>{ts}</button>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Field label="Nome do cliente"><input className="inp" value={cot.clienteNome} onChange={(e) => upd({ clienteNome: e.target.value })} placeholder="Ex.: João da Silva" /></Field>
+                <Field label="Telefone / WhatsApp"><input className="inp" value={cot.clienteTelefone} onChange={(e) => upd({ clienteTelefone: e.target.value })} placeholder="(19) 99999-9999" /></Field>
+                <Field label="Data prevista"><input type="date" className="inp" value={cot.dataPrevista} onChange={(e) => upd({ dataPrevista: e.target.value })} /></Field>
+                <Field label="Horário"><input type="time" className="inp" value={cot.horaPrevista} onChange={(e) => upd({ horaPrevista: e.target.value })} /></Field>
+                <Field label="Origem"><input className="inp" value={cot.origem} onChange={(e) => upd({ origem: e.target.value })} placeholder="Cidade / bairro de saída" /></Field>
+                <Field label="Destino"><input className="inp" value={cot.destino} onChange={(e) => upd({ destino: e.target.value })} placeholder="Cidade / bairro de chegada" /></Field>
+                <Field label="Distância estimada (km)"><input type="number" step="1" min="0" className="inp mono" value={cot.distanciaKm} onChange={(e) => upd({ distanciaKm: e.target.value })} placeholder="Ex.: 50" /></Field>
+                <Field label="Tipo de imóvel">
+                  <select className="inp" value={cot.tipoImovel} onChange={(e) => upd({ tipoImovel: e.target.value })}>
+                    <option>Casa</option><option>Apartamento</option><option>Comércio</option>
+                  </select>
+                </Field>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="cot-andar-box">
+                  <div className="text-sm font-semibold t-ink mb-2">Origem</div>
+                  <Field label="Andar (0 = térreo)"><input type="number" min="0" className="inp mono" value={cot.andaresOrigem} onChange={(e) => upd({ andaresOrigem: parseInt(e.target.value) || 0 })} /></Field>
+                  <label className="cot-check mt-2"><input type="checkbox" checked={cot.temElevadorOrigem} onChange={(e) => upd({ temElevadorOrigem: e.target.checked })} /> Tem elevador (não cobra escada)</label>
+                </div>
+                <div className="cot-andar-box">
+                  <div className="text-sm font-semibold t-ink mb-2">Destino</div>
+                  <Field label="Andar (0 = térreo)"><input type="number" min="0" className="inp mono" value={cot.andaresDestino} onChange={(e) => upd({ andaresDestino: parseInt(e.target.value) || 0 })} /></Field>
+                  <label className="cot-check mt-2"><input type="checkbox" checked={cot.temElevadorDestino} onChange={(e) => upd({ temElevadorDestino: e.target.checked })} /> Tem elevador (não cobra escada)</label>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* PASSO 2 — Itens */}
+          {step === 2 && (
+            <div className="space-y-4">
+              <h3 className="display h-card t-ink">Itens da mudança</h3>
+              <p className="text-sm t-soft">Informe a quantidade de cada item. Serve pra dimensionar o caminhão e a equipe.</p>
+              <div className="cot-item-list">
+                {ITENS_MUDANCA_CATALOGO.map(nome => (
+                  <div key={nome} className="cot-item-row">
+                    <span className="text-sm t-ink">{nome}</span>
+                    <Counter value={cot.itens[nome]} onMinus={() => setItem(nome, -1)} onPlus={() => setItem(nome, 1)} />
+                  </div>
+                ))}
+                {/* itens custom já adicionados que não estão no catálogo */}
+                {Object.keys(cot.itens).filter(n => !ITENS_MUDANCA_CATALOGO.includes(n)).map(nome => (
+                  <div key={nome} className="cot-item-row">
+                    <span className="text-sm t-ink">{nome} <span className="t-mute text-xs">(personalizado)</span></span>
+                    <Counter value={cot.itens[nome]} onMinus={() => setItem(nome, -1)} onPlus={() => setItem(nome, 1)} />
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <input className="inp" value={novoItemNome} onChange={(e) => setNovoItemNome(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') addItemCustom(); }} placeholder="Adicionar outro item…" style={{ flex: 1 }} />
+                <button className="btn btn-ghost" onClick={addItemCustom}><Plus size={15} /> Adicionar</button>
+              </div>
+            </div>
+          )}
+
+          {/* PASSO 3 — Serviços extras */}
+          {step === 3 && (
+            <div className="space-y-4">
+              <h3 className="display h-card t-ink">Serviços extras e mão de obra</h3>
+              <div className="cot-andar-box">
+                <div className="text-sm font-semibold t-ink mb-2">Ajudantes</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <Field label="Quantidade de ajudantes"><input type="number" min="0" className="inp mono" value={cot.ajudantes} onChange={(e) => upd({ ajudantes: parseInt(e.target.value) || 0 })} /></Field>
+                  <Field label="Cobrar por">
+                    <select className="inp" value={cot.ajudanteModo} onChange={(e) => upd({ ajudanteModo: e.target.value })}>
+                      <option value="diaria">Diária</option>
+                      <option value="hora">Hora</option>
+                    </select>
+                  </Field>
+                  {cot.ajudanteModo === 'diaria'
+                    ? <Field label="Nº de diárias"><input type="number" min="1" className="inp mono" value={cot.diarias} onChange={(e) => upd({ diarias: parseInt(e.target.value) || 1 })} /></Field>
+                    : <Field label="Nº de horas"><input type="number" min="0" className="inp mono" value={cot.horas} onChange={(e) => upd({ horas: parseInt(e.target.value) || 0 })} /></Field>}
+                </div>
+              </div>
+              <div className="cot-svc-grid">
+                <div className="cot-svc-item">
+                  <span className="text-sm t-ink">Desmontagem de móveis</span>
+                  <Counter value={cot.desmontagemQtd} onMinus={() => upd({ desmontagemQtd: Math.max(0, (cot.desmontagemQtd || 0) - 1) })} onPlus={() => upd({ desmontagemQtd: (cot.desmontagemQtd || 0) + 1 })} />
+                </div>
+                <div className="cot-svc-item">
+                  <span className="text-sm t-ink">Montagem de móveis</span>
+                  <Counter value={cot.montagemQtd} onMinus={() => upd({ montagemQtd: Math.max(0, (cot.montagemQtd || 0) - 1) })} onPlus={() => upd({ montagemQtd: (cot.montagemQtd || 0) + 1 })} />
+                </div>
+                <div className="cot-svc-item">
+                  <span className="text-sm t-ink">Embalagem de móveis (peças)</span>
+                  <Counter value={cot.embalagemMovelQtd} onMinus={() => upd({ embalagemMovelQtd: Math.max(0, (cot.embalagemMovelQtd || 0) - 1) })} onPlus={() => upd({ embalagemMovelQtd: (cot.embalagemMovelQtd || 0) + 1 })} />
+                </div>
+                <div className="cot-svc-item">
+                  <span className="text-sm t-ink">Embalagem de miudezas (caixas)</span>
+                  <Counter value={cot.embalagemMiudezaQtd} onMinus={() => upd({ embalagemMiudezaQtd: Math.max(0, (cot.embalagemMiudezaQtd || 0) - 1) })} onPlus={() => upd({ embalagemMiudezaQtd: (cot.embalagemMiudezaQtd || 0) + 1 })} />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="cot-check"><input type="checkbox" checked={cot.icamento} onChange={(e) => upd({ icamento: e.target.checked })} /> Içamento necessário ({fmtBRL(tabela.icamento)})</label>
+                <Field label="Horas paradas / espera"><input type="number" min="0" className="inp mono" value={cot.horasParada} onChange={(e) => upd({ horasParada: parseInt(e.target.value) || 0 })} /></Field>
+              </div>
+
+              {/* Móveis — montagem/desmontagem por tipo */}
+              {(tabela.moveis || []).length > 0 && (
+                <div className="cot-andar-box">
+                  <div className="text-sm font-semibold t-ink mb-1">Montagem e desmontagem por móvel</div>
+                  <p className="text-xs t-soft mb-3">Marque o que precisa em cada móvel. O preço vem da tabela.</p>
+                  <div className="cot-item-list">
+                    {(tabela.moveis || []).filter(mv => mv.nome).map(mv => {
+                      const sel = (cot.moveis || {})[mv.id] || { qtd: 0, desmontar: false, montar: false };
+                      return (
+                        <div key={mv.id} className="mv-cot-row">
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm t-ink truncate">{mv.nome}</div>
+                            <div className="text-xs t-mute mono">desm. {fmtBRL(mv.desmontagem)} · mont. {fmtBRL(mv.montagem)}</div>
+                          </div>
+                          <div className="mv-cot-checks">
+                            <label className="cot-check" title="Desmontar">
+                              <input type="checkbox" checked={!!sel.desmontar} onChange={(e) => setMovel(mv.id, { desmontar: e.target.checked })} /> Desm.
+                            </label>
+                            <label className="cot-check" title="Montar">
+                              <input type="checkbox" checked={!!sel.montar} onChange={(e) => setMovel(mv.id, { montar: e.target.checked })} /> Mont.
+                            </label>
+                          </div>
+                          <Counter value={sel.qtd} onMinus={() => setMovel(mv.id, { qtd: Math.max(0, (sel.qtd || 0) - 1) })} onPlus={() => setMovel(mv.id, { qtd: (sel.qtd || 0) + 1 })} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Serviços personalizados da empresa */}
+              {(tabela.servicosCustom || []).filter(s => s.nome).length > 0 && (
+                <div className="cot-andar-box">
+                  <div className="text-sm font-semibold t-ink mb-2">Serviços da empresa</div>
+                  <div className="cot-item-list">
+                    {(tabela.servicosCustom || []).filter(s => s.nome).map(s => (
+                      <div key={s.id} className="cot-item-row">
+                        <span className="text-sm t-ink">{s.nome} <span className="t-mute text-xs mono">{fmtBRL(s.preco)}{s.unidade ? `/${s.unidade}` : ''}</span></span>
+                        <Counter
+                          value={(cot.servicosCustom || {})[s.id]}
+                          onMinus={() => setServCustom(s.id, -1)}
+                          onPlus={() => setServCustom(s.id, 1)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* PASSO 4 — Materiais */}
+          {step === 4 && (
+            <div className="space-y-4">
+              <h3 className="display h-card t-ink">Materiais e embalagens</h3>
+              <p className="text-sm t-soft">Quantidade de cada material. O valor é calculado pela tabela de preços.</p>
+              <div className="cot-item-list">
+                {Object.keys(MATERIAIS_LABEL).map(k => (
+                  <div key={k} className="cot-item-row">
+                    <span className="text-sm t-ink">{MATERIAIS_LABEL[k]} <span className="t-mute text-xs mono">{fmtBRL(tabela.materiais[k])}</span></span>
+                    <Counter value={cot.materiais[k]} onMinus={() => setMaterial(k, -1)} onPlus={() => setMaterial(k, 1)} />
+                  </div>
+                ))}
+                {/* materiais personalizados */}
+                {(tabela.materiaisCustom || []).filter(mc => mc.nome).map(mc => (
+                  <div key={mc.id} className="cot-item-row">
+                    <span className="text-sm t-ink">{mc.nome} <span className="t-mute text-xs mono">{fmtBRL(mc.preco)}</span></span>
+                    <Counter
+                      value={(cot.materiaisCustom || {})[mc.id]}
+                      onMinus={() => setMatCustom(mc.id, -1)}
+                      onPlus={() => setMatCustom(mc.id, 1)}
+                    />
+                  </div>
+                ))}
+              </div>
+              <Field label="Desconto (R$)"><input type="number" min="0" step="0.01" className="inp mono" value={cot.desconto} onChange={(e) => upd({ desconto: parseFloat(e.target.value) || 0 })} /></Field>
+              <Field label="Observações"><textarea className="inp" rows={2} value={cot.obs} onChange={(e) => upd({ obs: e.target.value })} placeholder="Condições, detalhes combinados…" /></Field>
+            </div>
+          )}
+
+          {/* Navegação */}
+          <div className="flex justify-between gap-2 mt-5 pt-4" style={{ borderTop: '1px solid #F1F2F4' }}>
+            <button className="btn btn-ghost" onClick={() => setStep(s => Math.max(1, s - 1))} disabled={step === 1}>Voltar</button>
+            {step < 4
+              ? <button className="btn btn-primary" onClick={() => setStep(s => Math.min(4, s + 1))}>Próximo</button>
+              : <button className="btn btn-primary" onClick={() => salvarCotacao('orcamento')}>Salvar orçamento</button>}
+          </div>
+        </div>
+      </div>
+
+      {/* Resumo lateral em tempo real */}
+      <div className="cot-side">
+        <div className="card p-5 cot-resumo">
+          <h4 className="display h-card t-ink mb-1">Resumo do orçamento</h4>
+          <div className="cot-total-box">
+            <div className="text-xs t-soft">Valor total</div>
+            <div className="cot-total mono">{fmtBRL(calc.total)}</div>
+            <div className="text-xs t-green mono">Lucro estimado: {fmtBRL(calc.lucroEstimado)}</div>
+          </div>
+          <div className="cot-resumo-list">
+            {calc.linhas.length === 0 && calc.matDetalhe.length === 0 && (
+              <p className="text-xs t-mute" style={{ padding: '8px 0' }}>Preencha os passos pra ver o cálculo…</p>
+            )}
+            {calc.linhas.map((l, i) => (
+              <div key={i} className="cot-resumo-line">
+                <span className="text-xs t-soft">{l.label}</span>
+                <span className="text-xs mono t-ink">{fmtBRL(l.valor)}</span>
+              </div>
+            ))}
+            {calc.matDetalhe.length > 0 && <div className="cot-resumo-sep">Materiais</div>}
+            {calc.matDetalhe.map((l, i) => (
+              <div key={i} className="cot-resumo-line">
+                <span className="text-xs t-soft">{l.label}</span>
+                <span className="text-xs mono t-ink">{fmtBRL(l.valor)}</span>
+              </div>
+            ))}
+            {calc.aplicouMinimo && (
+              <div className="cot-resumo-line" style={{ color: '#D97706' }}>
+                <span className="text-xs">Valor mínimo aplicado</span>
+                <span className="text-xs mono">{fmtBRL(calc.subtotal)}</span>
+              </div>
+            )}
+            {calc.desconto > 0 && (
+              <div className="cot-resumo-line" style={{ color: '#B4234B' }}>
+                <span className="text-xs">Desconto</span>
+                <span className="text-xs mono">− {fmtBRL(calc.desconto)}</span>
+              </div>
+            )}
+          </div>
+          <div className="cot-resumo-total">
+            <span>Total</span>
+            <span className="mono">{fmtBRL(calc.total)}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Status do fluxo de serviço de mudança
+// ============================================================
+// PONTE MUDANÇAS → FINANCEIRO
+// ============================================================
+// Quando uma cotação é CONFIRMADA (cliente aprovou), ela vira uma conta a
+// receber no Financeiro Empresa — status "pendente". Quando o cliente pagar,
+// o lançamento é marcado como pago (pelo Financeiro ou pelo detalhe da cotação).
+// O lançamento carrega mudancaId, o que evita duplicidade e permite atualizar.
+
+// A partir de qual status o serviço vira conta a receber
+const MUD_STATUS_FATURAVEL = ['confirmado', 'agendado', 'andamento', 'concluido'];
+
+function lancamentoDaMudanca(cot) {
+  const rota = [cot.origem, cot.destino].filter(Boolean).join(' → ');
+  return {
+    id: uid(),
+    mudancaId: cot.id,
+    tipo: 'entrada',
+    categoria: 'Serviço Avulso',
+    descricao: `${cot.tipoServico || 'Mudança'} — ${cot.clienteNome || 'Cliente'}${rota ? ` (${rota})` : ''}`,
+    valor: Number(cot.valorTotal) || 0,
+    data: cot.dataPrevista || todayISO(),
+    vencimento: cot.dataPrevista || todayISO(),
+    status: 'pendente',
+    dataPagamento: '',
+    cliente: cot.clienteNome || '',
+    forma: '',
+    veiculoId: '', linhaId: '', contratoId: '',
+    obs: 'Gerado automaticamente pelo módulo Mudanças',
+    recorrente: false,
+    statusConc: 'manual',
+    criadoEm: new Date().toISOString(),
+  };
+}
+
+/**
+ * Sincroniza uma cotação com o Financeiro. Devolve a nova lista de finEmpresa.
+ * Regras:
+ *  - status faturável e sem lançamento  → cria (pendente)
+ *  - status faturável e já tem lançamento não pago → atualiza valor/data/descrição
+ *  - status cancelado/orçamento e lançamento não pago → remove
+ *  - lançamento já PAGO nunca é alterado nem removido (protege o histórico)
+ */
+function sincronizarFinanceiroMudanca(cot, finEmpresa) {
+  const existente = (finEmpresa || []).find(x => x.mudancaId === cot.id);
+  const faturavel = MUD_STATUS_FATURAVEL.includes(cot.status);
+
+  // Já foi pago: não mexe (histórico é sagrado)
+  if (existente && effStatus(existente) === 'pago') return finEmpresa;
+
+  if (faturavel) {
+    if (existente) {
+      // atualiza o pendente com os dados atuais da cotação
+      const novo = lancamentoDaMudanca(cot);
+      return finEmpresa.map(x => x.mudancaId === cot.id
+        ? { ...x, valor: novo.valor, data: novo.data, vencimento: novo.vencimento, descricao: novo.descricao, cliente: novo.cliente }
+        : x);
+    }
+    return [...(finEmpresa || []), lancamentoDaMudanca(cot)];
+  }
+
+  // Não é faturável (voltou pra orçamento, ou foi cancelado) → remove o pendente
+  if (existente) return finEmpresa.filter(x => x.mudancaId !== cot.id);
+  return finEmpresa;
+}
+
+const MUD_STATUS = [
+  { k: 'orcamento', label: 'Orçamento', tone: 'slate', cor: '#CA8A04', bg: '#FEF9C3' },
+  { k: 'aguardando', label: 'Aguardando aprovação', tone: 'orange', cor: '#EA580C', bg: '#FFEDD5' },
+  { k: 'confirmado', label: 'Confirmado', tone: 'blue', cor: '#2563EB', bg: '#DBEAFE' },
+  { k: 'agendado', label: 'Agendado', tone: 'blue', cor: '#7C3AED', bg: '#EDE9FE' },
+  { k: 'andamento', label: 'Em andamento', tone: 'orange', cor: '#059669', bg: '#D1FAE5' },
+  { k: 'concluido', label: 'Concluído', tone: 'green', cor: '#16A34A', bg: '#DCFCE7' },
+  { k: 'cancelado', label: 'Cancelado', tone: 'red', cor: '#DC2626', bg: '#FEE2E2' },
+];
+const mudStatusInfo = (k) => MUD_STATUS.find(s => s.k === k) || MUD_STATUS[0];
+// próximo status natural no fluxo (pra botão de avançar)
+const MUD_PROXIMO = {
+  orcamento: 'aguardando',
+  aguardando: 'confirmado',
+  confirmado: 'agendado',
+  agendado: 'andamento',
+  andamento: 'concluido',
+};
+
+// Chip de status moderno com bolinha colorida
+function StatusChip({ status, size = 'sm' }) {
+  const s = mudStatusInfo(status);
+  return (
+    <span className={`status-chip ${size === 'lg' ? 'status-chip-lg' : ''}`} style={{ background: s.bg, color: s.cor }}>
+      <span className="status-dot" style={{ background: s.cor }} />
+      {s.label}
+    </span>
+  );
+}
+
+// Monta URL do Google Maps com origem → destino
+function googleMapsUrl(origem, destino) {
+  if (!origem && !destino) return 'https://www.google.com/maps';
+  const o = encodeURIComponent(origem || '');
+  const d = encodeURIComponent(destino || '');
+  if (origem && destino) return `https://www.google.com/maps/dir/?api=1&origin=${o}&destination=${d}&travelmode=driving`;
+  return `https://www.google.com/maps/search/?api=1&query=${d || o}`;
+}
+
+// Card de rota: origem → destino + métricas + botão Google Maps
+function RotaCard({ cot, tabela }) {
+  const km = Number(cot.distanciaKm) || 0;
+  const combustivel = km * (tabela?.precoKm != null ? 0 : 0); // combustível estimado usa consumo se existir
+  const url = googleMapsUrl(cot.origem, cot.destino);
+  return (
+    <div className="rota-card">
+      <div className="rota-linha">
+        <div className="rota-ponto">
+          <span className="rota-pin rota-pin-origem"><MapPin size={13} /></span>
+          <div className="min-w-0">
+            <div className="rota-lbl">Origem</div>
+            <div className="rota-cidade truncate">{cot.origem || '—'}</div>
+          </div>
+        </div>
+        <div className="rota-seta"><ArrowDownRight size={16} /></div>
+        <div className="rota-ponto">
+          <span className="rota-pin rota-pin-destino"><MapPin size={13} /></span>
+          <div className="min-w-0">
+            <div className="rota-lbl">Destino</div>
+            <div className="rota-cidade truncate">{cot.destino || '—'}</div>
+          </div>
+        </div>
+      </div>
+      <div className="rota-metrics">
+        <div className="rota-metric">
+          <div className="rota-metric-v mono">{km} km</div>
+          <div className="rota-metric-l">Distância</div>
+        </div>
+        <div className="rota-metric">
+          <div className="rota-metric-v mono">{fmtBRL(km * tabela.precoKm)}</div>
+          <div className="rota-metric-l">Deslocamento</div>
+        </div>
+      </div>
+      <a href={url} target="_blank" rel="noopener noreferrer" className="rota-btn">
+        <MapPin size={15} /> Abrir no Google Maps
+      </a>
+    </div>
+  );
+}
+
+function ListaServicos({ data, setData, setToast, onEditar, onNova }) {
+  const { mudancas = [] } = data;
+  const [filtroStatus, setFiltroStatus] = useState('all');
+  const [kpiFiltro, setKpiFiltro] = useState(null); // 'orcamentos' | 'agendados' | 'andamento' | 'receita' | null
+  const [busca, setBusca] = useState('');
+  const [delTarget, setDelTarget] = useState(null);
+  const [detalhe, setDetalhe] = useState(null);
+
+  // Mapa de cada KPI para os status que ele representa
+  const KPI_GRUPOS = {
+    orcamentos: ['orcamento', 'aguardando'],
+    agendados: ['confirmado', 'agendado'],
+    andamento: ['andamento'],
+    receita: ['concluido'],
+  };
+  const toggleKpi = (chave) => {
+    setKpiFiltro(prev => prev === chave ? null : chave);
+    setFiltroStatus('all'); // KPI e dropdown são mutuamente exclusivos
+  };
+
+  const kpis = useMemo(() => {
+    const orcamentos = mudancas.filter(m => m.status === 'orcamento' || m.status === 'aguardando').length;
+    const agendados = mudancas.filter(m => m.status === 'confirmado' || m.status === 'agendado').length;
+    const andamento = mudancas.filter(m => m.status === 'andamento').length;
+    const mesAtual = currentMonth();
+    const receita = mudancas
+      .filter(m => m.status === 'concluido' && (m.dataPrevista || '').startsWith(mesAtual))
+      .reduce((a, b) => a + (b.valorTotal || 0), 0);
+    return { orcamentos, agendados, andamento, receita };
+  }, [mudancas]);
+
+  const filtered = useMemo(() => {
+    let arr = mudancas;
+    // filtro por KPI (grupo de status) tem prioridade
+    if (kpiFiltro && KPI_GRUPOS[kpiFiltro]) {
+      const grupo = KPI_GRUPOS[kpiFiltro];
+      arr = arr.filter(m => grupo.includes(m.status));
+      if (kpiFiltro === 'receita') {
+        const mesAtual = currentMonth();
+        arr = arr.filter(m => (m.dataPrevista || '').startsWith(mesAtual));
+      }
+    } else if (filtroStatus !== 'all') {
+      arr = arr.filter(m => m.status === filtroStatus);
+    }
+    if (busca.trim()) {
+      const q = busca.toLowerCase();
+      arr = arr.filter(m =>
+        (m.clienteNome || '').toLowerCase().includes(q) ||
+        (m.origem || '').toLowerCase().includes(q) ||
+        (m.destino || '').toLowerCase().includes(q)
+      );
+    }
+    return [...arr].sort((a, b) => (b.criadoEm || '').localeCompare(a.criadoEm || ''));
+  }, [mudancas, filtroStatus, kpiFiltro, busca]);
+
+  const mudarStatus = (id, novo) => {
+    setData(d => {
+      const mudancas = (d.mudancas || []).map(m => m.id === id ? { ...m, status: novo, atualizadoEm: new Date().toISOString() } : m);
+      const cot = mudancas.find(m => m.id === id);
+      // Sincroniza com o Financeiro: confirmado→conta a receber, cancelado→remove pendente
+      const finEmpresa = cot ? sincronizarFinanceiroMudanca(cot, d.finEmpresa || []) : d.finEmpresa;
+      return { ...d, mudancas, finEmpresa };
+    });
+    const info = mudStatusInfo(novo);
+    // Avisa quando o serviço virou conta a receber
+    if (novo === 'confirmado') setToast('Confirmado — lançado no Financeiro como conta a receber');
+    else setToast(`Status: ${info.label}`);
+  };
+  const confirmDelete = () => {
+    if (delTarget) {
+      setData(d => {
+        const mudancas = (d.mudancas || []).filter(m => m.id !== delTarget.id);
+        // Remove o lançamento pendente vinculado (mas preserva se já foi pago)
+        const finEmpresa = (d.finEmpresa || []).filter(x => !(x.mudancaId === delTarget.id && effStatus(x) !== 'pago'));
+        return { ...d, mudancas, finEmpresa };
+      });
+      setToast('Registro excluído'); setDelTarget(null);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <p className="text-sm t-soft" style={{ maxWidth: 480 }}>Todos os orçamentos e serviços de mudança. Avance o status conforme o serviço evolui.</p>
+        <NewButton onClick={onNova}>Nova cotação</NewButton>
+      </div>
+
+      <div className="mud-kpi-grid">
+        <button className={`mud-kpi fade-in ${kpiFiltro === 'orcamentos' ? 'active' : ''}`} style={{ '--kc': '#CA8A04' }} onClick={() => toggleKpi('orcamentos')}>
+          <div className="mud-kpi-ico" style={{ background: '#FEF9C3', color: '#CA8A04' }}><FileSignature size={18} /></div>
+          <div className="mud-kpi-num">{kpis.orcamentos}</div>
+          <div className="mud-kpi-lbl">Orçamentos</div>
+          <div className="mud-kpi-sub">{kpiFiltro === 'orcamentos' ? 'filtrando ✓' : 'aguardando decisão'}</div>
+        </button>
+        <button className={`mud-kpi fade-in ${kpiFiltro === 'agendados' ? 'active' : ''}`} style={{ '--kc': '#7C3AED' }} onClick={() => toggleKpi('agendados')}>
+          <div className="mud-kpi-ico" style={{ background: '#EDE9FE', color: '#7C3AED' }}><Calendar size={18} /></div>
+          <div className="mud-kpi-num">{kpis.agendados}</div>
+          <div className="mud-kpi-lbl">Agendados</div>
+          <div className="mud-kpi-sub">{kpiFiltro === 'agendados' ? 'filtrando ✓' : 'confirmados / na agenda'}</div>
+        </button>
+        <button className={`mud-kpi fade-in ${kpiFiltro === 'andamento' ? 'active' : ''}`} style={{ '--kc': '#059669' }} onClick={() => toggleKpi('andamento')}>
+          <div className="mud-kpi-ico" style={{ background: '#D1FAE5', color: '#059669' }}><Activity size={18} /></div>
+          <div className="mud-kpi-num" style={{ color: kpis.andamento > 0 ? '#059669' : undefined }}>{kpis.andamento}</div>
+          <div className="mud-kpi-lbl">Em andamento</div>
+          <div className="mud-kpi-sub">{kpiFiltro === 'andamento' ? 'filtrando ✓' : 'acontecendo agora'}</div>
+        </button>
+        <button className={`mud-kpi fade-in ${kpiFiltro === 'receita' ? 'active' : ''}`} style={{ '--kc': '#16A34A' }} onClick={() => toggleKpi('receita')}>
+          <div className="mud-kpi-ico" style={{ background: '#DCFCE7', color: '#16A34A' }}><Coins size={18} /></div>
+          <div className="mud-kpi-num mono t-green" style={{ fontSize: 20 }}>{fmtBRL(kpis.receita)}</div>
+          <div className="mud-kpi-lbl">Receita prevista (mês)</div>
+          <div className="mud-kpi-sub">{kpiFiltro === 'receita' ? 'filtrando ✓' : 'serviços concluídos'}</div>
+        </button>
+      </div>
+
+      <div className="card p-4 sm:p-5">
+        <div className="orc-search-bar">
+          <div className="orc-search-input">
+            <Search size={16} className="orc-search-ico" />
+            <input className="orc-search-field" placeholder="Buscar por cliente, origem ou destino…" value={busca} onChange={(e) => setBusca(e.target.value)} />
+          </div>
+          <select className="orc-search-status" value={filtroStatus} onChange={(e) => { setFiltroStatus(e.target.value); setKpiFiltro(null); }} disabled={!!kpiFiltro}>
+            <option value="all">Todos os status</option>
+            {MUD_STATUS.map(s => <option key={s.k} value={s.k}>{s.label}</option>)}
+          </select>
+        </div>
+
+        {kpiFiltro && (
+          <div className="orc-filtro-ativo">
+            <span>Mostrando: <b>{kpiFiltro === 'orcamentos' ? 'Orçamentos' : kpiFiltro === 'agendados' ? 'Agendados' : kpiFiltro === 'andamento' ? 'Em andamento' : 'Concluídos do mês'}</b></span>
+            <button onClick={() => setKpiFiltro(null)} className="orc-filtro-limpar"><X size={13} /> Limpar</button>
+          </div>
+        )}
+
+        {filtered.length === 0 ? <EmptyState icon={Package} title={mudancas.length === 0 ? 'Nenhuma cotação ainda. Crie a primeira!' : 'Nenhum registro para os filtros.'} /> : (
+          <div className="orc-grid">
+            {filtered.map(m => {
+              const prox = MUD_PROXIMO[m.status];
+              return (
+                <div key={m.id} className="orc-card fade-in">
+                  <div className="orc-card-clickable" onClick={() => setDetalhe(m)} role="button" tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDetalhe(m); } }}>
+                    <div className="orc-card-top">
+                      <div className="min-w-0 flex-1">
+                        <div className="orc-cliente truncate">{m.clienteNome || 'Cliente não informado'}</div>
+                        <div className="orc-tipo">{m.tipoServico}</div>
+                      </div>
+                      <StatusChip status={m.status} />
+                    </div>
+
+                    <div className="orc-rota">
+                      <span className="orc-rota-cidade truncate">{m.origem || '—'}</span>
+                      <ArrowUpRight size={13} className="orc-rota-arrow" />
+                      <span className="orc-rota-cidade truncate">{m.destino || '—'}</span>
+                    </div>
+
+                    <div className="orc-meta">
+                      <div className="orc-meta-item">
+                        <span className="orc-meta-l">Distância</span>
+                        <span className="orc-meta-v mono">{m.distanciaKm || 0} km</span>
+                      </div>
+                      <div className="orc-meta-item">
+                        <span className="orc-meta-l">Data</span>
+                        <span className="orc-meta-v">{m.dataPrevista ? fmtDate(m.dataPrevista) : '—'}</span>
+                      </div>
+                      <div className="orc-meta-item">
+                        <span className="orc-meta-l">Valor</span>
+                        <span className="orc-meta-v mono t-ink" style={{ fontWeight: 700 }}>{fmtBRL(m.valorTotal || 0)}</span>
+                      </div>
+                      <div className="orc-meta-item">
+                        <span className="orc-meta-l">Lucro previsto</span>
+                        <span className="orc-meta-v mono t-green">{fmtBRL(m.lucroEstimado || 0)}</span>
+                      </div>
+                    </div>
+
+                    <div className="orc-ver-mais"><Eye size={13} /> Ver detalhes completos</div>
+                  </div>
+
+                  <div className="orc-card-actions">
+                    {prox
+                      ? <button onClick={() => mudarStatus(m.id, prox)} className="orc-advance"><ChevronRight size={13} /> {mudStatusInfo(prox).label}</button>
+                      : <span />}
+                    <div className="orc-icons">
+                      <button onClick={() => onEditar(m)} className="ibtn" title="Editar"><Pencil size={15} /></button>
+                      <button onClick={() => setDelTarget(m)} className="ibtn ibtn-del" title="Excluir"><Trash2 size={15} /></button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Modal de detalhes */}
+      <Modal open={!!detalhe} onClose={() => setDetalhe(null)} title="Detalhes da cotação" wide>
+        {detalhe && <DetalheCotacao cot={detalhe} data={data} setData={setData} setToast={setToast} onMudarStatus={(novo) => { mudarStatus(detalhe.id, novo); setDetalhe({ ...detalhe, status: novo }); }} />}
+      </Modal>
+
+      <ConfirmModal item={delTarget} title="Excluir cotação" message={delTarget ? `Excluir a cotação de "${delTarget.clienteNome || 'cliente'}"?` : ''} onCancel={() => setDelTarget(null)} onConfirm={confirmDelete} />
+    </div>
+  );
+}
+
+function DetalheCotacao({ cot, data, setData, setToast, onMudarStatus }) {
+  const tabela = getTabelaMudancas(data.config);
+  const calc = useMemo(() => calcularOrcamento(cot, tabela), [cot, tabela]);
+  const st = mudStatusInfo(cot.status);
+  const itens = Object.entries(cot.itens || {}).filter(([, q]) => q > 0);
+  const [gerando, setGerando] = useState(false);
+
+  const empresa = {
+    nome: data.config?.nomeEmpresa || 'Minha Empresa',
+    logoUrl: data.config?.logoUrl || '',
+    cnpj: data.config?.cnpj || '',
+    telefone: data.config?.telefone || '',
+    endereco: data.config?.endereco || '',
+    cidade: data.config?.cidade || '',
+    uf: data.config?.uf || '',
+    emailContato: data.config?.emailContato || '',
+    corPrimaria: getPalette(data.config?.paletteId || DEFAULT_PALETTE_ID).colors.primary,
+  };
+
+  const baixarPDF = async () => {
+    setGerando(true);
+    try {
+      await gerarOrcamentoPDF(cot, calc, empresa, { modo: 'download' });
+    } catch (e) {
+      console.error('[PDF]', e);
+      alert('Não consegui gerar o PDF. Tenta de novo.');
+    } finally {
+      setGerando(false);
+    }
+  };
+
+  const enviarWhatsApp = () => {
+    const tel = (cot.clienteTelefone || '').replace(/\D/g, '');
+    const itensTxt = itens.map(([n, q]) => `${n} (${q})`).join(', ');
+    const linhas = [
+      `*Orçamento de ${cot.tipoServico}* — ${empresa.nome}`,
+      '',
+      `Cliente: ${cot.clienteNome || '-'}`,
+      `Data: ${fmtDate(cot.dataPrevista)}${cot.horaPrevista ? ' às ' + cot.horaPrevista : ''}`,
+      `Origem: ${cot.origem || '-'}`,
+      `Destino: ${cot.destino || '-'}`,
+      cot.distanciaKm ? `Distância: ${cot.distanciaKm} km` : '',
+      itensTxt ? `Itens: ${itensTxt}` : '',
+      '',
+      `*VALOR TOTAL: ${fmtBRL(calc.total)}*`,
+      '',
+      cot.obs ? `Obs: ${cot.obs}` : '',
+      'Orçamento válido por 7 dias.',
+    ].filter(Boolean);
+    const texto = encodeURIComponent(linhas.join('\n'));
+    const url = tel.length >= 10 ? `https://wa.me/55${tel}?text=${texto}` : `https://wa.me/?text=${texto}`;
+    window.open(url, '_blank');
+  };
+
+  // Custos = total menos o lucro estimado (sem mudar nenhum cálculo, só derivando pra exibir)
+  const custos = Math.max(0, calc.total - (calc.lucroEstimado || 0));
+
+  // Vínculo com o Financeiro: existe lançamento gerado por esta mudança?
+  const lancFin = (data.finEmpresa || []).find(x => x.mudancaId === cot.id);
+  const lancPago = lancFin && effStatus(lancFin) === 'pago';
+  const marcarRecebido = () => {
+    if (!lancFin) return;
+    setData(d => ({
+      ...d,
+      finEmpresa: (d.finEmpresa || []).map(x => x.id === lancFin.id
+        ? { ...x, status: 'pago', dataPagamento: todayISO() }
+        : x),
+    }));
+    setToast?.('Pagamento registrado no Financeiro');
+  };
+  const margemPct = calc.total > 0 ? Math.round((calc.lucroEstimado / calc.total) * 100) : 0;
+
+  return (
+    <div className="det-wrap">
+      {/* Cabeçalho premium */}
+      <div className="det-head">
+        <div className="det-head-top">
+          <div className="min-w-0">
+            <div className="det-cliente">{cot.clienteNome || 'Cliente não informado'}</div>
+            <div className="det-sub">{cot.tipoServico}{cot.tipoImovel ? ` · ${cot.tipoImovel}` : ''}</div>
+          </div>
+          <StatusChip status={cot.status} size="lg" />
+        </div>
+        <div className="det-fin">
+          <div className="det-fin-item">
+            <div className="det-fin-l">Valor da cotação</div>
+            <div className="det-fin-v mono">{fmtBRL(calc.total)}</div>
+          </div>
+          <div className="det-fin-item">
+            <div className="det-fin-l">Lucro previsto</div>
+            <div className="det-fin-v mono t-green">{fmtBRL(calc.lucroEstimado)}</div>
+          </div>
+          <div className="det-fin-item">
+            <div className="det-fin-l">Margem</div>
+            <div className="det-fin-v mono">{margemPct}%</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Ações principais */}
+      <div className="det-actions">
+        <button className="btn btn-primary" onClick={baixarPDF} disabled={gerando} style={{ background: 'var(--color-primary)' }}>
+          {gerando ? 'Gerando…' : <><FileSignature size={15} /> Gerar PDF</>}
+        </button>
+        <button className="det-wpp" onClick={enviarWhatsApp}>
+          <Phone size={15} /> Enviar no WhatsApp
+        </button>
+      </div>
+
+      {/* Rota com Google Maps */}
+      {(cot.origem || cot.destino) && (
+        <div>
+          <div className="label mb-2">Rota</div>
+          <RotaCard cot={cot} tabela={tabela} />
+        </div>
+      )}
+
+      {/* Métricas rápidas */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="metric-box"><div className="text-xs t-soft">Data</div><div className="text-sm font-medium t-ink">{fmtDate(cot.dataPrevista)}{cot.horaPrevista ? ` ${cot.horaPrevista}` : ''}</div></div>
+        <div className="metric-box"><div className="text-xs t-soft">Distância</div><div className="text-sm font-medium t-ink mono">{cot.distanciaKm || 0} km</div></div>
+        <div className="metric-box"><div className="text-xs t-soft">Imóvel</div><div className="text-sm font-medium t-ink">{cot.tipoImovel}</div></div>
+        <div className="metric-box"><div className="text-xs t-soft">Telefone</div><div className="text-sm font-medium t-ink">{cot.clienteTelefone || '—'}</div></div>
+      </div>
+
+      {itens.length > 0 && (
+        <div>
+          <div className="label mb-2">Itens da mudança</div>
+          <div className="flex flex-wrap gap-1.5">
+            {itens.map(([nome, q]) => <span key={nome} className="item-chip">{nome} <b>× {q}</b></span>)}
+          </div>
+        </div>
+      )}
+
+      {/* Resumo financeiro (card destacado) */}
+      <div className="fin-resumo">
+        <div className="fin-resumo-item">
+          <div className="fin-resumo-l">Valor total</div>
+          <div className="fin-resumo-v mono">{fmtBRL(calc.total)}</div>
+        </div>
+        <div className="fin-resumo-item">
+          <div className="fin-resumo-l">Custos</div>
+          <div className="fin-resumo-v mono" style={{ color: '#DC2626' }}>{fmtBRL(custos)}</div>
+        </div>
+        <div className="fin-resumo-item">
+          <div className="fin-resumo-l">Lucro</div>
+          <div className="fin-resumo-v mono" style={{ color: '#16A34A' }}>{fmtBRL(calc.lucroEstimado)}</div>
+        </div>
+        <div className="fin-resumo-item">
+          <div className="fin-resumo-l">Margem</div>
+          <div className="fin-resumo-v mono">{margemPct}%</div>
+        </div>
+      </div>
+
+      {/* Vínculo com o Financeiro */}
+      {lancFin ? (
+        <div className={`mud-fin-card ${lancPago ? 'pago' : 'pendente'}`}>
+          <span className="mud-fin-ico">
+            {lancPago ? <Check size={16} /> : <Clock size={16} />}
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="mud-fin-titulo">
+              {lancPago ? 'Recebido' : 'A receber'} · <span className="mono">{fmtBRL(lancFin.valor)}</span>
+            </div>
+            <div className="mud-fin-sub">
+              {lancPago
+                ? `Pago em ${fmtDate(lancFin.dataPagamento || lancFin.data)} — já está no caixa.`
+                : `Lançado no Financeiro com vencimento em ${fmtDate(lancFin.data)}.`}
+            </div>
+          </div>
+          {!lancPago && (
+            <button className="mud-fin-btn" onClick={marcarRecebido}>
+              <Check size={14} /> Marcar como recebido
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="mud-fin-card aviso">
+          <span className="mud-fin-ico"><CircleAlert size={16} /></span>
+          <div className="flex-1 min-w-0">
+            <div className="mud-fin-titulo">Ainda não está no Financeiro</div>
+            <div className="mud-fin-sub">Ao marcar como <b>Confirmado</b>, o valor entra automaticamente como conta a receber.</div>
+          </div>
+        </div>
+      )}
+
+      {/* Composição detalhada */}
+      <div>
+        <div className="label mb-2">Composição do valor</div>
+        <div className="cot-resumo-list" style={{ maxHeight: 'none' }}>
+          {calc.linhas.map((l, i) => (
+            <div key={i} className="cot-resumo-line"><span className="text-xs t-soft">{l.label}</span><span className="text-xs mono t-ink">{fmtBRL(l.valor)}</span></div>
+          ))}
+          {calc.matDetalhe.length > 0 && <div className="cot-resumo-sep">Materiais</div>}
+          {calc.matDetalhe.map((l, i) => (
+            <div key={i} className="cot-resumo-line"><span className="text-xs t-soft">{l.label}</span><span className="text-xs mono t-ink">{fmtBRL(l.valor)}</span></div>
+          ))}
+          {calc.desconto > 0 && <div className="cot-resumo-line" style={{ color: '#B4234B' }}><span className="text-xs">Desconto</span><span className="text-xs mono">− {fmtBRL(calc.desconto)}</span></div>}
+        </div>
+        <div className="cot-resumo-total"><span>Total</span><span className="mono">{fmtBRL(calc.total)}</span></div>
+      </div>
+
+      {cot.obs && <div><div className="label mb-1">Observações</div><p className="text-sm t-soft">{cot.obs}</p></div>}
+
+      <div>
+        <div className="label mb-2">Mudar status</div>
+        <div className="flex flex-wrap gap-1.5">
+          {MUD_STATUS.map(s => (
+            <button key={s.k} onClick={() => onMudarStatus(s.k)} className={`mb-chip ${cot.status === s.k ? 'on' : ''}`}>
+              {s.label}{cot.status === s.k && <Check size={12} />}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Campo de valor em R$ com edição livre — mantém o que o usuário digita como texto
+// e só converte pra número ao salvar/sair. Componente estável (fora de TabelaPrecos)
+// pra não perder o foco a cada tecla.
+function MoneyInput({ value, onChange, disabled }) {
+  const [txt, setTxt] = useState(String(value ?? 0));
+  const focado = useRef(false);
+
+  // Sincroniza com o valor externo só quando o campo NÃO está sendo editado
+  useEffect(() => {
+    if (!focado.current) setTxt(String(value ?? 0));
+  }, [value]);
+
+  const handleChange = (e) => {
+    let v = e.target.value.replace(',', '.');       // aceita vírgula
+    if (!/^\d*\.?\d*$/.test(v)) return;              // só números e um ponto
+    setTxt(v);
+    const n = parseFloat(v);
+    onChange(Number.isFinite(n) ? n : 0);            // propaga número (vazio = 0) sem travar a digitação
+  };
+  const handleBlur = () => {
+    focado.current = false;
+    const n = parseFloat(txt);
+    const final = Number.isFinite(n) ? n : 0;
+    setTxt(String(final));
+    onChange(final);
+  };
+
+  return (
+    <div className="mud-money">
+      <span className="mud-money-cur">R$</span>
+      <input
+        type="text" inputMode="decimal"
+        className="inp mono"
+        value={txt}
+        disabled={disabled}
+        onFocus={(e) => { focado.current = true; e.target.select(); }}
+        onChange={handleChange}
+        onBlur={handleBlur}
+        style={{ paddingLeft: 34 }}
+      />
+    </div>
+  );
+}
+
+// Campo numérico simples (ex.: %) com edição livre, componente estável.
+function PercentInput({ value, onChange, disabled }) {
+  const [txt, setTxt] = useState(String(value ?? 0));
+  const focado = useRef(false);
+  useEffect(() => { if (!focado.current) setTxt(String(value ?? 0)); }, [value]);
+  const handleChange = (e) => {
+    const v = e.target.value.replace(',', '.');
+    if (!/^\d*\.?\d*$/.test(v)) return;
+    setTxt(v);
+    const n = parseFloat(v);
+    onChange(Number.isFinite(n) ? n : 0);
+  };
+  const handleBlur = () => {
+    focado.current = false;
+    const n = parseFloat(txt);
+    const final = Number.isFinite(n) ? n : 0;
+    setTxt(String(final)); onChange(final);
+  };
+  return (
+    <input type="text" inputMode="decimal" className="inp mono" value={txt} disabled={disabled}
+      onFocus={(e) => { focado.current = true; e.target.select(); }}
+      onChange={handleChange} onBlur={handleBlur} />
+  );
+}
+
+function TabelaPrecos({ data, setData, setToast }) {
+  const { isGestor } = useAuth();
+  const isOwner = isGestor; // dono e sócio podem editar a tabela de preços
+  const salva = getTabelaMudancas(data.config);
+  const [t, setT] = useState(salva);
+  const [dirty, setDirty] = useState(false);
+  const [aberta, setAberta] = useState('servicos'); // primeira seção aberta por padrão
+
+  const toggle = (secao) => setAberta(prev => prev === secao ? null : secao);
+
+  const upd = (patch) => { setT(prev => ({ ...prev, ...patch })); setDirty(true); };
+  const updEscadaS = (patch) => { setT(prev => ({ ...prev, escadaSubida: { ...prev.escadaSubida, ...patch } })); setDirty(true); };
+  const updEscadaD = (patch) => { setT(prev => ({ ...prev, escadaDescida: { ...prev.escadaDescida, ...patch } })); setDirty(true); };
+  const updMat = (patch) => { setT(prev => ({ ...prev, materiais: { ...prev.materiais, ...patch } })); setDirty(true); };
+
+  // --- Móveis (montagem/desmontagem por tipo) ---
+  const updMovel = (id, patch) => {
+    setT(prev => ({ ...prev, moveis: (prev.moveis || []).map(m => m.id === id ? { ...m, ...patch } : m) }));
+    setDirty(true);
+  };
+  const addMovel = () => {
+    setT(prev => ({ ...prev, moveis: [...(prev.moveis || []), { id: uid(), nome: '', desmontagem: 0, montagem: 0 }] }));
+    setDirty(true);
+  };
+  const delMovel = (id) => {
+    setT(prev => ({ ...prev, moveis: (prev.moveis || []).filter(m => m.id !== id) }));
+    setDirty(true);
+  };
+
+  // --- Serviços personalizados ---
+  const updServ = (id, patch) => {
+    setT(prev => ({ ...prev, servicosCustom: (prev.servicosCustom || []).map(s => s.id === id ? { ...s, ...patch } : s) }));
+    setDirty(true);
+  };
+  const addServ = () => {
+    setT(prev => ({ ...prev, servicosCustom: [...(prev.servicosCustom || []), { id: uid(), nome: '', preco: 0, unidade: 'un' }] }));
+    setDirty(true);
+  };
+  const delServ = (id) => {
+    setT(prev => ({ ...prev, servicosCustom: (prev.servicosCustom || []).filter(s => s.id !== id) }));
+    setDirty(true);
+  };
+
+  // --- Materiais personalizados ---
+  const updMatC = (id, patch) => {
+    setT(prev => ({ ...prev, materiaisCustom: (prev.materiaisCustom || []).map(m => m.id === id ? { ...m, ...patch } : m) }));
+    setDirty(true);
+  };
+  const addMatC = () => {
+    setT(prev => ({ ...prev, materiaisCustom: [...(prev.materiaisCustom || []), { id: uid(), nome: '', preco: 0 }] }));
+    setDirty(true);
+  };
+  const delMatC = (id) => {
+    setT(prev => ({ ...prev, materiaisCustom: (prev.materiaisCustom || []).filter(m => m.id !== id) }));
+    setDirty(true);
+  };
+
+  const salvar = () => {
+    setData(d => ({ ...d, config: { ...(d.config || {}), tabelaMudancas: t } }));
+    setDirty(false);
+    setToast('Tabela de preços salva');
+  };
+
+  const disabled = !isOwner;
+
+  // Cabeçalho clicável de cada seção accordion
+  const AccHead = ({ secao, titulo, sub, icon: Icon, cor }) => (
+    <button className={`acc-head ${aberta === secao ? 'open' : ''}`} onClick={() => toggle(secao)}>
+      <div className="acc-head-ico" style={{ background: `${cor}18`, color: cor }}><Icon size={17} /></div>
+      <div className="acc-head-txt">
+        <div className="acc-head-titulo">{titulo}</div>
+        <div className="acc-head-sub">{sub}</div>
+      </div>
+      <ChevronDown size={18} className="acc-head-chev" />
+    </button>
+  );
+
+  return (
+    <div className="space-y-3">
+      {!isOwner && (
+        <div className="card p-4" style={{ background: '#FEF9F3', border: '1px solid #F5D5A8' }}>
+          <p className="text-sm" style={{ color: '#92400E' }}>Apenas o dono e os sócios podem editar a tabela de preços. Você pode visualizar os valores abaixo.</p>
+        </div>
+      )}
+
+      {/* Seção Serviços */}
+      <div className="acc-card">
+        <AccHead secao="servicos" titulo="Serviços — valores base" sub="Km, ajudantes, montagem, embalagem…" icon={Package} cor="var(--color-primary)" />
+        {aberta === 'servicos' && (
+          <div className="acc-body">
+            <div className="preco-grid">
+              <Field label="Preço por km rodado"><MoneyInput value={t.precoKm} onChange={(v) => upd({ precoKm: v })} disabled={disabled} /></Field>
+              <Field label="Valor mínimo do frete"><MoneyInput value={t.valorMinimo} onChange={(v) => upd({ valorMinimo: v })} disabled={disabled} /></Field>
+              <Field label="Ajudante — por hora"><MoneyInput value={t.ajudanteHora} onChange={(v) => upd({ ajudanteHora: v })} disabled={disabled} /></Field>
+              <Field label="Ajudante — diária"><MoneyInput value={t.ajudanteDiaria} onChange={(v) => upd({ ajudanteDiaria: v })} disabled={disabled} /></Field>
+              <Field label="Montagem (por peça)"><MoneyInput value={t.montagemPeca} onChange={(v) => upd({ montagemPeca: v })} disabled={disabled} /></Field>
+              <Field label="Desmontagem (por peça)"><MoneyInput value={t.desmontagemPeca} onChange={(v) => upd({ desmontagemPeca: v })} disabled={disabled} /></Field>
+              <Field label="Embalagem de móvel (por peça)"><MoneyInput value={t.embalagemMovelPeca} onChange={(v) => upd({ embalagemMovelPeca: v })} disabled={disabled} /></Field>
+              <Field label="Embalagem de miudezas (por caixa)"><MoneyInput value={t.embalagemMiudezaCaixa} onChange={(v) => upd({ embalagemMiudezaCaixa: v })} disabled={disabled} /></Field>
+              <Field label="Içamento (por içamento)"><MoneyInput value={t.icamento} onChange={(v) => upd({ icamento: v })} disabled={disabled} /></Field>
+              <Field label="Hora parada / espera"><MoneyInput value={t.horaParada} onChange={(v) => upd({ horaParada: v })} disabled={disabled} /></Field>
+              <Field label="Margem de lucro sugerida (%)">
+                <PercentInput value={t.margemLucro} onChange={(v) => upd({ margemLucro: v })} disabled={disabled} />
+              </Field>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Seção Escadas */}
+      <div className="acc-card">
+        <AccHead secao="escadas" titulo="Escadas — valor por andar" sub="Faixas por altura, subida e descida" icon={TrendingUp} cor="#7C3AED" />
+        {aberta === 'escadas' && (
+          <div className="acc-body">
+            <p className="text-sm t-soft mb-3">Cobrança por andar, variando conforme a altura. Ex.: subir 5 andares na faixa "5º+" cobra o valor da faixa × 5.</p>
+            <div className="mud-escada-grid">
+              <div className="mud-escada-head"></div>
+              <div className="mud-escada-head">1º e 2º andar</div>
+              <div className="mud-escada-head">3º e 4º andar</div>
+              <div className="mud-escada-head">5º andar ou +</div>
+
+              <div className="mud-escada-lbl">Subida (por andar)</div>
+              <MoneyInput value={t.escadaSubida.faixa1a2} onChange={(v) => updEscadaS({ faixa1a2: v })} disabled={disabled} />
+              <MoneyInput value={t.escadaSubida.faixa3a4} onChange={(v) => updEscadaS({ faixa3a4: v })} disabled={disabled} />
+              <MoneyInput value={t.escadaSubida.faixa5plus} onChange={(v) => updEscadaS({ faixa5plus: v })} disabled={disabled} />
+
+              <div className="mud-escada-lbl">Descida (por andar)</div>
+              <MoneyInput value={t.escadaDescida.faixa1a2} onChange={(v) => updEscadaD({ faixa1a2: v })} disabled={disabled} />
+              <MoneyInput value={t.escadaDescida.faixa3a4} onChange={(v) => updEscadaD({ faixa3a4: v })} disabled={disabled} />
+              <MoneyInput value={t.escadaDescida.faixa5plus} onChange={(v) => updEscadaD({ faixa5plus: v })} disabled={disabled} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Seção Materiais */}
+      <div className="acc-card">
+        <AccHead secao="materiais" titulo="Materiais — preço unitário" sub="Fita, caixas, plástico bolha, cobertor…" icon={Coins} cor="#059669" />
+        {aberta === 'materiais' && (
+          <div className="acc-body">
+            <div className="mat-grid">
+              {Object.keys(MATERIAIS_LABEL).map(k => (
+                <div key={k} className="mat-card">
+                  <div className="mat-card-nome">{MATERIAIS_LABEL[k]}</div>
+                  <MoneyInput value={t.materiais[k]} onChange={(v) => updMat({ [k]: v })} disabled={disabled} />
+                </div>
+              ))}
+              {/* materiais personalizados da empresa */}
+              {(t.materiaisCustom || []).map(mc => (
+                <div key={mc.id} className="mat-card mat-card-custom">
+                  <div className="cust-head">
+                    <input className="cust-nome" value={mc.nome} disabled={disabled} placeholder="Nome do material"
+                      onChange={(e) => updMatC(mc.id, { nome: e.target.value })} />
+                    {isOwner && <button className="cust-del" onClick={() => delMatC(mc.id)} title="Remover"><Trash2 size={13} /></button>}
+                  </div>
+                  <MoneyInput value={mc.preco} onChange={(v) => updMatC(mc.id, { preco: v })} disabled={disabled} />
+                </div>
+              ))}
+            </div>
+            {isOwner && (
+              <button className="btn btn-ghost mt-3" onClick={addMatC}>
+                <Plus size={15} /> Adicionar material
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Seção Móveis — montagem/desmontagem por tipo */}
+      <div className="acc-card">
+        <AccHead secao="moveis" titulo="Móveis — montagem e desmontagem" sub="Preço próprio por tipo de móvel" icon={Wrench} cor="#EA580C" />
+        {aberta === 'moveis' && (
+          <div className="acc-body">
+            <p className="text-sm t-soft mb-3">
+              Cada móvel tem seu preço, porque desmontar um guarda-roupa de 6 portas dá muito mais trabalho que uma mesinha.
+            </p>
+            <div className="mv-table">
+              <div className="mv-head">
+                <span>Móvel</span>
+                <span>Desmontagem</span>
+                <span>Montagem</span>
+                <span />
+              </div>
+              {(t.moveis || []).map(mv => (
+                <div key={mv.id} className="mv-row">
+                  <input className="inp" value={mv.nome} disabled={disabled} placeholder="Nome do móvel"
+                    onChange={(e) => updMovel(mv.id, { nome: e.target.value })} />
+                  <MoneyInput value={mv.desmontagem} onChange={(v) => updMovel(mv.id, { desmontagem: v })} disabled={disabled} />
+                  <MoneyInput value={mv.montagem} onChange={(v) => updMovel(mv.id, { montagem: v })} disabled={disabled} />
+                  {isOwner
+                    ? <button className="ibtn ibtn-del" onClick={() => delMovel(mv.id)} title="Remover"><Trash2 size={14} /></button>
+                    : <span />}
+                </div>
+              ))}
+            </div>
+            {isOwner && (
+              <button className="btn btn-ghost mt-3" onClick={addMovel}>
+                <Plus size={15} /> Adicionar móvel
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Seção Serviços personalizados */}
+      <div className="acc-card">
+        <AccHead secao="custom" titulo="Serviços personalizados" sub="Cabideiro, piano, cofre, o que a empresa cobrar" icon={Sparkles} cor="#2563EB" />
+        {aberta === 'custom' && (
+          <div className="acc-body">
+            <p className="text-sm t-soft mb-3">
+              Serviços próprios da sua empresa que não estão na lista padrão. Eles aparecem no assistente de cotação com contador.
+            </p>
+            {(t.servicosCustom || []).length === 0 && (
+              <p className="text-sm t-mute mb-3">Nenhum serviço personalizado ainda. Ex.: "Cabideiro", "Transporte de piano", "Desmontagem de cofre".</p>
+            )}
+            <div className="sc-list">
+              {(t.servicosCustom || []).map(s => (
+                <div key={s.id} className="sc-row">
+                  <input className="inp" value={s.nome} disabled={disabled} placeholder="Nome do serviço"
+                    onChange={(e) => updServ(s.id, { nome: e.target.value })} />
+                  <input className="inp" value={s.unidade || ''} disabled={disabled} placeholder="un."
+                    onChange={(e) => updServ(s.id, { unidade: e.target.value })} style={{ maxWidth: 90 }} />
+                  <MoneyInput value={s.preco} onChange={(v) => updServ(s.id, { preco: v })} disabled={disabled} />
+                  {isOwner
+                    ? <button className="ibtn ibtn-del" onClick={() => delServ(s.id)} title="Remover"><Trash2 size={14} /></button>
+                    : <span />}
+                </div>
+              ))}
+            </div>
+            {isOwner && (
+              <button className="btn btn-ghost mt-3" onClick={addServ}>
+                <Plus size={15} /> Adicionar serviço
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {isOwner && (
+        <div className="mud-save-bar">
+          {dirty ? <span className="text-xs t-orange">Você tem alterações não salvas</span> : <span className="text-xs t-mute">Tudo salvo</span>}
+          <button className="btn btn-primary" onClick={salvar}>Salvar tabela</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -3717,6 +8724,20 @@ function DocumentoForm({ item, veiculos, motoristas, contratos, linhas, onSave, 
 
   return (
     <div>
+      <div className="scan-strip mb-3">
+        <ScanButton
+          label="Escanear documento por foto"
+          size="md"
+          onExtracted={(text) => {
+            const venc = extractVencimentoDate(text);
+            if (venc) setDataVencimento(venc);
+            const vals = extractValues(text);
+            if (vals.length > 0 && !valor) setValor(vals[0]);
+            if (!venc && vals.length === 0) alert('Não consegui extrair data nem valor da foto. Tenta com mais luz e sem tremer.');
+          }}
+        />
+        <span className="text-xs t-mute">Tenta preencher data de vencimento e valor</span>
+      </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Field label="Tipo do documento">
           <select className="inp" value={tipo} onChange={(e) => setTipo(e.target.value)}>
@@ -3991,7 +9012,22 @@ function WmsForm({ item, onSave, onCancel }) {
   );
 }
 
-function MembrosSection({ company }) {
+// Badge do papel do usuário: Dono / Sócio / Funcionário
+const PAPEIS = {
+  owner:  { label: 'Dono',        cor: 'var(--color-primary)', bg: 'rgba(var(--color-primary-rgb),.1)' },
+  socio:  { label: 'Sócio',       cor: '#7C3AED',              bg: '#EDE9FE' },
+  member: { label: 'Funcionário', cor: '#6B7280',              bg: '#F1F3F5' },
+};
+function PapelBadge({ papel, size = 'sm' }) {
+  const p = PAPEIS[papel] || PAPEIS.member;
+  return (
+    <span className={`papel-badge ${size === 'xs' ? 'papel-badge-xs' : ''}`} style={{ background: p.bg, color: p.cor }}>
+      {p.label}
+    </span>
+  );
+}
+
+function MembrosSection({ company, embutido }) {
   const { user } = useAuth();
   const [membros, setMembros] = useState([]);
   const [saving, setSaving] = useState('');
@@ -4011,6 +9047,24 @@ function MembrosSection({ company }) {
     }, (err) => console.error('[members]', err));
     return () => unsub();
   }, [company?.id]);
+
+  async function mudarPapel(memberUid, novoPapel) {
+    setSaving(memberUid);
+    try {
+      await updateDoc(
+        fsDoc(fdb, 'companies', company.id, 'members', memberUid),
+        {
+          role: novoPapel,
+          // Sócio vê tudo (modulosPermitidos = null); funcionário começa sem nada liberado
+          modulosPermitidos: novoPapel === 'socio' ? null : [],
+        }
+      );
+    } catch (e) {
+      console.error('[members] mudarPapel', e);
+    } finally {
+      setSaving('');
+    }
+  }
 
   async function toggleModulo(memberUid, moduloKey, currentSet) {
     setSaving(memberUid);
@@ -4044,10 +9098,10 @@ function MembrosSection({ company }) {
   const MODULOS_EDITAVEIS = NAV.filter(n => n.key !== 'dashboard' && n.key !== 'config');
 
   return (
-    <div className="card p-5">
+    <div className={embutido ? '' : 'card p-5'}>
       <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
         <div>
-          <h3 className="display h-card t-ink mb-1">Membros da empresa</h3>
+          {!embutido && <h3 className="display h-card t-ink mb-1">Membros da empresa</h3>}
           <p className="text-sm t-soft" style={{ maxWidth: 520 }}>
             Controle quais módulos cada colaborador vê no menu. <b>Painel</b> e <b>Configurações</b> ficam sempre visíveis. O dono da empresa sempre vê tudo.
           </p>
@@ -4069,20 +9123,49 @@ function MembrosSection({ company }) {
               <div key={m.uid} className="mb-row">
                 <div className="flex items-start justify-between gap-3 flex-wrap mb-2">
                   <div className="min-w-0">
-                    <div className="text-sm font-semibold t-ink">{m.nome || m.email}{isSelf && <span className="t-mute" style={{ fontWeight: 400 }}> · você</span>}</div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-semibold t-ink">{m.nome || m.email}{isSelf && <span className="t-mute" style={{ fontWeight: 400 }}> · você</span>}</span>
+                      <PapelBadge papel={m.role} />
+                    </div>
                     <div className="text-xs t-soft">{m.email}</div>
                     <div className="text-xs t-mute mt-0.5">
-                      {isOwnerRow ? '👑 Dono da empresa · acesso total' : seesAll ? 'Vê todos os módulos' : `Vê ${modulos.length + 2} de ${MODULOS_EDITAVEIS.length + 2} módulos`}
+                      {isOwnerRow ? 'Acesso total ao sistema'
+                        : m.role === 'socio' ? 'Vê o negócio inteiro · não acessa Financeiro Pessoal, Aparência nem a equipe'
+                        : seesAll ? 'Vê todos os módulos liberados' : `Vê ${modulos.length + 2} de ${MODULOS_EDITAVEIS.length + 2} módulos`}
                     </div>
                   </div>
-                  {!isOwnerRow && !seesAll && (
+                  {!isOwnerRow && m.role !== 'socio' && !seesAll && (
                     <button className="btn btn-ghost btn-sm" onClick={() => liberarTudo(m.uid)} disabled={isSaving} style={{ flexShrink: 0 }}>
                       Liberar tudo
                     </button>
                   )}
                 </div>
 
+                {/* Papel do membro — só o dono altera */}
                 {!isOwnerRow && (
+                  <div className="mb-papel">
+                    <span className="label" style={{ marginBottom: 6 }}>Papel na empresa</span>
+                    <div className="cot-seg" style={{ maxWidth: 320 }}>
+                      <button
+                        className={`cot-seg-btn ${m.role === 'socio' ? 'on' : ''}`}
+                        disabled={isSaving}
+                        onClick={() => mudarPapel(m.uid, 'socio')}
+                      >
+                        Sócio
+                      </button>
+                      <button
+                        className={`cot-seg-btn ${m.role !== 'socio' ? 'on' : ''}`}
+                        disabled={isSaving}
+                        onClick={() => mudarPapel(m.uid, 'member')}
+                      >
+                        Funcionário
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Módulos: só para funcionário (sócio vê tudo) */}
+                {!isOwnerRow && m.role !== 'socio' && (
                   <div className="mb-mods">
                     {MODULOS_EDITAVEIS.map(mod => {
                       const active = seesAll || (modulos || []).includes(mod.key);
@@ -4111,8 +9194,666 @@ function MembrosSection({ company }) {
   );
 }
 
-function Configuracoes({ data, setData }) {
+function AparenciaSection({ data, setData, isOwner, embutido }) {
+  const atual = data.config?.paletteId || DEFAULT_PALETTE_ID;
+  const [preview, setPreview] = useState(null); // paleta sendo pré-visualizada (hover/tap antes de salvar)
+
+  // Aplica preview temporário; se sair sem salvar, o useEffect do AppInner restaura
+  const previewPaleta = (id) => {
+    setPreview(id);
+    applyPalette(id);
+  };
+  const cancelarPreview = () => {
+    setPreview(null);
+    applyPalette(atual);
+  };
+  const escolher = (id) => {
+    setData(d => ({ ...d, config: { ...(d.config || {}), paletteId: id } }));
+    setPreview(null);
+    applyPalette(id);
+  };
+
+  return (
+    <div className={embutido ? '' : 'card p-5'}>
+      {!embutido && (
+        <div className="flex items-center gap-2 mb-1">
+          <Sparkles size={17} style={{ color: 'var(--color-primary)' }} />
+          <h3 className="display h-card t-ink">Aparência</h3>
+        </div>
+      )}
+      <p className="text-sm t-soft mb-4">
+        Escolha a paleta de cores da sua empresa. A identidade visual é aplicada em todo o sistema — menu, botões, cabeçalhos e destaques.
+        {!isOwner && ' Apenas o dono da empresa pode alterar.'}
+      </p>
+
+      <div className="pal-grid">
+        {PALETTES.map(p => {
+          const ativa = atual === p.id;
+          const emPreview = preview === p.id;
+          return (
+            <div
+              key={p.id}
+              className={`pal-card ${ativa ? 'ativa' : ''} ${emPreview ? 'preview' : ''} ${!isOwner ? 'locked' : ''}`}
+              onClick={() => isOwner && escolher(p.id)}
+              onMouseEnter={() => isOwner && !ativa && previewPaleta(p.id)}
+              onMouseLeave={() => isOwner && cancelarPreview()}
+              role={isOwner ? 'button' : undefined}
+              tabIndex={isOwner ? 0 : undefined}
+              onKeyDown={(e) => { if (isOwner && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); escolher(p.id); } }}
+            >
+              <div className="pal-card-head">
+                <div className="min-w-0">
+                  <div className="pal-nome">{p.nome}</div>
+                  <div className="pal-desc">{p.descricao}</div>
+                </div>
+                {ativa && <span className="pal-ativa-badge"><Check size={12} /> Ativa</span>}
+              </div>
+
+              {/* círculos de cor */}
+              <div className="pal-dots">
+                <span className="pal-dot" style={{ background: p.colors.primary }} />
+                <span className="pal-dot" style={{ background: p.colors.secondary }} />
+                <span className="pal-dot" style={{ background: p.colors.accent }} />
+                <span className="pal-dot" style={{ background: p.colors.background, border: '1px solid #E5E7EB' }} />
+                <span className="pal-dot" style={{ background: p.colors.surface, border: '1px solid #E5E7EB' }} />
+              </div>
+
+              {/* mini-preview: sidebar + botão + card */}
+              <div className="pal-preview">
+                <div className="pal-preview-side" style={{ background: p.colors.primary }}>
+                  <span style={{ background: '#fff', opacity: .9 }} />
+                  <span style={{ background: 'rgba(255,255,255,.4)' }} />
+                  <span style={{ background: 'rgba(255,255,255,.4)' }} />
+                </div>
+                <div className="pal-preview-body" style={{ background: p.colors.background }}>
+                  <div className="pal-preview-btn" style={{ background: p.colors.primary }} />
+                  <div className="pal-preview-card" style={{ background: p.colors.surface }}>
+                    <span style={{ background: p.colors.accent }} />
+                    <span style={{ background: p.colors.textMuted, opacity: .3 }} />
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="text-xs t-mute mt-3">As cores de status (verde para sucesso, vermelho para alertas) permanecem fixas em todas as paletas.</p>
+    </div>
+  );
+}
+
+// Seção recolhível das Configurações — clica no cabeçalho e abre o conteúdo.
+function CfgSecao({ id, aberta, onToggle, titulo, sub, icon: Icon, cor, children }) {
+  const open = aberta === id;
+  return (
+    <div className="acc-card">
+      <button className={`acc-head ${open ? 'open' : ''}`} onClick={() => onToggle(id)}>
+        <span className="acc-head-ico" style={{ background: `${cor}1A`, color: cor }}><Icon size={18} /></span>
+        <span className="acc-head-txt">
+          <span className="acc-head-titulo">{titulo}</span>
+          <span className="acc-head-sub">{sub}</span>
+        </span>
+        <ChevronDown size={18} className="acc-head-chev" />
+      </button>
+      {open && <div className="acc-body">{children}</div>}
+    </div>
+  );
+}
+
+function FiscalConfigSection({ data, setData, isOwner, embutido }) {
+  const p = getParamsFiscais(data.config);
+  const [f, setF] = useState({
+    regimeId: p.regimeId,
+    limiteAnual: p.limiteAnual,
+    valorImposto: p.valorImposto,
+    diaVencimento: p.diaVencimento,
+    declaracaoAnual: p.declaracaoAnual,
+    prazoDeclaracao: p.prazoDeclaracao,
+  });
+  const [dirty, setDirty] = useState(false);
+  const [salvo, setSalvo] = useState(false);
+
+  const upd = (patch) => { setF(prev => ({ ...prev, ...patch })); setDirty(true); setSalvo(false); };
+
+  // Ao trocar de regime, sugere os valores daquele regime (a pessoa pode ajustar)
+  const trocarRegime = (id) => {
+    const r = getRegime(id);
+    setF({
+      regimeId: id,
+      limiteAnual: r.limiteAnual,
+      valorImposto: r.valorImposto,
+      diaVencimento: r.diaVencimento,
+      declaracaoAnual: r.declaracaoAnual,
+      prazoDeclaracao: r.prazoDeclaracao,
+    });
+    setDirty(true); setSalvo(false);
+  };
+
+  const salvar = () => {
+    setData(d => ({
+      ...d,
+      config: {
+        ...(d.config || {}),
+        fiscal: { ...(d.config?.fiscal || {}), ...f },
+      },
+    }));
+    setDirty(false); setSalvo(true);
+  };
+
+  const [mesPrazo, diaPrazo] = String(f.prazoDeclaracao || '05-31').split('-');
+
+  return (
+    <div className={embutido ? '' : 'card p-5'}>
+      <div className="fiscal-aviso">
+        <AlertTriangle size={15} style={{ color: '#D97706', flexShrink: 0, marginTop: 1 }} />
+        <p className="text-xs" style={{ color: '#92400E' }}>
+          Os valores abaixo são <b>sugestões iniciais</b>. Limites, alíquotas e valores mudam por lei todo ano —
+          <b> confirme com seu contador</b> e ajuste aqui. O sistema não emite guias nem consulta a Receita Federal;
+          ele apenas acompanha os números com base nos seus lançamentos.
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <span className="label">Regime tributário</span>
+        <div className="fiscal-regimes">
+          {REGIMES.map(r => (
+            <button
+              key={r.id}
+              className={`fiscal-regime ${f.regimeId === r.id ? 'on' : ''}`}
+              onClick={() => isOwner && trocarRegime(r.id)}
+              disabled={!isOwner}
+            >
+              <span className="fiscal-regime-nome">{r.nome}</span>
+              <span className="fiscal-regime-desc">{r.descricao}</span>
+              {f.regimeId === r.id && <Check size={14} className="fiscal-regime-check" />}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
+        <Field label="Limite anual de faturamento (R$)">
+          <input type="number" step="0.01" min="0" className="inp mono" value={f.limiteAnual} disabled={!isOwner}
+            onChange={(e) => upd({ limiteAnual: e.target.value })} />
+        </Field>
+        <Field label="Valor do imposto mensal (R$)">
+          <input type="number" step="0.01" min="0" className="inp mono" value={f.valorImposto} disabled={!isOwner}
+            onChange={(e) => upd({ valorImposto: e.target.value })} />
+        </Field>
+        <Field label="Dia de vencimento do imposto">
+          <input type="number" min="1" max="31" className="inp mono" value={f.diaVencimento} disabled={!isOwner}
+            onChange={(e) => upd({ diaVencimento: e.target.value })} />
+        </Field>
+        <Field label="Nome da declaração anual">
+          <input className="inp" value={f.declaracaoAnual} disabled={!isOwner}
+            onChange={(e) => upd({ declaracaoAnual: e.target.value })} placeholder="Ex.: DASN-SIMEI" />
+        </Field>
+        <Field label="Prazo da declaração (mês)">
+          <select className="inp" value={mesPrazo} disabled={!isOwner}
+            onChange={(e) => upd({ prazoDeclaracao: `${e.target.value}-${diaPrazo}` })}>
+            {['01','02','03','04','05','06','07','08','09','10','11','12'].map((m, i) => (
+              <option key={m} value={m}>{MONTHS_PT[i]}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Prazo da declaração (dia)">
+          <input type="number" min="1" max="31" className="inp mono" value={diaPrazo} disabled={!isOwner}
+            onChange={(e) => upd({ prazoDeclaracao: `${mesPrazo}-${String(e.target.value).padStart(2, '0')}` })} />
+        </Field>
+      </div>
+
+      {isOwner && (
+        <div className="flex items-center gap-3 mt-4">
+          <button className="btn btn-primary" onClick={salvar}>Salvar configuração fiscal</button>
+          {dirty && <span className="text-xs t-orange">Alterações não salvas</span>}
+          {salvo && <span className="text-xs t-green">✓ Salvo</span>}
+        </div>
+      )}
+      {!isOwner && <p className="text-xs t-mute mt-3">Apenas o dono da empresa pode alterar a configuração fiscal.</p>}
+    </div>
+  );
+}
+
+// ============================================================
+// PAINEL FISCAL
+// ============================================================
+// Camada de leitura sobre os dados que já existem. Não altera cálculos do
+// Financeiro, não cria coleção nova, não consulta serviços externos.
+// Preparado para expansão futura (emissão de guia, consulta CNPJ, integração
+// com contador) — os pontos de extensão estão marcados com TODO.
+
+// Widget compacto do Painel Fiscal — aparece no Financeiro Empresa.
+// Resumo em 5 segundos: limite, projeção, próximo imposto e declaração.
+function FiscalWidget({ data, onAbrir }) {
+  const params = useMemo(() => getParamsFiscais(data.config), [data.config]);
+  const fiscal = useMemo(() => calcularFiscal(data.finEmpresa || [], params), [data.finEmpresa, params]);
+
+  return (
+    <div className="card p-5 fade-in fis-widget">
+      <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <h3 className="display h-card t-ink">Painel Fiscal</h3>
+          <span className="fis-regime">{params.regimeNome}</span>
+        </div>
+        <span className="status-chip" style={{ background: `${fiscal.statusGeral.cor}1A`, color: fiscal.statusGeral.cor }}>
+          <span className="status-dot" style={{ background: fiscal.statusGeral.cor }} />
+          {fiscal.statusGeral.label}
+        </span>
+      </div>
+
+      {fiscal.temLimite && (
+        <>
+          <div className="fis-w-lbl">Limite anual de faturamento</div>
+          <div className="fis-w-limite mono">{fmtBRL(fiscal.limiteAnual)}</div>
+
+          <div className="fis-w-row">
+            <div>
+              <div className="fis-w-lbl">Faturado até agora</div>
+              <div className="fis-w-valor mono">{fmtBRL(fiscal.faturamentoAno)}</div>
+            </div>
+            <div className="fis-w-pct mono" style={{ color: fiscal.faixa.cor }}>
+              {fiscal.pctLimite.toFixed(0)}%
+            </div>
+          </div>
+
+          <div className="fis-bar" style={{ marginTop: 8 }}>
+            <div className="fis-bar-fill" style={{
+              width: `${Math.min(100, fiscal.pctLimite)}%`,
+              background: fiscal.faixa.cor,
+            }} />
+          </div>
+
+          {fiscal.mesEstouroNome && (
+            <div className="fis-w-projecao">
+              <div>
+                <div className="fis-w-lbl">Previsão de estourar o limite</div>
+                <div className="fis-w-mes">{fiscal.mesEstouroNome}/{fiscal.ano}</div>
+              </div>
+              <AlertTriangle size={17} style={{ color: '#D97706', flexShrink: 0 }} />
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Próximo imposto + declaração */}
+      <div className="fis-w-obrigacoes">
+        <div className="fis-w-obr">
+          <div className="fis-w-obr-titulo">Próximo {fiscal.das.nome}</div>
+          <div className="fis-w-obr-sub">
+            {fiscal.das.status === 'pago' ? 'Pago nesta competência'
+              : fiscal.das.diasRestantes < 0 ? `Venceu há ${Math.abs(fiscal.das.diasRestantes)} dia(s)`
+              : `Vence em ${fiscal.das.diasRestantes} dia(s)`}
+          </div>
+          <div className="fis-w-obr-data mono">{fiscal.das.vencimento.toLocaleDateString('pt-BR')}</div>
+          {fiscal.das.valor > 0 && <div className="fis-w-obr-valor mono">{fmtBRL(fiscal.das.valor)}</div>}
+          <StatusFiscal status={fiscal.das.status} />
+        </div>
+        <div className="fis-w-obr">
+          <div className="fis-w-obr-titulo">Declaração Anual ({fiscal.declaracao.nome})</div>
+          <div className="fis-w-obr-sub">
+            Entrega até {fiscal.declaracao.prazo.toLocaleDateString('pt-BR')}
+          </div>
+          <div style={{ marginTop: 'auto', paddingTop: 8 }}>
+            <StatusFiscal status={fiscal.declaracao.status} />
+          </div>
+        </div>
+      </div>
+
+      <button className="fis-w-link" onClick={onAbrir}>
+        Ver painel fiscal completo <ChevronRight size={14} />
+      </button>
+    </div>
+  );
+}
+
+function PainelFiscal({ data, setData }) {
+  const { isOwner } = useAuth();
+  const { finEmpresa = [] } = data;
+  const [toast, setToast] = useToast();
+
+  const params = useMemo(() => getParamsFiscais(data.config), [data.config]);
+  const fiscal = useMemo(() => calcularFiscal(finEmpresa, params), [finEmpresa, params]);
+  const alertas = useMemo(() => alertasFiscais(fiscal, finEmpresa), [fiscal, finEmpresa]);
+  const checklist = useMemo(() => checklistFiscal(fiscal), [fiscal]);
+  const calendario = useMemo(() => calendarioFiscal(fiscal), [fiscal]);
+
+  // Marcar imposto do mês como pago (controle manual, salvo em config.fiscal)
+  const marcarImpostoPago = (pago) => {
+    setData(d => {
+      const fx = d.config?.fiscal || {};
+      const mapa = { ...(fx.impostosPagos || {}) };
+      if (pago) mapa[fiscal.das.chaveMes] = true; else delete mapa[fiscal.das.chaveMes];
+      return { ...d, config: { ...(d.config || {}), fiscal: { ...fx, impostosPagos: mapa } } };
+    });
+    setToast(pago ? `${fiscal.das.nome} marcado como pago` : 'Marcação removida');
+  };
+
+  const marcarDeclaracao = (entregue) => {
+    setData(d => {
+      const fx = d.config?.fiscal || {};
+      const mapa = { ...(fx.declaracoesEntregues || {}) };
+      const k = String(fiscal.declaracao.anoRef);
+      if (entregue) mapa[k] = true; else delete mapa[k];
+      return { ...d, config: { ...(d.config || {}), fiscal: { ...fx, declaracoesEntregues: mapa } } };
+    });
+    setToast(entregue ? 'Declaração marcada como entregue' : 'Marcação removida');
+  };
+
+  const st = fiscal.statusGeral;
+
+  return (
+    <div className="p-4 sm:p-6">
+      <div className="mud-container space-y-4">
+
+        {/* CABEÇALHO com status geral */}
+        <div className="fis-head fade-in" style={{ '--st': st.cor }}>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="fis-head-titulo">Painel Fiscal</h2>
+              <span className="fis-regime">{params.regimeNome}</span>
+            </div>
+            <p className="fis-head-sub">Situação tributária da empresa · ano {fiscal.ano}</p>
+          </div>
+          <div className="fis-status" style={{ background: st.cor }}>
+            <span className="fis-status-dot" />
+            {st.label}
+          </div>
+        </div>
+
+        {/* CARD 1 + CARD 2 — Limite e projeção */}
+        <div className="fis-grid-2">
+          <div className="card p-5 fade-in">
+            <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+              <h3 className="display h-card t-ink">Limite de faturamento</h3>
+              <span className="fis-pct mono" style={{ color: fiscal.faixa.cor }}>
+                {fiscal.temLimite ? `${fiscal.pctLimite.toFixed(0)}%` : '—'}
+              </span>
+            </div>
+            {fiscal.temLimite ? (
+              <>
+                <div className="fis-limite-valores">
+                  <span className="mono fis-limite-atual">{fmtBRL(fiscal.faturamentoAno)}</span>
+                  <span className="t-mute text-sm"> de </span>
+                  <span className="mono text-sm t-soft">{fmtBRL(fiscal.limiteAnual)}</span>
+                </div>
+                <div className="fis-bar">
+                  <div className="fis-bar-fill" style={{
+                    width: `${Math.min(100, fiscal.pctLimite)}%`,
+                    background: fiscal.faixa.cor,
+                  }} />
+                </div>
+                <div className="fis-bar-legend">
+                  {FAIXAS_LIMITE.slice(0, 3).map(f => (
+                    <span key={f.nivel} style={{ left: `${f.max}%` }} className="fis-bar-tick" />
+                  ))}
+                </div>
+                <p className="text-sm t-soft mt-3">
+                  Faltam <b className="t-ink mono">{fmtBRL(fiscal.restante)}</b> para atingir o limite anual do {params.regimeNome}.
+                </p>
+              </>
+            ) : (
+              <p className="text-sm t-soft mt-2">Este regime não tem limite anual de faturamento.</p>
+            )}
+          </div>
+
+          <div className="card p-5 fade-in">
+            <h3 className="display h-card t-ink mb-1">Projeção</h3>
+            <p className="text-xs t-mute mb-3">Baseada na média mensal do que já entrou no caixa</p>
+            <div className="fis-proj-metrics">
+              <div>
+                <div className="fis-metric-l">Média mensal</div>
+                <div className="fis-metric-v mono">{fmtBRL(fiscal.mediaMensal)}</div>
+              </div>
+              <div>
+                <div className="fis-metric-l">Projeção anual</div>
+                <div className="fis-metric-v mono">{fmtBRL(fiscal.projecaoAnual)}</div>
+              </div>
+            </div>
+            <div className={`fis-proj-box ${fiscal.mesEstouroNome ? 'alerta' : 'ok'}`}>
+              {fiscal.mesEstouroNome ? (
+                <>
+                  <AlertTriangle size={16} style={{ flexShrink: 0, color: '#D97706' }} />
+                  <span>No ritmo atual, sua empresa <b>atinge o limite em {fiscal.mesEstouroNome}</b>. Vale conversar com o contador sobre mudar de regime.</span>
+                </>
+              ) : (
+                <>
+                  <Check size={16} style={{ flexShrink: 0, color: '#16A34A' }} />
+                  <span>Você está <b>dentro do limite previsto</b> para o ano.</span>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* CARD 4 + CARD 5 — Imposto e Declaração */}
+        <div className="fis-grid-2">
+          <div className="card p-5 fade-in">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="display h-card t-ink">{fiscal.das.nome} do mês</h3>
+              <StatusFiscal status={fiscal.das.status} />
+            </div>
+            <div className="fis-obr">
+              <div className="fis-obr-data">
+                <span className="fis-obr-dia mono">{String(fiscal.das.vencimento.getDate()).padStart(2, '0')}</span>
+                <span className="fis-obr-mes">{MONTHS_PT[fiscal.das.vencimento.getMonth()]}</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="fis-obr-valor mono">{fiscal.das.valor > 0 ? fmtBRL(fiscal.das.valor) : 'Valor variável'}</div>
+                <div className="text-xs t-soft">
+                  {fiscal.das.status === 'pago' ? 'Pago nesta competência'
+                    : fiscal.das.diasRestantes < 0 ? `Venceu há ${Math.abs(fiscal.das.diasRestantes)} dia(s) — juros e multa incidem`
+                    : `Vence em ${fiscal.das.diasRestantes} dia(s)`}
+                </div>
+                {fiscal.das.pagoDetectado && (
+                  <div className="text-xs t-green mt-1">✓ Detectado automaticamente no Financeiro</div>
+                )}
+              </div>
+            </div>
+            {isOwner && !fiscal.das.pagoDetectado && (
+              <button
+                className={`btn ${fiscal.das.status === 'pago' ? 'btn-ghost' : 'btn-primary'} w-full mt-3`}
+                onClick={() => marcarImpostoPago(fiscal.das.status !== 'pago')}
+              >
+                {fiscal.das.status === 'pago'
+                  ? 'Desmarcar pagamento'
+                  : <><Check size={15} /> Marcar {fiscal.das.nome} como pago</>}
+              </button>
+            )}
+            {/* TODO (expansão futura): emissão da guia DAS pela API do gov.br */}
+          </div>
+
+          <div className="card p-5 fade-in">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="display h-card t-ink">Declaração anual</h3>
+              <StatusFiscal status={fiscal.declaracao.status} />
+            </div>
+            <div className="fis-obr">
+              <div className="fis-obr-data">
+                <span className="fis-obr-dia mono">{String(fiscal.declaracao.prazo.getDate()).padStart(2, '0')}</span>
+                <span className="fis-obr-mes">{MONTHS_PT[fiscal.declaracao.prazo.getMonth()]}</span>
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="fis-obr-valor" style={{ fontSize: 16 }}>{fiscal.declaracao.nome}</div>
+                <div className="text-xs t-soft">
+                  Referente ao ano {fiscal.declaracao.anoRef} ·{' '}
+                  {fiscal.declaracao.status === 'entregue' ? 'entregue'
+                    : fiscal.declaracao.diasRestantes < 0 ? `atrasada há ${Math.abs(fiscal.declaracao.diasRestantes)} dia(s)`
+                    : `faltam ${fiscal.declaracao.diasRestantes} dia(s)`}
+                </div>
+              </div>
+            </div>
+            {isOwner && (
+              <button
+                className={`btn ${fiscal.declaracao.status === 'entregue' ? 'btn-ghost' : 'btn-primary'} w-full mt-3`}
+                onClick={() => marcarDeclaracao(fiscal.declaracao.status !== 'entregue')}
+              >
+                {fiscal.declaracao.status === 'entregue'
+                  ? 'Desmarcar entrega'
+                  : <><Check size={15} /> Marcar como entregue</>}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* CARD 3 — Calendário fiscal */}
+        <div className="card p-5 fade-in">
+          <h3 className="display h-card t-ink mb-1">Calendário fiscal</h3>
+          <p className="text-xs t-mute mb-4">Próximas obrigações em ordem cronológica</p>
+          <div className="fis-timeline">
+            {calendario.map(item => (
+              <div key={item.id} className={`fis-tl-item ${item.status}`}>
+                <span className="fis-tl-dot" />
+                <div className="fis-tl-data">
+                  <span className="mono">{String(item.data.getDate()).padStart(2, '0')}</span>
+                  <span>{MONTHS_PT[item.data.getMonth()]}</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="fis-tl-titulo">{item.titulo}</div>
+                  <div className="fis-tl-sub">{item.sub}</div>
+                </div>
+                <div className="fis-tl-right">
+                  {item.valor > 0 && <span className="mono text-sm t-ink">{fmtBRL(item.valor)}</span>}
+                  <span className={`fis-tl-dias ${item.dias < 0 ? 'atrasado' : item.dias <= 10 ? 'urgente' : ''}`}>
+                    {item.dias < 0 ? `${Math.abs(item.dias)}d atrás` : item.dias === 0 ? 'hoje' : `${item.dias}d`}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* CARD 6 — Alertas inteligentes */}
+        {alertas.length > 0 && (
+          <div className="card p-5 fade-in">
+            <h3 className="display h-card t-ink mb-3">Alertas inteligentes</h3>
+            <div className="space-y-2">
+              {alertas.map((a, i) => (
+                <div key={i} className={`fis-alerta ${a.nivel}`}>
+                  <span className="fis-alerta-ico">
+                    {a.nivel === 'critico' ? <AlertTriangle size={14} />
+                      : a.nivel === 'alerta' ? <CircleAlert size={14} />
+                      : <Lightbulb size={14} />}
+                  </span>
+                  <span className="text-sm">{a.txt}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* CARD 7 + CARD 8 — Histórico e comparativo */}
+        <div className="fis-grid-2">
+          <div className="card p-5 fade-in">
+            <h3 className="display h-card t-ink mb-1">Histórico de faturamento</h3>
+            <p className="text-xs t-mute mb-3">Receita recebida por mês em {fiscal.ano}</p>
+            <div style={{ height: 220 }}>
+              <ResponsiveContainer>
+                <BarChart data={fiscal.porMes} margin={{ top: 6, right: 4, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#F1F3F5" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 10, fill: '#9AA1AC' }} axisLine={false} tickLine={false}
+                    tickFormatter={(v) => v === 0 ? '0' : `${(v / 1000).toFixed(0)}k`} />
+                  <Tooltip
+                    formatter={(v) => [fmtBRL(v), 'Faturamento']}
+                    labelFormatter={(l, p) => {
+                      const item = p?.[0]?.payload;
+                      if (!item || !fiscal.temLimite) return l;
+                      const pct = (item.valor / fiscal.limiteAnual * 100).toFixed(1);
+                      return `${l} · ${pct}% do limite anual`;
+                    }}
+                    contentStyle={{ borderRadius: 10, border: '1px solid #E5E7EB', fontSize: 12 }}
+                    cursor={{ fill: 'rgba(11,19,36,.04)' }}
+                  />
+                  <Bar dataKey="valor" radius={[4, 4, 0, 0]} maxBarSize={26}>
+                    {fiscal.porMes.map((m, i) => (
+                      <Cell key={i} fill={i === fiscal.mesAtual ? 'var(--color-primary)' : '#93C5FD'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          <div className="card p-5 fade-in">
+            <h3 className="display h-card t-ink mb-3">Comparativo anual</h3>
+            <div className="fis-comp">
+              <div className="fis-comp-item">
+                <div className="fis-metric-l">{fiscal.ano} (até agora)</div>
+                <div className="fis-metric-v mono">{fmtBRL(fiscal.comparativo.anoAtual)}</div>
+              </div>
+              <div className="fis-comp-item">
+                <div className="fis-metric-l">{fiscal.ano - 1} (ano todo)</div>
+                <div className="fis-metric-v mono t-soft">{fmtBRL(fiscal.comparativo.anoAnterior)}</div>
+              </div>
+              <div className="fis-comp-item">
+                <div className="fis-metric-l">Crescimento</div>
+                <div className={`fis-metric-v mono ${fiscal.comparativo.crescimento >= 0 ? 't-green' : 't-red'}`}>
+                  {fiscal.comparativo.crescimento >= 0 ? '+' : ''}{fiscal.comparativo.crescimento.toFixed(0)}%
+                </div>
+              </div>
+              <div className="fis-comp-item">
+                <div className="fis-metric-l">Média mensal</div>
+                <div className="fis-metric-v mono">{fmtBRL(fiscal.mediaMensal)}</div>
+              </div>
+            </div>
+
+            {/* CARD 9 — Checklist */}
+            <div className="mt-4 pt-4" style={{ borderTop: '1px solid #F1F2F4' }}>
+              <div className="label mb-2">Checklist fiscal</div>
+              <div className="space-y-1.5">
+                {checklist.map((c, i) => (
+                  <div key={i} className="fis-check">
+                    <span className={`fis-check-ico ${c.ok ? 'ok' : 'bad'}`}>
+                      {c.ok ? <Check size={11} /> : <X size={11} />}
+                    </span>
+                    <span className={`text-sm ${c.ok ? 't-ink' : ''}`} style={{ color: c.ok ? undefined : '#DC2626' }}>
+                      {c.ok ? c.txt : c.pend}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Rodapé de responsabilidade */}
+        <div className="fiscal-aviso">
+          <AlertTriangle size={15} style={{ color: '#D97706', flexShrink: 0, marginTop: 1 }} />
+          <p className="text-xs" style={{ color: '#92400E' }}>
+            Este painel é uma <b>ferramenta de acompanhamento</b>, não substitui seu contador. Os limites e valores vêm da
+            configuração da empresa e devem ser confirmados. O sistema não emite guias nem consulta a Receita Federal.
+          </p>
+        </div>
+      </div>
+      <Toast msg={toast} />
+    </div>
+  );
+}
+
+// Badge de status das obrigações fiscais
+function StatusFiscal({ status }) {
+  const map = {
+    pago:      { label: 'Pago',      cor: '#16A34A', bg: '#DCFCE7' },
+    entregue:  { label: 'Entregue',  cor: '#16A34A', bg: '#DCFCE7' },
+    pendente:  { label: 'Pendente',  cor: '#D97706', bg: '#FEF3C7' },
+    atrasado:  { label: 'Atrasado',  cor: '#DC2626', bg: '#FEE2E2' },
+    atrasada:  { label: 'Atrasada',  cor: '#DC2626', bg: '#FEE2E2' },
+    futuro:    { label: 'Futuro',    cor: '#6B7280', bg: '#F1F3F5' },
+  };
+  const s = map[status] || map.pendente;
+  return (
+    <span className="status-chip" style={{ background: s.bg, color: s.cor }}>
+      <span className="status-dot" style={{ background: s.cor }} />
+      {s.label}
+    </span>
+  );
+}
+
+function Configuracoes({ data, setData, onRequestLogout }) {
   const { user, profile, company, logout, isOwner } = useAuth();
+  const [secaoAberta, setSecaoAberta] = useState(null); // nenhuma aberta por padrão
+  const toggleSecao = (id) => setSecaoAberta(prev => prev === id ? null : id);
   const c = data.config || {};
   const [nomeEmp, setNomeEmp] = useState(c.nomeEmpresa || '');
   const [logoUrl, setLogoUrl] = useState(c.logoUrl || '');
@@ -4127,6 +9868,7 @@ function Configuracoes({ data, setData }) {
   const [copied, setCopied] = useState(false);
   const [saved, setSaved] = useState('');
   const [logoErr, setLogoErr] = useState(false);
+  const [logoFileToEdit, setLogoFileToEdit] = useState(null);
 
   function salvarIdentidade() {
     setData((d) => ({
@@ -4160,18 +9902,46 @@ function Configuracoes({ data, setData }) {
         <h3 className="display h-card t-ink mb-1">Identidade da empresa</h3>
         <p className="text-sm t-soft mb-4">Personalize a cara da sua empresa dentro do sistema.</p>
 
-        <div className="flex items-center gap-4 mb-5" style={{ padding: 14, background: '#F4F6F8', borderRadius: 12 }}>
-          <div className="cfg-logo-preview">
-            {logoUrl && !logoErr
-              ? <img src={logoUrl} alt="logo" onError={() => setLogoErr(true)} onLoad={() => setLogoErr(false)} />
-              : <span className="cfg-logo-fallback">{iniciais}</span>}
+        <div className="flex items-center gap-4 mb-5" style={{ padding: 14, background: '#F4F6F8', borderRadius: 12, flexWrap: 'wrap' }}>
+          <div className="cfg-logo-wrap">
+            <div className="cfg-logo-preview">
+              {logoUrl && !logoErr
+                ? <img src={logoUrl} alt="logo" onError={() => setLogoErr(true)} onLoad={() => setLogoErr(false)} />
+                : <span className="cfg-logo-fallback">{iniciais}</span>}
+            </div>
+            <label className="cfg-logo-edit" title={logoUrl ? 'Trocar foto' : 'Enviar foto'}>
+              <Camera size={14} />
+              <input
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) setLogoFileToEdit(f);
+                  e.target.value = '';
+                }}
+              />
+            </label>
           </div>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <div className="t-ink font-semibold" style={{ fontSize: 15 }}>{nomeEmp || 'Sua empresa'}</div>
             <div className="text-xs t-soft">{cnpj ? `CNPJ ${cnpj}` : 'Adicione um CNPJ (opcional)'}</div>
-            <div className="text-xs t-mute mt-0.5">Prévia do topo do app</div>
+            <div className="text-xs t-mute mt-0.5">Toque no ícone da câmera pra {logoUrl ? 'trocar' : 'enviar'} a foto</div>
+            {logoUrl && (
+              <button
+                type="button"
+                className="cfg-logo-remove"
+                onClick={() => { setLogoUrl(''); setLogoErr(false); }}
+              >Remover foto</button>
+            )}
           </div>
         </div>
+
+        <LogoEditor
+          file={logoFileToEdit}
+          onCancel={() => setLogoFileToEdit(null)}
+          onConfirm={(dataUrl) => { setLogoUrl(dataUrl); setLogoErr(false); setLogoFileToEdit(null); }}
+        />
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="block">
@@ -4183,11 +9953,11 @@ function Configuracoes({ data, setData }) {
             <input className="inp" value={cnpj} onChange={(e) => setCnpj(e.target.value)} placeholder="00.000.000/0000-00" />
           </label>
           <label className="block sm:col-span-2">
-            <span className="label">URL do logo</span>
-            <input className="inp" value={logoUrl} onChange={(e) => { setLogoUrl(e.target.value); setLogoErr(false); }} placeholder="https://... (link de uma imagem PNG/JPG)" />
+            <span className="label">URL do logo (opcional — alternativa ao upload)</span>
+            <input className="inp" value={logoUrl.startsWith('data:') ? '' : logoUrl} onChange={(e) => { setLogoUrl(e.target.value); setLogoErr(false); }} placeholder="https://... (link de uma imagem PNG/JPG)" />
             <span className="text-xs t-mute" style={{ marginTop: 4, display: 'block' }}>
-              Cole o link de uma imagem já hospedada (ex.: seu site, Google Drive público, Imgur). Ideal: 200×200px, PNG com fundo transparente.
-              {logoUrl && logoErr && <span className="t-red"> · Não consegui carregar essa imagem.</span>}
+              {logoUrl.startsWith('data:') ? 'Você enviou uma foto acima ✓ Este campo fica em branco enquanto a foto estiver ativa.' : 'Se preferir, cole o link de uma imagem já hospedada (Drive público, seu site, Imgur). Ideal: 200×200 PNG.'}
+              {logoUrl && !logoUrl.startsWith('data:') && logoErr && <span className="t-red"> · Não consegui carregar essa imagem.</span>}
             </span>
           </label>
           <label className="block">
@@ -4217,8 +9987,9 @@ function Configuracoes({ data, setData }) {
         </div>
       </div>
 
-      <div className="card p-5">
-        <h3 className="display h-card t-ink mb-3">Preferências operacionais</h3>
+      <CfgSecao id="pref" aberta={secaoAberta} onToggle={toggleSecao}
+        titulo="Preferências operacionais" sub="Combustível e consumo padrão"
+        icon={Fuel} cor="#D97706">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <label className="block">
             <span className="label">Preço médio combustível (R$/L)</span>
@@ -4233,10 +10004,11 @@ function Configuracoes({ data, setData }) {
           <button className="btn btn-primary" onClick={salvarPref}>Salvar preferências</button>
           {saved === 'pref' && <span className="t-green text-sm">✓ Salvo</span>}
         </div>
-      </div>
+      </CfgSecao>
 
-      <div className="card p-5">
-        <h3 className="display h-card t-ink mb-1">Convidar sócio ou colaborador</h3>
+      <CfgSecao id="convite" aberta={secaoAberta} onToggle={toggleSecao}
+        titulo="Convidar sócio ou colaborador" sub="Código de acesso da empresa"
+        icon={Copy} cor="#0EA5E9">
         <p className="text-sm t-soft mb-3">Compartilhe o código abaixo. Quem criar conta usando esse código entra na mesma empresa e enxerga os mesmos dados em tempo real.</p>
         <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
           <code style={{ background: '#F4F6F8', border: '1px solid #E5E7EB', borderRadius: 8, padding: '8px 12px', fontSize: 12.5, fontFamily: 'Geist Mono, monospace', wordBreak: 'break-all', flex: '1 1 auto', minWidth: 0 }}>{company?.id || '—'}</code>
@@ -4244,31 +10016,62 @@ function Configuracoes({ data, setData }) {
             {copied ? <><Check size={14} /> Copiado</> : <><Copy size={14} /> Copiar</>}
           </button>
         </div>
-      </div>
+      </CfgSecao>
 
-      {isOwner && <MembrosSection company={company} />}
+      {isOwner && (
+        <CfgSecao id="equipe" aberta={secaoAberta} onToggle={toggleSecao}
+          titulo="Equipe e permissões" sub="Quem entrou na empresa e o que cada um acessa"
+          icon={Users} cor="var(--color-primary)">
+          <MembrosSection company={company} embutido />
+        </CfgSecao>
+      )}
 
-      <div className="card p-5">
-        <h3 className="display h-card t-ink mb-3">Conta</h3>
+      <CfgSecao id="aparencia" aberta={secaoAberta} onToggle={toggleSecao}
+        titulo="Aparência" sub="Paleta de cores da empresa"
+        icon={Sparkles} cor="#7C3AED">
+        <AparenciaSection data={data} setData={setData} isOwner={isOwner} embutido />
+      </CfgSecao>
+
+      <CfgSecao id="fiscal" aberta={secaoAberta} onToggle={toggleSecao}
+        titulo="Fiscal e tributário" sub="Regime, limites e obrigações"
+        icon={Receipt} cor="#059669">
+        <FiscalConfigSection data={data} setData={setData} isOwner={isOwner} embutido />
+      </CfgSecao>
+
+      <CfgSecao id="conta" aberta={secaoAberta} onToggle={toggleSecao}
+        titulo="Conta" sub="Seus dados e sair do sistema"
+        icon={LogOut} cor="#6B7280">
         <div className="text-sm space-y-1.5">
           <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>Nome:</span><span className="t-ink font-medium">{user?.displayName || profile?.nome || '—'}</span></div>
           <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>E-mail:</span><span className="t-ink">{user?.email || '—'}</span></div>
           <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>Empresa:</span><span className="t-ink">{company?.nome || '—'}</span></div>
-          <div className="flex gap-2"><span className="t-soft" style={{ minWidth: 90 }}>Função:</span><span className="t-ink capitalize">{profile?.role || '—'}</span></div>
+          <div className="flex gap-2 items-center"><span className="t-soft" style={{ minWidth: 90 }}>Papel:</span><PapelBadge papel={isOwner ? 'owner' : (profile?.role || 'member')} /></div>
         </div>
         <div className="mt-4">
-          <button className="btn btn-danger" onClick={logout}><LogOut size={14} /> Sair da conta</button>
+          <button className="btn btn-danger" onClick={() => (onRequestLogout ? onRequestLogout() : logout())}><LogOut size={14} /> Sair da conta</button>
         </div>
-      </div>
+      </CfgSecao>
     </div>
   );
+}
+
+// ============================================================
+// RAIZ POR PAPEL
+// O motoboy recebe um aplicativo próprio, não uma versão reduzida
+// do painel: AppInner (sidebar, dashboard, financeiro) nem chega a
+// ser montado quando o papel é 'motoboy'.
+// ============================================================
+function RaizPorPapel() {
+  const { papel } = useAuth();
+  if (papel === 'motoboy') return <AppMotoboy />;
+  return <AppInner />;
 }
 
 export default function App() {
   return (
     <AuthProvider>
       <AuthGate>
-        <AppInner />
+        <RaizPorPapel />
       </AuthGate>
     </AuthProvider>
   );
