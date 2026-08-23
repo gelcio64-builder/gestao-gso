@@ -5165,12 +5165,16 @@ function AppInner() {
     wms: { t: 'Armazém (WMS)', s: 'Estoque, endereçamento e giro' },
     documentos: { t: 'Documentos', s: 'Organização e vencimentos' },
     mudancas: { t: 'Mudanças', s: 'Cotações, orçamentos e serviços' },
+    entregas: { t: 'Entregas', s: 'Coletas, motoboys e fechamentos' },
     fiscal: { t: 'Painel Fiscal', s: 'Situação tributária da empresa' },
     relatorios: { t: 'Relatórios', s: 'Análises detalhadas com filtros' },
     importacao: { t: 'Importação', s: 'OFX, boleto e CSV com conciliação' },
     config: { t: 'Configurações', s: 'Empresa, preços médios, categorias' },
   };
-  const cur = titles[route];
+  // Fallback: se um módulo novo entrar no NAV e alguém esquecer de
+  // cadastrar o título aqui, o cabeçalho usa o rótulo do menu em vez de
+  // quebrar a tela inteira com "cannot read properties of undefined".
+  const cur = titles[route] || { t: (NAV.find(x => x.key === route)?.label) || 'Painel', s: '' };
 
   return (
     <div className="app-root">
