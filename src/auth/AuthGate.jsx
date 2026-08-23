@@ -1,10 +1,10 @@
 import { useState } from 'react';
-import { Truck, Mail, Lock, User, Building2, KeyRound, ArrowRight, Loader2 } from 'lucide-react';
+import { Truck, Mail, Lock, User, Building2, KeyRound, ArrowRight, Loader2, Bike } from 'lucide-react';
 import { useAuth } from './AuthContext';
 
 export function AuthGate({ children }) {
   const { user, profile, company, loading } = useAuth();
-  const [mode, setMode] = useState('login'); // login | signup | reset
+  const [mode, setMode] = useState('login'); // login | signup | motoboy | reset
 
   if (loading) return <SplashLoading />;
   if (user && profile && company) return children;
@@ -24,6 +24,7 @@ export function AuthGate({ children }) {
         </div>
         {mode === 'login' && <LoginForm onSwitch={setMode} />}
         {mode === 'signup' && <SignupForm onSwitch={setMode} />}
+        {mode === 'motoboy' && <MotoboyForm onSwitch={setMode} />}
         {mode === 'reset' && <ResetForm onSwitch={setMode} />}
       </div>
     </div>
@@ -118,6 +119,61 @@ function SignupForm({ onSwitch }) {
         <span className="auth-mute">Já tem conta?</span>
         <button onClick={() => onSwitch('login')} className="auth-link">Entrar</button>
       </div>
+      <div className="auth-mb-cta">
+        <Bike size={15} />
+        <span>Recebeu um código começando com <b>MB-</b>?</span>
+        <button onClick={() => onSwitch('motoboy')} className="auth-link">Cadastro de motoboy</button>
+      </div>
+    </>
+  );
+}
+
+// ============================================================
+//   Cadastro de MOTOBOY — por convite pessoal
+// ------------------------------------------------------------
+//   Fluxo separado de propósito. O código MB-XXXXXX não é o id
+//   da empresa: ele aponta para um convite de uso único, que já
+//   sabe qual empresa e qual cadastro de motoboy ativar.
+//   A conta nasce restrita, sem passar pelo caminho comum.
+// ============================================================
+function MotoboyForm({ onSwitch }) {
+  const { signupMotoboy } = useAuth();
+  const [nome, setNome] = useState('');
+  const [email, setEmail] = useState('');
+  const [senha, setSenha] = useState('');
+  const [senha2, setSenha2] = useState('');
+  const [codigo, setCodigo] = useState('');
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function submit() {
+    setErr('');
+    if (!nome || !email || !senha) { setErr('Preencha nome, e-mail e senha.'); return; }
+    if (senha.length < 6) { setErr('Senha precisa ter ao menos 6 caracteres.'); return; }
+    if (senha !== senha2) { setErr('As senhas não coincidem.'); return; }
+    if (!codigo.trim()) { setErr('Informe o código do convite (começa com MB-).'); return; }
+    setBusy(true);
+    try { await signupMotoboy({ nome, email, senha, codigo }); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <>
+      <h2 className="auth-title">Cadastro de motoboy</h2>
+      <p className="auth-lead">Use o código que o responsável te enviou.</p>
+      <AField icon={KeyRound} label="Código do convite" value={codigo} onChange={(v) => setCodigo(v.toUpperCase())} placeholder="MB-XXXXXX" />
+      <AField icon={User} label="Nome" value={nome} onChange={setNome} placeholder="Seu nome completo" />
+      <AField icon={Mail} type="email" label="E-mail" value={email} onChange={setEmail} placeholder="seu@email.com" />
+      <AField icon={Lock} type="password" label="Senha" value={senha} onChange={setSenha} placeholder="mínimo 6 caracteres" />
+      <AField icon={Lock} type="password" label="Confirmar senha" value={senha2} onChange={setSenha2} placeholder="repita a senha" onEnter={submit} />
+      {err && <div className="auth-err">{err}</div>}
+      <button onClick={submit} disabled={busy} className="auth-btn">
+        {busy ? <Loader2 size={16} className="auth-spin" /> : <>Criar minha conta <ArrowRight size={16} /></>}
+      </button>
+      <div className="auth-row" style={{ justifyContent: 'center' }}>
+        <button onClick={() => onSwitch('login')} className="auth-link">Voltar para login</button>
+      </div>
     </>
   );
 }
@@ -201,5 +257,7 @@ const AUTH_CSS = `
 .auth-err{ background:rgba(180,35,75,.15); border:1px solid rgba(180,35,75,.35); color:#FFB3C2; padding:9px 12px; border-radius:8px; font-size:12.5px; margin-top:4px; }
 .auth-ok{ background:rgba(8,127,91,.15); border:1px solid rgba(8,127,91,.35); color:#7EE7C2; padding:9px 12px; border-radius:8px; font-size:12.5px; margin-top:4px; }
 .auth-spin{ animation:auth-rot 1s linear infinite; }
+.auth-mb-cta{ display:flex; align-items:center; justify-content:center; gap:6px; flex-wrap:wrap; margin-top:16px; padding-top:14px; border-top:1px solid rgba(255,255,255,.08); color:#9FB2D4; font-size:12.5px; }
+.auth-mb-cta b{ color:#CFE0FF; }
 @keyframes auth-rot{ to{ transform:rotate(360deg);} }
 `;

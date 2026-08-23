@@ -4,7 +4,7 @@ import {
   sendPasswordResetEmail, signOut, updateProfile,
 } from 'firebase/auth';
 import {
-  doc, getDoc, setDoc, collection, serverTimestamp, updateDoc, arrayUnion,
+  doc, getDoc, setDoc, updateDoc, collection, serverTimestamp, arrayUnion,
 } from 'firebase/firestore';
 import { auth, fdb } from '../firebase';
 
@@ -28,12 +28,18 @@ export function AuthProvider({ children }) {
   const [company, setCompany] = useState(null);
   const [modulosPermitidos, setModulosPermitidos] = useState(null); // null = sem restrição
   const [loading, setLoading] = useState(true);
-  const [role, setRole] = useState(null); // 'owner' | 'socio' | 'member'
+  const [role, setRole] = useState(null); // 'owner' | 'socio' | 'member' | 'motoboy'
+  const [motoboyId, setMotoboyId] = useState(null);
+  const [erroAcesso, setErroAcesso] = useState('');
 
   useEffect(() => {
     return onAuthStateChanged(auth, async (u) => {
       try {
-        if (!u) { setUser(null); setProfile(null); setCompany(null); setModulosPermitidos(null); setRole(null); setLoading(false); return; }
+        if (!u) {
+          setUser(null); setProfile(null); setCompany(null);
+          setModulosPermitidos(null); setRole(null); setMotoboyId(null); setErroAcesso('');
+          setLoading(false); return;
+        }
         setUser({ uid: u.uid, email: u.email, displayName: u.displayName });
         const profSnap = await getDoc(doc(fdb, 'users', u.uid));
         if (profSnap.exists()) {
@@ -44,7 +50,6 @@ export function AuthProvider({ children }) {
             const comp = compSnap.exists() ? { id: compSnap.id, ...compSnap.data() } : null;
             setCompany(comp);
 
-            // Load or create own member doc (permissions)
             if (comp) {
               const memRef = doc(fdb, 'companies', prof.companyId, 'members', u.uid);
               const memSnap = await getDoc(memRef);
@@ -53,18 +58,32 @@ export function AuthProvider({ children }) {
                 const modulos = md.modulosPermitidos;
                 setModulosPermitidos(modulos === undefined ? null : modulos);
                 setRole(comp.ownerUid === u.uid ? 'owner' : (md.role || 'member'));
+                setMotoboyId(md.motoboyId || null);
+              } else if (prof.role === 'motoboy') {
+                // ------------------------------------------------------------
+                // SEGURANÇA: não recriamos o doc de membro de um motoboy.
+                // O bloco de retrocompatibilidade abaixo cria o membro com
+                // modulosPermitidos = null, que no app significa "vê tudo".
+                // Se o doc de um motoboy sumisse, ele viraria membro pleno no
+                // login seguinte. Aqui a conta simplesmente não abre e o dono
+                // precisa reemitir o convite.
+                // ------------------------------------------------------------
+                setModulosPermitidos([]);
+                setRole('motoboy');
+                setMotoboyId(prof.motoboyId || null);
+                setErroAcesso('Seu acesso precisa ser reativado. Peça um novo convite ao responsável.');
               } else {
-                // Backwards compat: create the member doc from profile
-                const isOwner = comp.ownerUid === u.uid;
+                // Retrocompat: usuário antigo, anterior ao doc de membro.
+                const isOwnerHere = comp.ownerUid === u.uid;
                 await setDoc(memRef, {
                   nome: prof.nome || u.displayName || '',
                   email: u.email || '',
-                  role: isOwner ? 'owner' : (prof.role || 'member'),
+                  role: isOwnerHere ? 'owner' : (prof.role || 'member'),
                   modulosPermitidos: null,
                   joinedAt: serverTimestamp(),
                 });
                 setModulosPermitidos(null);
-                setRole(isOwner ? 'owner' : 'member');
+                setRole(isOwnerHere ? 'owner' : 'member');
               }
             } else {
               setModulosPermitidos(null);
@@ -84,18 +103,21 @@ export function AuthProvider({ children }) {
   }, []);
 
   const isOwner = !!(user && company && user.uid === company.ownerUid);
-  // Papéis: dono (tudo), sócio (visão de negócio), funcionário (só o liberado)
   const papel = isOwner ? 'owner' : (role || 'member');
   const isSocio = papel === 'socio';
-  // Quem enxerga o negócio inteiro (dono e sócio)
-  const isGestor = isOwner || isSocio;
+  const isMotoboy = papel === 'motoboy';
+  // Quem enxerga o negócio inteiro (dono e sócio). Motoboy nunca.
+  const isGestor = (isOwner || isSocio) && !isMotoboy;
 
   async function signup({ nome, email, senha, empresaNome, codigoEmpresa }) {
     try {
       const codigo = (codigoEmpresa || '').trim();
       const entrando = !!codigo;
 
-      // 1) Autentica PRIMEIRO — sem estar logado, nenhuma leitura/escrita passa nas regras.
+      if (codigo.toUpperCase().startsWith('MB-')) {
+        throw new Error('Esse é um convite de motoboy. Use a opção "Sou motoboy" na tela de cadastro.');
+      }
+
       const cred = await createUserWithEmailAndPassword(auth, email, senha);
       await updateProfile(cred.user, { displayName: nome });
       const uid = cred.user.uid;
@@ -103,19 +125,13 @@ export function AuthProvider({ children }) {
       let companyId = codigo;
 
       if (entrando) {
-        // 2) Entrando numa empresa existente via código de convite.
-        //    Adiciona o usuário à lista `members` da empresa. A regra
-        //    `joiningOrCreating()` libera o update porque o próprio uid
-        //    passa a constar em request.resource.data.members.
         try {
           await updateDoc(doc(fdb, 'companies', companyId), { members: arrayUnion(uid) });
         } catch (joinErr) {
-          // Código inválido/inexistente: desfaz o usuário recém-criado pra não deixar órfão
           try { await cred.user.delete(); } catch (_) {}
           throw new Error('Código de convite inválido. Confira com o dono da empresa.');
         }
       } else {
-        // 2) Criando uma empresa nova (esse usuário vira dono).
         const newRef = doc(collection(fdb, 'companies'));
         companyId = newRef.id;
         await setDoc(newRef, {
@@ -131,7 +147,6 @@ export function AuthProvider({ children }) {
         });
       }
 
-      // 3) Cria o perfil do usuário e o registro de membro.
       await setDoc(doc(fdb, 'users', uid), {
         nome, email, companyId,
         role: entrando ? 'member' : 'owner',
@@ -148,6 +163,68 @@ export function AuthProvider({ children }) {
     }
   }
 
+  // ============================================================
+  //   CADASTRO DE MOTOBOY — por convite pessoal (MB-XXXXXX)
+  // ------------------------------------------------------------
+  //   Diferente do cadastro comum: aqui o código NÃO é o id da
+  //   empresa. É a chave de um doc em `convites/{codigo}`, que
+  //   aponta para a empresa e para o cadastro do motoboy.
+  //
+  //   A conta nasce travada: role 'motoboy' e modulosPermitidos
+  //   ['entregas']. Não existe a janela de "vê tudo até o dono
+  //   restringir" que o cadastro comum tem.
+  //
+  //   O convite é de uso único e é queimado no fim do processo.
+  // ============================================================
+  async function signupMotoboy({ nome, email, senha, codigo }) {
+    const cod = (codigo || '').trim().toUpperCase();
+    if (!cod) throw new Error('Informe o código do convite.');
+
+    let cred = null;
+    try {
+      // 1) Autentica primeiro — sem login, nenhuma leitura passa nas regras.
+      cred = await createUserWithEmailAndPassword(auth, email, senha);
+      await updateProfile(cred.user, { displayName: nome });
+      const uid = cred.user.uid;
+
+      // 2) Valida o convite.
+      const convRef = doc(fdb, 'convites', cod);
+      const convSnap = await getDoc(convRef);
+      if (!convSnap.exists()) throw new Error('Convite não encontrado. Confira o código com o responsável.');
+      const conv = convSnap.data();
+      if (conv.usado) throw new Error('Este convite já foi utilizado. Peça um novo ao responsável.');
+      if (!conv.cid || !conv.motoboyId) throw new Error('Convite inválido. Peça um novo ao responsável.');
+
+      // 3) Entra na empresa.
+      await updateDoc(doc(fdb, 'companies', conv.cid), { members: arrayUnion(uid) });
+
+      // 4) Perfil e membro — já com o papel travado.
+      await setDoc(doc(fdb, 'users', uid), {
+        nome, email,
+        companyId: conv.cid,
+        role: 'motoboy',
+        motoboyId: conv.motoboyId,
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(fdb, 'companies', conv.cid, 'members', uid), {
+        nome, email,
+        role: 'motoboy',
+        modulosPermitidos: ['entregas'],
+        motoboyId: conv.motoboyId,
+        conviteCodigo: cod,
+        joinedAt: serverTimestamp(),
+      });
+
+      // 5) Queima o convite (uso único).
+      await updateDoc(convRef, { usado: true, usadoPor: uid, usadoEm: serverTimestamp() });
+    } catch (e) {
+      // Qualquer falha no meio do caminho: remove a conta recém-criada para
+      // não deixar usuário órfão sem empresa.
+      if (cred?.user) { try { await cred.user.delete(); } catch (_) {} }
+      throw new Error(friendly(e));
+    }
+  }
+
   async function login(email, senha) {
     try { return await signInWithEmailAndPassword(auth, email, senha); }
     catch (e) { throw new Error(friendly(e)); }
@@ -159,7 +236,11 @@ export function AuthProvider({ children }) {
   const logout = () => signOut(auth);
 
   return (
-    <AuthContext.Provider value={{ user, profile, company, modulosPermitidos, isOwner, papel, isSocio, isGestor, loading, signup, login, resetPassword, logout }}>
+    <AuthContext.Provider value={{
+      user, profile, company, modulosPermitidos, isOwner, papel, isSocio, isGestor,
+      isMotoboy, motoboyId, erroAcesso, loading,
+      signup, signupMotoboy, login, resetPassword, logout,
+    }}>
       {children}
     </AuthContext.Provider>
   );

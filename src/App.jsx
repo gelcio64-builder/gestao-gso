@@ -7,7 +7,7 @@ import {
   Activity, Clock, Coins, Receipt, ChevronRight, ChevronDown, CircleAlert, Sun, Phone,
   Trophy, Flame, Lightbulb, Percent, Calendar,
   Home, ShoppingCart, CreditCard, Heart, GraduationCap, Target, PiggyBank, Gauge, Sparkles,
-  LogOut, Copy, Check, Building2, Camera, Package, Eye, Search,
+  LogOut, Copy, Check, Building2, Camera, Package, Eye, Search, Bike,
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -28,6 +28,8 @@ import { scanImage, extractBoletoLinha, extractVencimentoDate, extractValues, ex
 import { gerarOrcamentoPDF } from './pdf/orcamento';
 import { gerarRelatorioPDF } from './pdf/relatorio';
 import { REGIMES, getRegime, getParamsFiscais, calcularFiscal, alertasFiscais, checklistFiscal, calendarioFiscal, FAIXAS_LIMITE } from './fiscal/engine';
+import Entregas from './entregas/Entregas';
+import AppMotoboy from './entregas/AppMotoboy';
 
 /* ============================================================
    GESTÃO GSO — v2.1
@@ -501,6 +503,7 @@ const NAV = [
   { key: 'wms', label: 'Armazém (WMS)', icon: Home },
   { key: 'documentos', label: 'Documentos', icon: FolderOpen },
   { key: 'mudancas', label: 'Mudanças', icon: Package },
+  { key: 'entregas', label: 'Entregas', icon: Bike },
   { key: 'fiscal', label: 'Painel Fiscal', icon: Receipt },
   { key: 'relatorios', label: 'Relatórios', icon: BarChart3 },
   { key: 'importacao', label: 'Importação', icon: ArrowDownRight },
@@ -6323,6 +6326,7 @@ function AppInner() {
           {route === 'wms' && <ArmazemWMS data={data} setData={setData} />}
           {route === 'documentos' && <Documentos data={data} setData={setData} />}
           {route === 'mudancas' && <Mudancas data={data} setData={setData} />}
+          {route === 'entregas' && <Entregas data={data} setData={setData} />}
           {route === 'fiscal' && <PainelFiscal data={data} setData={setData} />}
           {route === 'relatorios' && <Relatorios data={data} />}
           {route === 'importacao' && <Importacao data={data} setData={setData} />}
@@ -10051,11 +10055,23 @@ function Configuracoes({ data, setData, onRequestLogout }) {
   );
 }
 
+// ============================================================
+// RAIZ POR PAPEL
+// O motoboy recebe um aplicativo próprio, não uma versão reduzida
+// do painel: AppInner (sidebar, dashboard, financeiro) nem chega a
+// ser montado quando o papel é 'motoboy'.
+// ============================================================
+function RaizPorPapel() {
+  const { papel } = useAuth();
+  if (papel === 'motoboy') return <AppMotoboy />;
+  return <AppInner />;
+}
+
 export default function App() {
   return (
     <AuthProvider>
       <AuthGate>
-        <AppInner />
+        <RaizPorPapel />
       </AuthGate>
     </AuthProvider>
   );

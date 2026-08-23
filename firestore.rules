@@ -11,6 +11,40 @@ service cloud.firestore {
     }
 
     // ==============================================================
+    //   convites/{codigo} — convite pessoal de MOTOBOY
+    // --------------------------------------------------------------
+    //   Fica na RAIZ de propósito: o motoboy precisa validar o código
+    //   ANTES de pertencer à empresa. Se ficasse dentro de
+    //   companies/{cid}, ele não conseguiria ler (não é membro ainda).
+    //
+    //   Documento: { cid, motoboyId, nome, usado, criadoPor, criadoEm }
+    //   NÃO guarda nada sensível — só amarra código → empresa → motoboy.
+    // ==============================================================
+    match /convites/{codigo} {
+      // `get` exige conhecer o código exato. `list` é proibido, então
+      // ninguém consegue varrer a coleção atrás de convites válidos.
+      allow get:  if request.auth != null;
+      allow list: if false;
+
+      // Só um membro da empresa cria convite para a própria empresa.
+      allow create: if request.auth != null
+                    && request.resource.data.cid is string
+                    && request.resource.data.usado == false
+                    && request.auth.uid in get(/databases/$(database)/documents/companies/$(request.resource.data.cid)).data.members;
+
+      // Único update permitido: queimar o convite (false → true).
+      // Empresa e motoboy vinculados não podem ser trocados.
+      allow update: if request.auth != null
+                    && resource.data.usado == false
+                    && request.resource.data.usado == true
+                    && request.resource.data.cid == resource.data.cid
+                    && request.resource.data.motoboyId == resource.data.motoboyId;
+
+      allow delete: if request.auth != null
+                    && request.auth.uid in get(/databases/$(database)/documents/companies/$(resource.data.cid)).data.members;
+    }
+
+    // ==============================================================
     //   companies/{cid} — leitura/escrita para membros da empresa
     // ==============================================================
     match /companies/{cid} {
@@ -19,13 +53,21 @@ service cloud.firestore {
       function isMember() {
         return isAuthed() && request.auth.uid in resource.data.members;
       }
-      function joiningOrCreating() {
+      function creating() {
         return isAuthed() && request.auth.uid in request.resource.data.members;
+      }
+      function joiningSelf() {
+        return isAuthed()
+          && !(request.auth.uid in resource.data.members)
+          && (request.auth.uid in request.resource.data.members)
+          && request.resource.data.members.size() == resource.data.members.size() + 1
+          && request.resource.data.nome == resource.data.nome
+          && request.resource.data.ownerUid == resource.data.ownerUid;
       }
 
       allow read:   if isMember();
-      allow create: if joiningOrCreating();
-      allow update: if isMember() || joiningOrCreating();
+      allow create: if creating();
+      allow update: if isMember() || joiningSelf();
       allow delete: if isMember() && request.auth.uid == resource.data.ownerUid;
 
       // -------- helpers (usados pelas subcoleções abaixo) --------
@@ -38,106 +80,256 @@ service cloud.firestore {
       function isOwner() {
         return isAuthed() && companyData().ownerUid == request.auth.uid;
       }
-      function memberModulos() {
-        return get(/databases/$(database)/documents/companies/$(cid)/members/$(request.auth.uid)).data.modulosPermitidos;
+      function myMember() {
+        return get(/databases/$(database)/documents/companies/$(cid)/members/$(request.auth.uid)).data;
       }
-      // Regra: owner pode tudo; membro pode se modulosPermitidos for null (sem restrição)
-      // ou se o módulo estiver na lista de permissões.
+      function memberModulos() {
+        return myMember().modulosPermitidos;
+      }
       function hasModuleAccess(mod) {
         return isOwner() || memberModulos() == null || mod in memberModulos();
       }
+      function isSocio() {
+        return isAuthed() && myMember().role == 'socio';
+      }
+
+      // --------------------------------------------------------------
+      //   MOTOBOY — papel novo, criado para o módulo Entregas.
+      //   É um membro da empresa com acesso DRASTICAMENTE reduzido:
+      //   enxerga apenas os próprios registros operacionais.
+      //   Toda coleção sensível abaixo carrega `&& !isMotoboy()`.
+      // --------------------------------------------------------------
+      //   IMPORTANTE: o exists() vem ANTES do get(). Existe uma janela no
+      //   AuthContext em que a empresa já carregou mas o doc de membro ainda
+      //   não foi criado. Sem o exists(), o get() falharia, a regra daria
+      //   erro e o usuário legítimo levaria "permission denied" — o app
+      //   abriria em branco. Com o exists(), quem não tem doc de membro
+      //   simplesmente NÃO é motoboy, e tudo se comporta como antes.
+      function temMemberDoc() {
+        return exists(/databases/$(database)/documents/companies/$(cid)/members/$(request.auth.uid));
+      }
+      function isMotoboy() {
+        return isAuthed() && temMemberDoc() && myMember().role == 'motoboy';
+      }
+      // Quem pode ler dados de gestão (todo mundo menos o motoboy)
+      function isStaff() {
+        return isCompanyMember() && !isMotoboy();
+      }
+      function meuUid() { return request.auth.uid; }
 
       // ==============================================================
-      //   settings/main — nome, logo, CNPJ, preço combustível, etc.
-      //   Leitura: qualquer membro (topbar/dashboard leem daqui)
-      //   Escrita: só o dono da empresa
+      //   settings/main — nome, logo, CNPJ, paleta, tabela de preços
+      //   O motoboy NÃO lê: aqui moram a tabela de preços de Mudanças
+      //   e demais parâmetros comerciais. O app dele usa companies.nome.
       // ==============================================================
       match /settings/{docId} {
-        allow read:  if isCompanyMember();
-        allow write: if isOwner();
+        allow read:  if isStaff();
+        allow write: if isOwner() || isSocio();
       }
 
       // ==============================================================
       //   members/{uid} — permissões por módulo de cada colaborador
-      //   Leitura: qualquer membro (Configurações lista todos)
-      //   Criação: o próprio usuário pode criar seu doc no primeiro login,
-      //            mas somente com modulosPermitidos == null (não pode se
-      //            auto-conceder permissões).
-      //   Update/Delete: só o dono da empresa
       // ==============================================================
       match /members/{memberUid} {
         allow read: if isCompanyMember();
+
+        // Dois caminhos de criação:
+        //  (a) colaborador comum via código da empresa → modulosPermitidos null
+        //  (b) MOTOBOY via convite pessoal → nasce travado, com role fixo
+        //      e um convite válido apontando para esta empresa.
         allow create: if isAuthed()
                       && memberUid == request.auth.uid
-                      && request.resource.data.modulosPermitidos == null;
+                      && (
+                        (
+                          request.resource.data.role != 'motoboy'
+                          && request.resource.data.modulosPermitidos == null
+                        )
+                        || (
+                          request.resource.data.role == 'motoboy'
+                          && request.resource.data.modulosPermitidos == ['entregas']
+                          && request.resource.data.motoboyId is string
+                          && request.resource.data.conviteCodigo is string
+                          && exists(/databases/$(database)/documents/convites/$(request.resource.data.conviteCodigo))
+                          && get(/databases/$(database)/documents/convites/$(request.resource.data.conviteCodigo)).data.cid == cid
+                          && get(/databases/$(database)/documents/convites/$(request.resource.data.conviteCodigo)).data.usado == false
+                          && get(/databases/$(database)/documents/convites/$(request.resource.data.conviteCodigo)).data.motoboyId == request.resource.data.motoboyId
+                        )
+                      );
+
+        // Só o dono muda papel/permissão. O motoboy nunca se promove.
         allow update, delete: if isOwner();
       }
 
       // ==============================================================
-      //   Subcoleções de dados operacionais
-      //   Leitura: qualquer membro da empresa (para Painel/Relatórios agregarem)
-      //   Escrita: apenas se o usuário tem o módulo correspondente liberado
-      //            (owner sempre libera)
+      //   Subcoleções já existentes — INALTERADAS, exceto por passarem
+      //   a exigir !isMotoboy() na leitura. Antes qualquer membro lia
+      //   tudo; com motoboy no sistema isso viraria vazamento.
       // ==============================================================
 
       match /veiculos/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('veiculos');
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('veiculos');
       }
       match /motoristas/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('motoristas');
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('motoristas');
       }
       match /linhas/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('linhas');
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('linhas');
       }
       match /combustivel/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('combustivel');
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('combustivel');
       }
       match /manutencao/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('manutencao');
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('manutencao');
       }
-      // finEmpresa: escrita autorizada por Financeiro Empresa OU por Importação
-      // (a Central de Importação grava lançamentos aqui)
       match /finEmpresa/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember()
-                     && (hasModuleAccess('finEmpresa') || hasModuleAccess('importacao'));
+        allow read: if isStaff();
+        allow write: if isStaff()
+                     && (hasModuleAccess('finEmpresa') || hasModuleAccess('importacao') || hasModuleAccess('entregas'));
+      }
+      match /recorrencias/{docId} {
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('finEmpresa');
       }
       match /finPessoal/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('finPessoal');
+        allow read, write: if isOwner();
+      }
+      match /metasPessoais/{docId} {
+        allow read, write: if isOwner();
       }
       match /contratos/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('contratos');
-      }
-      // metasPessoais faz parte do Financeiro Pessoal
-      match /metasPessoais/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('finPessoal');
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('contratos');
       }
       match /crmLeads/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('crm');
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('crm');
       }
       match /wms/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('wms');
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('wms');
       }
       match /documentos/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('documentos');
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('documentos');
       }
       match /mudancas/{docId} {
-        allow read: if isCompanyMember();
-        allow write: if isCompanyMember() && hasModuleAccess('mudancas');
+        allow read: if isStaff();
+        allow write: if isStaff() && hasModuleAccess('mudancas');
       }
 
-      // Qualquer subcoleção nova não listada acima ficará BLOQUEADA por padrão.
+      // ==============================================================
+      //   MÓDULO ENTREGAS
+      // --------------------------------------------------------------
+      //   Divisão proposital:
+      //     OPERACIONAL → o motoboy lê (precisa para trabalhar)
+      //     COMERCIAL   → o motoboy nunca vê (tarifas, fechamentos, repasses)
+      //
+      //   Por isso as tarifas NÃO ficam dentro de entLojistas: o Firestore
+      //   não faz segurança por campo. Se a tarifa morasse no doc do
+      //   lojista, ler o lojista seria ler a tarifa.
+      // ==============================================================
+
+      // ---- Config: 'operacional' é legível pelo motoboy, 'comercial' não ----
+      match /entConfig/{docId} {
+        allow read:  if isStaff() || (isMotoboy() && docId == 'operacional');
+        allow write: if isStaff() && hasModuleAccess('entregas');
+      }
+
+      // ---- Lojistas: só dados operacionais (nome, endereço, região, base) ----
+      match /entLojistas/{docId} {
+        allow read:  if isCompanyMember();
+        allow write: if isStaff() && hasModuleAccess('entregas');
+      }
+
+      // ---- Bases próprias e parceiras ----
+      match /entBases/{docId} {
+        allow read:  if isCompanyMember();
+        allow write: if isStaff() && hasModuleAccess('entregas');
+      }
+
+      // ---- Motoboys: cada motoboy só enxerga o próprio cadastro ----
+      //  O vínculo login ↔ cadastro vem de members/{uid}.motoboyId, que é
+      //  gravado no ato do cadastro e só o dono consegue alterar depois.
+      //  (Não usamos um campo `uid` aqui: quem precisaria gravá-lo seria o
+      //  próprio motoboy, e ele não tem escrita nesta coleção.)
+      function meuMotoboyId() {
+        return temMemberDoc() ? myMember().get('motoboyId', '') : '';
+      }
+      match /entMotoboys/{docId} {
+        allow read:  if isStaff() || (isMotoboy() && meuMotoboyId() == docId);
+        allow write: if isStaff() && hasModuleAccess('entregas');
+      }
+
+      // ---- Tarifas (lojista e motoboy) + histórico de alterações ----
+      //      Bloqueado para o motoboy, sem exceção.
+      match /entTarifas/{docId} {
+        allow read:  if isStaff();
+        allow write: if isStaff() && hasModuleAccess('entregas');
+      }
+
+      // ---- Coletas ----
+      //  O motoboy cria a própria coleta pelo celular, mas:
+      //   • só em nome dele mesmo
+      //   • sempre como 'pendente' de conferência
+      //   • nunca preenchendo a quantidade confirmada pelo lojista
+      //   • nunca editando nem apagando depois de registrada
+      match /entColetas/{docId} {
+        allow read: if isStaff() || (isMotoboy() && resource.data.motoboyUid == meuUid());
+        allow create: if (isStaff() && hasModuleAccess('entregas'))
+                      || (
+                        isMotoboy()
+                        && request.resource.data.motoboyUid == meuUid()
+                        && request.resource.data.motoboyId == meuMotoboyId()
+                        && request.resource.data.conciliacaoStatus == 'pendente'
+                        && request.resource.data.qtdConfirmada == null
+                        && request.resource.data.fechamentoLojistaId == null
+                        && request.resource.data.fechamentoMotoboyId == null
+                      );
+        allow update, delete: if isStaff() && hasModuleAccess('entregas');
+      }
+
+      // ---- Rotas de entrega (atribuições após a triagem) ----
+      //  O motoboy só pode dar baixa no que já foi atribuído a ele, e só
+      //  enquanto a rota não entrou num fechamento.
+      match /entRotas/{docId} {
+        allow read: if isStaff() || (isMotoboy() && resource.data.motoboyUid == meuUid());
+        allow create, delete: if isStaff() && hasModuleAccess('entregas');
+        allow update: if (isStaff() && hasModuleAccess('entregas'))
+                      || (
+                        isMotoboy()
+                        && resource.data.motoboyUid == meuUid()
+                        && request.resource.data.motoboyUid == resource.data.motoboyUid
+                        && request.resource.data.qtdAtribuida == resource.data.qtdAtribuida
+                        && request.resource.data.snapshot == resource.data.snapshot
+                        && request.resource.data.fechamentoId == resource.data.fechamentoId
+                        && resource.data.fechamentoId == null
+                      );
+      }
+
+      // ---- Comprovantes enviados pelo motoboy ----
+      match /entComprovantes/{docId} {
+        allow read: if isStaff() || (isMotoboy() && resource.data.motoboyUid == meuUid());
+        allow create: if (isStaff() && hasModuleAccess('entregas'))
+                      || (isMotoboy() && request.resource.data.motoboyUid == meuUid());
+        allow update, delete: if isStaff() && hasModuleAccess('entregas');
+      }
+
+      // ---- Fechamentos e repasses: dinheiro. Motoboy nunca lê. ----
+      match /entFechamentos/{docId} {
+        allow read:  if isStaff();
+        allow write: if isStaff() && hasModuleAccess('entregas');
+      }
+      match /entPagamentos/{docId} {
+        allow read:  if isStaff();
+        allow write: if isStaff() && hasModuleAccess('entregas');
+      }
+
+      // Qualquer subcoleção nova não listada acima fica BLOQUEADA por padrão.
       // Ao adicionar um módulo novo no futuro, criar match aqui para ele.
     }
   }
