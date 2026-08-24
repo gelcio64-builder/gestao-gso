@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { doc, setDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import {
   Bike, Plus, Pencil, Trash2, KeyRound, Copy, Check, Search,
-  CheckCircle2, AlertTriangle, Link2, Coins, Settings, Store, Warehouse, Package,
+  CheckCircle2, AlertTriangle, Link2, Coins, Settings, Store, Warehouse, Package, FileText,
 } from 'lucide-react';
 import { fdb } from '../firebase';
 import { useAuth } from '../auth/AuthContext';
@@ -16,6 +16,7 @@ import { MODO_PAGAMENTO } from './constants';
 import Lojistas from './Lojistas';
 import Bases from './Bases';
 import Coletas from './Coletas';
+import Fechamentos from './Fechamentos';
 import ConfigEntregas from './ConfigEntregas';
 
 // ============================================================
@@ -28,6 +29,7 @@ import ConfigEntregas from './ConfigEntregas';
 
 const ABAS = [
   { k: 'coletas', label: 'Coletas', icon: Package },
+  { k: 'fechamentos', label: 'Fechamentos', icon: FileText },
   { k: 'lojistas', label: 'Lojistas', icon: Store },
   { k: 'motoboys', label: 'Motoboys', icon: Bike },
   { k: 'bases', label: 'Bases', icon: Warehouse },
@@ -58,6 +60,7 @@ function EntregasConteudo({ data, setData }) {
       </div>
 
       {aba === 'coletas' && <Coletas data={d} setData={setData} />}
+      {aba === 'fechamentos' && <Fechamentos data={d} setData={setData} />}
       {aba === 'lojistas' && <Lojistas data={d} setData={setData} />}
       {aba === 'motoboys' && <Motoboys data={d} setData={setData} />}
       {aba === 'bases' && <Bases data={d} setData={setData} />}

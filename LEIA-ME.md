@@ -1,75 +1,63 @@
-# Bloco 3 — Ciclo completo da coleta
+# Bloco 4 — Fechamento e cobrança dos lojistas
 
 ## Como subir
 
-**Só uma pasta muda: `src/entregas/`.**
+Três arquivos, em duas pastas:
 
-Nada de Firebase desta vez — as regras continuam as mesmas do Bloco 2.
-Nada de `App.jsx`, `AuthContext`, `AuthGate` ou `useFirestoreSync`.
+- `src/entregas/Fechamentos.jsx`  (novo)
+- `src/entregas/Entregas.jsx`     (substitui — ganhou a aba Fechamentos)
+- `src/pdf/cobranca.js`           (novo)
 
-1. Descompacte o ZIP
-2. GitHub → **Add file → Upload files**
-3. Arraste a **pasta `src`** (o ícone da pasta, não os arquivos de dentro)
-4. Commit
-5. Aguarde o deploy na Vercel
+Nada de Firebase. Nada de App.jsx.
 
-Build verificado: 2.344 módulos, sem erro.
+Arraste a **pasta `src`** no GitHub (não os arquivos soltos).
 
----
-
-## Ordem de teste (importante seguir nesta sequência)
-
-O sistema tem dependências entre as telas: sem base cadastrada, o motoboy
-não consegue registrar coleta. Faça nesta ordem:
-
-### 1. Configurações
-Entregas → aba **Configurações**
-
-- Escolha o modelo de pagamento (para o João Pedro: **Somente por entrega**)
-- Valor por entrega: `6,50`
-- Valor por volume cobrado do lojista: `10,00`
-- Cadastre as regiões: Osasco, Guarulhos, Taboão da Serra, Diadema…
-- **Salvar configurações**
-
-### 2. Bases
-Aba **Bases** → Nova base → "Base Guarulhos", tipo Própria, marque as regiões
-
-### 3. Lojistas
-Aba **Lojistas** → Novo lojista → "João Imports", plataforma Mercado Livre,
-base de destino "Base Guarulhos", telefone (o botão Ligar usa esse número)
-
-Depois clique em **Tarifa** no card dele para dar valor diferente do padrão
-— por exemplo R$ 10 por volume com mínimo de R$ 50.
-
-### 4. Motoboys
-A tarifa individual agora tem botão próprio no card. Deixe no padrão se não
-houver acordo diferente.
-
-### 5. App do motoboy
-Entre com a conta de motoboy → botão grande **Registrar coleta**
-
-- Escolhe a loja → a **base vem preenchida sozinha** (e dá para trocar)
-- Ajusta a quantidade nos botões + / − ou nos atalhos +10 / +20 / +50
-- **Confirmar coleta**
-
-### 6. Conferência (o passo que substitui o WhatsApp)
-Volte ao painel → Entregas → aba **Coletas** → **Conferência**
-
-A coleta aparece agrupada por loja e por dia, com o total já somado.
-Ligue para a loja, digite o que ela confirmou e clique em **Aprovar**.
-
-- Número igual → status **Conciliada**
-- Número diferente → status **Divergente**, e o sistema pede o motivo
-
-Os dois números ficam guardados para sempre. A tarifa é carimbada neste
-momento — mudar a tabela depois não altera esta coleta.
+Build verificado: sem erro.
 
 ---
 
-## O que ainda não existe
+## Como testar
 
-Triagem e distribuição de rotas, comprovantes, fechamentos, repasses aos
-motoboys e a ponte com o Financeiro Empresa. Tudo isso é o próximo bloco.
+Entregas → aba **Fechamentos**
 
-A aba **Entregas** dentro do app do motoboy já existe, mas fica vazia até
-a triagem ser construída.
+1. Navegue até o mês com as setas e escolha a quinzena (01–15 ou 16–fim)
+2. Cada lojista aparece num card com o total do período
+3. **PDF** — baixa o demonstrativo com logo, marca d'água e a cor da paleta
+4. **Fechar e cobrar** — trava o período e cria a conta a receber no Financeiro
+5. **WhatsApp** — abre a conversa com o resumo pronto (o PDF vai anexado à mão)
+
+Depois de fechar, confira em **Financeiro Empresa**: deve haver UM lançamento
+consolidado por lojista, categoria "Receita de Entregas", status pendente,
+com o vencimento calculado pelo prazo das Configurações.
+
+Não são criados lançamentos por coleta — apenas um por fechamento.
+
+---
+
+## Decisões tomadas no conteúdo do PDF
+
+**Sem nome de motoboy.** Para o lojista é informação que só gera pergunta.
+O painel interno continua mostrando tudo.
+
+**Cobra a quantidade confirmada pela loja.** Se o motoboy informou 50 e ela
+confirmou 48, o PDF traz 48. A diferença fica registrada internamente.
+
+**Coleta pendente não entra.** Aparece um aviso amarelo e ela fica de fora
+até ser conferida — o sistema não cobra número não confirmado.
+
+Se quiser mudar qualquer uma dessas três, é ajuste rápido.
+
+---
+
+## Reabrir
+
+O botão **Reabrir** desfaz o fechamento e remove a conta a receber, liberando
+as coletas para um novo fechamento. Se o lançamento já tiver sido marcado como
+**pago** no Financeiro, a reabertura é recusada — histórico pago não se mexe.
+
+---
+
+## O que falta
+
+Triagem e distribuição de rotas, comprovantes, e os repasses aos motoboys
+(quanto cada um gerou, quanto já recebeu, saldo). É o próximo bloco.
