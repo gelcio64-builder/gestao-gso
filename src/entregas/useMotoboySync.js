@@ -37,14 +37,15 @@ export function useMotoboySync(companyId, uid, motoboyId) {
   const [erro, setErro] = useState('');
 
   useEffect(() => {
-    if (!companyId || !uid) return;
+    // Sem motoboyId não há como filtrar: as regras exigem o vínculo.
+    if (!companyId || !uid || !motoboyId) return;
     const cache = { ...vazio };
     setDados({ ...cache });
     setPronto(false);
     setErro('');
 
     const recebidos = new Set();
-    const esperados = motoboyId ? 6 : 5;
+    const esperados = 6;
     const marcar = (k) => {
       recebidos.add(k);
       if (recebidos.size >= esperados) setPronto(true);
@@ -71,16 +72,18 @@ export function useMotoboySync(companyId, uid, motoboyId) {
 
     const lista = (snap) => snap.docs.map((d) => ({ ...d.data(), id: d.id }));
 
-    // Só os documentos deste motoboy. As regras exigem exatamente este filtro.
-    ouvir('coletas', query(base('entColetas'), where('motoboyUid', '==', uid)), lista);
-    ouvir('rotas', query(base('entRotas'), where('motoboyUid', '==', uid)), lista);
-    ouvir('comprovantes', query(base('entComprovantes'), where('motoboyUid', '==', uid)), lista);
+    // Filtro por motoboyId, não por uid: coletas e rotas lançadas pelo
+    // painel não carregam o uid do login, e ele precisa vê-las também.
+    // As regras exigem exatamente este filtro.
+    ouvir('coletas', query(base('entColetas'), where('motoboyId', '==', motoboyId)), lista);
+    ouvir('rotas', query(base('entRotas'), where('motoboyId', '==', motoboyId)), lista);
+    ouvir('comprovantes', query(base('entComprovantes'), where('motoboyId', '==', motoboyId)), lista);
 
     // Cadastros que ele precisa ler para trabalhar (sem valores comerciais).
     ouvir('lojistas', base('entLojistas'), lista);
     ouvir('bases', base('entBases'), lista);
 
-    if (motoboyId) {
+    {
       unsubs.push(onSnapshot(
         doc(fdb, 'companies', companyId, 'entMotoboys', motoboyId),
         (snap) => {

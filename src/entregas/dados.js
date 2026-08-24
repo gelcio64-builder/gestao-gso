@@ -1,4 +1,4 @@
-import { collection, doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, doc, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { fdb } from '../firebase';
 
 // ============================================================
@@ -72,5 +72,107 @@ export async function criarColetaMotoboy(companyId, {
     criadoEm: serverTimestamp(),
   });
 
+  return ref.id;
+}
+
+// ------------------------------------------------------------
+//   Baixa de entrega feita pelo motoboy
+// ------------------------------------------------------------
+//   As regras só deixam ele mexer em qtdConcluida, qtdOcorrencia,
+//   status, obs e historico — e apenas enquanto a rota não entrou
+//   num fechamento. Qualquer campo a mais aqui faz a gravação ser
+//   recusada, então não acrescente nada sem ajustar as regras.
+export async function baixarEntregaMotoboy(companyId, rota, { concluidas, ocorrencias, obs, motoboyNome }) {
+  if (!companyId || !rota?.id) throw new Error('Rota não identificada.');
+  if (rota.fechamentoId) throw new Error('Esta rota já entrou num fechamento e não pode ser alterada.');
+
+  const atrib = Math.max(0, Math.round(Number(rota.qtdAtribuida) || 0));
+  const feitas = Math.max(0, Math.round(Number(concluidas) || 0));
+  const ocor = Math.max(0, Math.round(Number(ocorrencias) || 0));
+  if (feitas + ocor > atrib) {
+    throw new Error(`A soma passa dos ${atrib} volumes atribuídos.`);
+  }
+
+  const status = feitas + ocor >= atrib && atrib > 0 ? 'concluida' : 'andamento';
+
+  await updateDoc(doc(fdb, 'companies', companyId, 'entRotas', rota.id), {
+    qtdConcluida: feitas,
+    qtdOcorrencia: ocor,
+    status,
+    obs: obs || rota.obs || '',
+    historico: [...(rota.historico || []), {
+      acao: 'baixa pelo motoboy',
+      de: rota.qtdConcluida ?? 0,
+      para: feitas,
+      por: motoboyNome || '',
+      em: new Date().toISOString(),
+    }],
+  });
+
+  return status;
+}
+
+// ------------------------------------------------------------
+//   Comprovante
+// ------------------------------------------------------------
+//   A foto vai comprimida dentro do próprio documento, em base64 —
+//   mesmo caminho que o app já usa para o logo da empresa. Evita
+//   depender do Firebase Storage (ativação no console e custo por
+//   GB) para uma foto que serve só para conferência visual.
+//
+//   O limite de um documento no Firestore é 1 MB, por isso a
+//   compressão é obrigatória e há uma trava de tamanho no fim.
+const LIMITE_BYTES = 700 * 1024;
+
+export function comprimirImagem(file, maxLado = 1000, qualidade = 0.6) {
+  return new Promise((resolve, reject) => {
+    const leitor = new FileReader();
+    leitor.onerror = () => reject(new Error('Não foi possível ler a imagem.'));
+    leitor.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Arquivo de imagem inválido.'));
+      img.onload = () => {
+        const escala = Math.min(1, maxLado / Math.max(img.width, img.height));
+        const w = Math.round(img.width * escala);
+        const h = Math.round(img.height * escala);
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        const ctx = cv.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(cv.toDataURL('image/jpeg', qualidade));
+      };
+      img.src = leitor.result;
+    };
+    leitor.readAsDataURL(file);
+  });
+}
+
+export async function enviarComprovanteMotoboy(companyId, {
+  motoboyUid, motoboyId, motoboyNome, rotaId, regiao, quantidade, arquivo, obs,
+}) {
+  if (!companyId) throw new Error('Empresa não identificada.');
+  if (!motoboyUid) throw new Error('Sessão inválida. Entre novamente.');
+  if (!arquivo) throw new Error('Selecione ou tire uma foto.');
+  if (arquivo.length > LIMITE_BYTES) {
+    throw new Error('A imagem ficou grande demais. Tente uma foto mais simples ou recorte antes.');
+  }
+
+  const agora = new Date();
+  const ref = doc(collection(fdb, 'companies', companyId, 'entComprovantes'));
+  await setDoc(ref, {
+    data: agora.toISOString().slice(0, 10),
+    hora: agora.toTimeString().slice(0, 5),
+    motoboyUid, motoboyId, motoboyNome: motoboyNome || '',
+    rotaId: rotaId || null,
+    regiao: regiao || '',
+    quantidade: Math.max(0, Math.round(Number(quantidade) || 0)),
+    arquivo,
+    obs: obs || '',
+    // Espaço reservado para leitura automática da imagem no futuro.
+    analise: null,
+    criadoEm: serverTimestamp(),
+  });
   return ref.id;
 }

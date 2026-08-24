@@ -1,13 +1,13 @@
 import { useMemo, useState } from 'react';
 import {
   Package, Bike, User, LogOut, Loader2, AlertTriangle, CheckCircle2,
-  Clock, Inbox, Plus, Minus, Check,
+  Clock, Inbox, Plus, Minus, Check, Camera, Upload,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useMotoboySync } from './useMotoboySync';
 import { COLETA_STATUS, ROTA_STATUS } from './constants';
 import { statusConciliacao } from './engine';
-import { criarColetaMotoboy } from './dados';
+import { criarColetaMotoboy, baixarEntregaMotoboy, enviarComprovanteMotoboy, comprimirImagem } from './dados';
 import { SeletorGrande, Vazio, Chip, ENT_CSS, fmtData, hojeISO } from './ui';
 
 // ============================================================
@@ -27,6 +27,8 @@ export default function AppMotoboy() {
   const { dados, pronto, erro } = useMotoboySync(company?.id, user?.uid, motoboyId);
   const [aba, setAba] = useState('coletas');
   const [registrando, setRegistrando] = useState(false);
+  const [baixando, setBaixando] = useState(null);
+  const [comprovando, setComprovando] = useState(null);
   const [toast, setToast] = useState('');
 
   const nome = dados.perfil?.nome || user?.displayName || 'Motoboy';
@@ -92,7 +94,9 @@ export default function AppMotoboy() {
         ) : aba === 'coletas' ? (
           <ListaColetas coletas={dados.coletas} lojistas={dados.lojistas} />
         ) : aba === 'entregas' ? (
-          <ListaRotas rotas={dados.rotas} bases={dados.bases} />
+          <ListaRotas rotas={dados.rotas} bases={dados.bases}
+            comprovantes={dados.comprovantes}
+            onBaixar={setBaixando} onComprovante={setComprovando} />
         ) : (
           <Perfil perfil={dados.perfil} user={user} bases={dados.bases}
             coletas={dados.coletas} rotas={dados.rotas} />
@@ -114,6 +118,28 @@ export default function AppMotoboy() {
           motoboyNome={nome}
           onFechar={() => setRegistrando(false)}
           onSalvo={(qtd) => { setRegistrando(false); avisar(`${qtd} volumes registrados`); }}
+        />
+      )}
+
+      {baixando && (
+        <BaixarEntrega
+          rota={baixando}
+          companyId={company?.id}
+          motoboyNome={nome}
+          onFechar={() => setBaixando(null)}
+          onSalvo={() => { setBaixando(null); avisar('Entrega atualizada'); }}
+        />
+      )}
+
+      {comprovando && (
+        <EnviarComprovante
+          rota={comprovando}
+          companyId={company?.id}
+          motoboyUid={user?.uid}
+          motoboyId={motoboyId}
+          motoboyNome={nome}
+          onFechar={() => setComprovando(null)}
+          onSalvo={() => { setComprovando(null); avisar('Comprovante enviado'); }}
         />
       )}
 
@@ -307,9 +333,10 @@ function ListaColetas({ coletas, lojistas }) {
   );
 }
 
-function ListaRotas({ rotas, bases }) {
+function ListaRotas({ rotas, bases, comprovantes, onBaixar, onComprovante }) {
   const nomeBase = (id) => bases.find((b) => b.id === id)?.nome || '';
   const ordenadas = [...rotas].sort((a, b) => String(b.data).localeCompare(String(a.data)));
+  const temComprovante = (rotaId) => (comprovantes || []).some((c) => c.rotaId === rotaId);
 
   if (!ordenadas.length) {
     return <Vazio icon={Bike} titulo="Nenhuma rota atribuída"
@@ -322,6 +349,7 @@ function ListaRotas({ rotas, bases }) {
         const atrib = Number(r.qtdAtribuida) || 0;
         const feito = Number(r.qtdConcluida) || 0;
         const pct = atrib > 0 ? Math.min(100, Math.round((feito / atrib) * 100)) : 0;
+        const travada = !!r.fechamentoId;
         return (
           <article key={r.id} className="mb-item">
             <div className="mb-item-top">
@@ -335,9 +363,213 @@ function ListaRotas({ rotas, bases }) {
             </div>
             <div className="mb-barra"><div className="mb-barra-in" style={{ width: `${pct}%` }} /></div>
             {r.baseId && <div className="mb-item-sub">Saída: {nomeBase(r.baseId)}</div>}
+            {(Number(r.qtdOcorrencia) || 0) > 0 && (
+              <div className="mb-item-sub" style={{ color: '#B91C1C' }}>
+                {r.qtdOcorrencia} ocorrência(s)
+              </div>
+            )}
+
+            {!travada && (
+              <div className="mb-acoes-rota">
+                <button className="mb-b-rota primaria" onClick={() => onBaixar(r)}>
+                  <Check size={16} /> Dar baixa
+                </button>
+                <button className={`mb-b-rota${temComprovante(r.id) ? ' ok' : ''}`}
+                  onClick={() => onComprovante(r)}>
+                  <Camera size={16} /> {temComprovante(r.id) ? 'Comprovante enviado' : 'Comprovante'}
+                </button>
+              </div>
+            )}
           </article>
         );
       })}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------
+//   Dar baixa na entrega
+// ------------------------------------------------------------
+function BaixarEntrega({ rota, companyId, motoboyNome, onFechar, onSalvo }) {
+  const atrib = Number(rota.qtdAtribuida) || 0;
+  const [feitas, setFeitas] = useState(Number(rota.qtdConcluida) || 0);
+  const [ocor, setOcor] = useState(Number(rota.qtdOcorrencia) || 0);
+  const [obs, setObs] = useState(rota.obs || '');
+  const [erro, setErro] = useState('');
+  const [salvando, setSalvando] = useState(false);
+  const restam = Math.max(0, atrib - feitas - ocor);
+
+  async function salvar() {
+    setErro(''); setSalvando(true);
+    try {
+      await baixarEntregaMotoboy(companyId, rota, { concluidas: feitas, ocorrencias: ocor, obs, motoboyNome });
+      onSalvo();
+    } catch (e) {
+      console.error('[baixa]', e);
+      setErro(e?.message || 'Não foi possível salvar.');
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <div className="mb-full">
+      <header className="mb-full-h">
+        <button onClick={onFechar}>Voltar</button>
+        <span>{rota.regiao || 'Rota'}</span>
+        <span style={{ width: 62 }} />
+      </header>
+
+      <div className="mb-full-b">
+        <div className="mb-resumo-rota">
+          <span>{atrib}</span>
+          <small>volumes atribuídos</small>
+        </div>
+
+        <Contador label="Entregues" valor={feitas} onMudar={setFeitas} max={atrib} />
+        <Contador label="Ocorrências (não entregues)" valor={ocor} onMudar={setOcor} max={atrib} />
+
+        <div className={`mb-restam${restam === 0 ? ' zerado' : ''}`}>
+          {restam === 0 ? 'Rota completa' : `Faltam ${restam} volume(s)`}
+        </div>
+
+        <label className="sg" style={{ marginTop: 15 }}>
+          <span className="sg-lbl">Observação (opcional)</span>
+          <input className="mb-inp" value={obs} onChange={(e) => setObs(e.target.value)}
+            placeholder="Ex.: dois clientes ausentes" />
+        </label>
+
+        {erro && <div className="mb-alerta" style={{ margin: '4px 0 0' }}><AlertTriangle size={15} /> {erro}</div>}
+      </div>
+
+      <div className="mb-full-f">
+        <button className="mb-btn-grande" disabled={salvando} onClick={salvar}>
+          {salvando ? <Loader2 size={19} className="mb-spin" /> : <><Check size={19} /> Salvar</>}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Contador({ label, valor, onMudar, max }) {
+  return (
+    <div className="mb-qtd-box">
+      <span className="sg-lbl">{label}</span>
+      <div className="mb-contador">
+        <button onClick={() => onMudar(Math.max(0, valor - 1))} aria-label="Menos"><Minus size={22} /></button>
+        <input className="mb-qtd-in" inputMode="numeric" value={valor}
+          onChange={(e) => onMudar(Math.min(max, Math.max(0, Math.round(Number(e.target.value.replace(/\D/g, '')) || 0))))} />
+        <button onClick={() => onMudar(Math.min(max, valor + 1))} aria-label="Mais"><Plus size={22} /></button>
+      </div>
+      <div className="mb-atalhos">
+        {[5, 10].map((n) => (
+          <button key={n} onClick={() => onMudar(Math.min(max, valor + n))}>+{n}</button>
+        ))}
+        <button onClick={() => onMudar(max)}>Tudo ({max})</button>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------
+//   Enviar comprovante
+// ------------------------------------------------------------
+//   A foto é comprimida no próprio celular antes de subir: um
+//   documento do Firestore tem limite de 1 MB, e foto de celular
+//   passa disso com folga.
+function EnviarComprovante({ rota, companyId, motoboyUid, motoboyId, motoboyNome, onFechar, onSalvo }) {
+  const [imagem, setImagem] = useState('');
+  const [qtd, setQtd] = useState(Number(rota.qtdConcluida) || 0);
+  const [obs, setObs] = useState('');
+  const [erro, setErro] = useState('');
+  const [preparando, setPreparando] = useState(false);
+  const [salvando, setSalvando] = useState(false);
+
+  async function escolher(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setErro(''); setPreparando(true);
+    try {
+      const b64 = await comprimirImagem(file);
+      setImagem(b64);
+    } catch (err) {
+      setErro(err?.message || 'Não foi possível preparar a imagem.');
+    } finally {
+      setPreparando(false);
+    }
+  }
+
+  async function salvar() {
+    setErro(''); setSalvando(true);
+    try {
+      await enviarComprovanteMotoboy(companyId, {
+        motoboyUid, motoboyId, motoboyNome,
+        rotaId: rota.id, regiao: rota.regiao,
+        quantidade: qtd, arquivo: imagem, obs,
+      });
+      onSalvo();
+    } catch (e) {
+      console.error('[comprovante]', e);
+      setErro(e?.message || 'Não foi possível enviar.');
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <div className="mb-full">
+      <header className="mb-full-h">
+        <button onClick={onFechar}>Voltar</button>
+        <span>Comprovante</span>
+        <span style={{ width: 62 }} />
+      </header>
+
+      <div className="mb-full-b">
+        {imagem ? (
+          <div className="mb-preview">
+            <img src={imagem} alt="Comprovante" />
+            <button className="mb-trocar" onClick={() => setImagem('')}>Trocar imagem</button>
+          </div>
+        ) : (
+          <>
+            <label className="mb-drop">
+              <Camera size={30} />
+              <strong>Tirar foto</strong>
+              <small>Abre a câmera do celular</small>
+              <input type="file" accept="image/*" capture="environment" onChange={escolher} hidden />
+            </label>
+            <label className="mb-drop secundario">
+              <Upload size={22} />
+              <strong>Escolher da galeria</strong>
+              <input type="file" accept="image/*" onChange={escolher} hidden />
+            </label>
+          </>
+        )}
+
+        {preparando && (
+          <div className="mb-center" style={{ padding: '20px 0' }}>
+            <Loader2 size={20} className="mb-spin" />
+            <p className="mb-msg">Preparando a imagem…</p>
+          </div>
+        )}
+
+        <label className="sg" style={{ marginTop: 15 }}>
+          <span className="sg-lbl">Quantidade comprovada</span>
+          <input className="mb-inp" inputMode="numeric" value={qtd}
+            onChange={(e) => setQtd(Math.max(0, Math.round(Number(e.target.value.replace(/\D/g, '')) || 0)))} />
+        </label>
+
+        <label className="sg">
+          <span className="sg-lbl">Observação (opcional)</span>
+          <input className="mb-inp" value={obs} onChange={(e) => setObs(e.target.value)} />
+        </label>
+
+        {erro && <div className="mb-alerta" style={{ margin: '4px 0 0' }}><AlertTriangle size={15} /> {erro}</div>}
+      </div>
+
+      <div className="mb-full-f">
+        <button className="mb-btn-grande" disabled={salvando || preparando || !imagem} onClick={salvar}>
+          {salvando ? <Loader2 size={19} className="mb-spin" /> : <><Check size={19} /> Enviar comprovante</>}
+        </button>
+      </div>
     </div>
   );
 }
@@ -448,6 +680,26 @@ const MB_CSS = `
 .mb-inp{ width:100%; padding:14px 15px; border-radius:14px; border:1.5px solid #D1D5DB; font-size:15.5px; background:#fff; color:#0B1324; font-family:inherit; }
 .mb-inp:focus{ outline:none; border-color:var(--color-primary,#0B1533); }
 .mb-aviso-conf{ margin-top:14px; font-size:12.5px; color:#6B7280; background:#fff; border:1px solid #E5E7EB; border-radius:12px; padding:12px 13px; }
+
+.mb-acoes-rota{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:12px; }
+.mb-b-rota{ display:flex; align-items:center; justify-content:center; gap:6px; padding:13px 8px; border-radius:12px; border:1.5px solid #D1D5DB; background:#fff; color:#374151; font-size:13.5px; font-weight:600; cursor:pointer; font-family:inherit; }
+.mb-b-rota.primaria{ background:var(--color-primary,#0B1533); border-color:var(--color-primary,#0B1533); color:#fff; }
+.mb-b-rota.ok{ background:#ECFDF5; border-color:#A7F3D0; color:#047857; }
+.mb-b-rota:active{ transform:scale(.99); }
+
+.mb-resumo-rota{ background:#fff; border:1px solid #E5E7EB; border-radius:14px; padding:16px; text-align:center; margin-bottom:18px; }
+.mb-resumo-rota span{ display:block; font-size:34px; font-weight:700; letter-spacing:-.02em; }
+.mb-resumo-rota small{ font-size:12.5px; color:#6B7280; }
+.mb-restam{ margin-top:4px; padding:11px 13px; border-radius:12px; background:#FEF3C7; color:#92400E; font-size:13.5px; font-weight:600; text-align:center; }
+.mb-restam.zerado{ background:#ECFDF5; color:#047857; }
+
+.mb-drop{ display:flex; flex-direction:column; align-items:center; gap:4px; padding:26px 16px; border:1.5px dashed #D1D5DB; border-radius:15px; background:#fff; color:#6B7280; cursor:pointer; margin-bottom:11px; }
+.mb-drop strong{ font-size:15.5px; color:#0B1324; margin-top:6px; }
+.mb-drop small{ font-size:12px; }
+.mb-drop.secundario{ padding:18px 16px; }
+.mb-preview{ text-align:center; }
+.mb-preview img{ width:100%; border-radius:15px; border:1px solid #E5E7EB; }
+.mb-trocar{ margin-top:10px; background:transparent; border:0; color:#1D4ED8; font-size:13.5px; cursor:pointer; font-family:inherit; text-decoration:underline; }
 
 .mb-nav{ position:fixed; left:0; right:0; bottom:0; background:#fff; border-top:1px solid #E5E7EB; display:grid; grid-template-columns:repeat(3,1fr); padding:6px 4px calc(6px + env(safe-area-inset-bottom)); z-index:40; }
 .mb-nav-b{ background:transparent; border:0; display:flex; flex-direction:column; align-items:center; gap:3px; padding:9px 4px; color:#9CA3AF; font-size:11px; font-weight:500; cursor:pointer; border-radius:12px; font-family:inherit; }

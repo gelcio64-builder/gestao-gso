@@ -111,6 +111,11 @@ service cloud.firestore {
       function isMotoboy() {
         return isAuthed() && temMemberDoc() && myMember().role == 'motoboy';
       }
+      // Vínculo login ↔ cadastro. Vem de members/{uid}.motoboyId, gravado no
+      // ato do cadastro por convite e alterável só pelo dono.
+      function meuMotoboyId() {
+        return temMemberDoc() ? myMember().get('motoboyId', '') : '';
+      }
       // Quem pode ler dados de gestão (todo mundo menos o motoboy)
       function isStaff() {
         return isCompanyMember() && !isMotoboy();
@@ -257,9 +262,6 @@ service cloud.firestore {
       //  gravado no ato do cadastro e só o dono consegue alterar depois.
       //  (Não usamos um campo `uid` aqui: quem precisaria gravá-lo seria o
       //  próprio motoboy, e ele não tem escrita nesta coleção.)
-      function meuMotoboyId() {
-        return temMemberDoc() ? myMember().get('motoboyId', '') : '';
-      }
       match /entMotoboys/{docId} {
         allow read:  if isStaff() || (isMotoboy() && meuMotoboyId() == docId);
         allow write: if isStaff() && hasModuleAccess('entregas');
@@ -278,8 +280,11 @@ service cloud.firestore {
       //   • sempre como 'pendente' de conferência
       //   • nunca preenchendo a quantidade confirmada pelo lojista
       //   • nunca editando nem apagando depois de registrada
+      //  Leitura pelo motoboyId (e não pelo uid): coletas lançadas pelo
+      //  painel não carregam o uid dele, e ele precisa enxergá-las também.
+      //  Na criação continuamos exigindo o uid — é o que prova que é ele.
       match /entColetas/{docId} {
-        allow read: if isStaff() || (isMotoboy() && resource.data.motoboyUid == meuUid());
+        allow read: if isStaff() || (isMotoboy() && resource.data.motoboyId == meuMotoboyId());
         allow create: if (isStaff() && hasModuleAccess('entregas'))
                       || (
                         isMotoboy()
@@ -297,13 +302,14 @@ service cloud.firestore {
       //  O motoboy só pode dar baixa no que já foi atribuído a ele, e só
       //  enquanto a rota não entrou num fechamento.
       match /entRotas/{docId} {
-        allow read: if isStaff() || (isMotoboy() && resource.data.motoboyUid == meuUid());
+        allow read: if isStaff() || (isMotoboy() && resource.data.motoboyId == meuMotoboyId());
         allow create, delete: if isStaff() && hasModuleAccess('entregas');
         allow update: if (isStaff() && hasModuleAccess('entregas'))
                       || (
                         isMotoboy()
-                        && resource.data.motoboyUid == meuUid()
-                        && request.resource.data.motoboyUid == resource.data.motoboyUid
+                        && resource.data.motoboyId == meuMotoboyId()
+                        && request.resource.data.motoboyId == resource.data.motoboyId
+                        && request.resource.data.qtdAtribuida == resource.data.qtdAtribuida
                         && request.resource.data.qtdAtribuida == resource.data.qtdAtribuida
                         && request.resource.data.snapshot == resource.data.snapshot
                         && request.resource.data.fechamentoId == resource.data.fechamentoId
@@ -313,9 +319,13 @@ service cloud.firestore {
 
       // ---- Comprovantes enviados pelo motoboy ----
       match /entComprovantes/{docId} {
-        allow read: if isStaff() || (isMotoboy() && resource.data.motoboyUid == meuUid());
+        allow read: if isStaff() || (isMotoboy() && resource.data.motoboyId == meuMotoboyId());
         allow create: if (isStaff() && hasModuleAccess('entregas'))
-                      || (isMotoboy() && request.resource.data.motoboyUid == meuUid());
+                      || (
+                        isMotoboy()
+                        && request.resource.data.motoboyUid == meuUid()
+                        && request.resource.data.motoboyId == meuMotoboyId()
+                      );
         allow update, delete: if isStaff() && hasModuleAccess('entregas');
       }
 
