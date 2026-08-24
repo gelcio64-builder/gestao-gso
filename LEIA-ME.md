@@ -1,67 +1,75 @@
-# Bloco 2 — Módulo Entregas (cadastro de motoboy + app do motoboy)
+# Bloco 3 — Ciclo completo da coleta
 
 ## Como subir
 
-### 1. Firebase (faça primeiro)
-Console → Firestore → aba **Rules** → apague tudo → cole o conteúdo de
-`firestore.rules` → **Publish**.
+**Só uma pasta muda: `src/entregas/`.**
 
-> Esta versão traz uma correção em relação à publicada no Bloco 1:
-> o vínculo entre a conta de login e o cadastro do motoboy agora usa
-> `members/{uid}.motoboyId`. Sem essa correção o motoboy não conseguiria
-> ler o próprio perfil.
+Nada de Firebase desta vez — as regras continuam as mesmas do Bloco 2.
+Nada de `App.jsx`, `AuthContext`, `AuthGate` ou `useFirestoreSync`.
 
-### 2. GitHub
-Suba a pasta `src/` inteira por cima da existente. Os arquivos alterados são:
+1. Descompacte o ZIP
+2. GitHub → **Add file → Upload files**
+3. Arraste a **pasta `src`** (o ícone da pasta, não os arquivos de dentro)
+4. Commit
+5. Aguarde o deploy na Vercel
 
-| Arquivo | O que mudou |
-|---|---|
-| `src/App.jsx` | 5 pontos: ícone Bike, imports do módulo, item na sidebar, rota e o roteador por papel |
-| `src/auth/AuthContext.jsx` | papel `motoboy`, `signupMotoboy()` por convite, correção de escalada de privilégio |
-| `src/auth/AuthGate.jsx` | tela "Cadastro de motoboy" |
-| `src/data/useFirestoreSync.js` | as 10 coleções do módulo |
-| `src/entregas/*` | pasta nova (5 arquivos) |
-
-Nenhum outro arquivo do projeto foi tocado.
-
-### 3. Vercel
-Deploy automático. Build verificado aqui: 2.338 módulos, sem erro.
+Build verificado: 2.344 módulos, sem erro.
 
 ---
 
-## Como testar
+## Ordem de teste (importante seguir nesta sequência)
 
-**Como dono:**
-1. Sidebar → **Entregas** (ícone de bicicleta, acima do Painel Fiscal)
-2. **Novo motoboy** → preencha nome, telefone, PIX, região → Salvar
-3. **Gerar convite** → aparece um código `MB-XXXXXX` e uma mensagem pronta pro WhatsApp
+O sistema tem dependências entre as telas: sem base cadastrada, o motoboy
+não consegue registrar coleta. Faça nesta ordem:
 
-**Como motoboy** (use o celular ou uma janela anônima):
-4. **Criar conta** → role até o fim → **Cadastro de motoboy**
-5. Cole o código, preencha nome/e-mail/senha → Criar minha conta
-6. Abre um app diferente: topo escuro, dois cards, três abas embaixo
+### 1. Configurações
+Entregas → aba **Configurações**
 
-**O teste de segurança:**
-7. Logado como motoboy, não existe caminho para o Financeiro — nem pela
-   interface, nem forçando o endereço. As regras do Firestore recusam.
-8. As listas de coleta e entrega aparecem vazias. É o esperado: esses
-   fluxos entram no Bloco 3.
+- Escolha o modelo de pagamento (para o João Pedro: **Somente por entrega**)
+- Valor por entrega: `6,50`
+- Valor por volume cobrado do lojista: `10,00`
+- Cadastre as regiões: Osasco, Guarulhos, Taboão da Serra, Diadema…
+- **Salvar configurações**
+
+### 2. Bases
+Aba **Bases** → Nova base → "Base Guarulhos", tipo Própria, marque as regiões
+
+### 3. Lojistas
+Aba **Lojistas** → Novo lojista → "João Imports", plataforma Mercado Livre,
+base de destino "Base Guarulhos", telefone (o botão Ligar usa esse número)
+
+Depois clique em **Tarifa** no card dele para dar valor diferente do padrão
+— por exemplo R$ 10 por volume com mínimo de R$ 50.
+
+### 4. Motoboys
+A tarifa individual agora tem botão próprio no card. Deixe no padrão se não
+houver acordo diferente.
+
+### 5. App do motoboy
+Entre com a conta de motoboy → botão grande **Registrar coleta**
+
+- Escolhe a loja → a **base vem preenchida sozinha** (e dá para trocar)
+- Ajusta a quantidade nos botões + / − ou nos atalhos +10 / +20 / +50
+- **Confirmar coleta**
+
+### 6. Conferência (o passo que substitui o WhatsApp)
+Volte ao painel → Entregas → aba **Coletas** → **Conferência**
+
+A coleta aparece agrupada por loja e por dia, com o total já somado.
+Ligue para a loja, digite o que ela confirmou e clique em **Aprovar**.
+
+- Número igual → status **Conciliada**
+- Número diferente → status **Divergente**, e o sistema pede o motivo
+
+Os dois números ficam guardados para sempre. A tarifa é carimbada neste
+momento — mudar a tabela depois não altera esta coleta.
 
 ---
 
-## O que ainda não existe (Bloco 3)
+## O que ainda não existe
 
-- Cadastro de lojistas e bases
-- Registrar coleta pelo celular
-- Tela de conferência com o lojista
-- Configurações do módulo (tarifas, ciclo, modo de pagamento)
+Triagem e distribuição de rotas, comprovantes, fechamentos, repasses aos
+motoboys e a ponte com o Financeiro Empresa. Tudo isso é o próximo bloco.
 
-As abas correspondentes aparecem marcadas como "em breve" e estão
-desabilitadas.
-
----
-
-## Se algo der errado
-
-Guarde o `regras-backup.txt` do Bloco 1. Se o app quebrar depois de
-publicar as regras, republique o backup e o sistema volta ao normal.
+A aba **Entregas** dentro do app do motoboy já existe, mas fica vazia até
+a triagem ser construída.

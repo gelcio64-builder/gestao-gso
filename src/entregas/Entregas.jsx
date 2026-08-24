@@ -1,72 +1,38 @@
-import { useMemo, useState, Component } from 'react';
+import { useMemo, useState } from 'react';
 import { doc, setDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import {
-  Bike, Plus, Pencil, Trash2, X, KeyRound, Copy, Check, Search,
-  CheckCircle2, AlertTriangle, Link2,
+  Bike, Plus, Pencil, Trash2, KeyRound, Copy, Check, Search,
+  CheckCircle2, AlertTriangle, Link2, Coins, Settings, Store, Warehouse, Package,
 } from 'lucide-react';
 import { fdb } from '../firebase';
 import { useAuth } from '../auth/AuthContext';
-import { gerarCodigoConvite } from './engine';
+import {
+  ModalBase, Campo, ModalConfirma, Vazio, BarreiraErro, uidLocal, fmtBRL, ENT_CSS,
+} from './ui';
+import {
+  gerarCodigoConvite, getConfigEntregas, tarifaDoMotoboy, registrarHistorico, todayISO,
+} from './engine';
+import { MODO_PAGAMENTO } from './constants';
+import Lojistas from './Lojistas';
+import Bases from './Bases';
+import Coletas from './Coletas';
+import ConfigEntregas from './ConfigEntregas';
 
 // ============================================================
 //   MÓDULO ENTREGAS — painel de gestão
 // ------------------------------------------------------------
-//   Uma rota só na sidebar ('entregas'), com abas internas.
-//   No Bloco 2 apenas a aba Motoboys está ativa; as demais
-//   entram nos blocos seguintes, na ordem combinada.
+//   Uma rota só na sidebar ('entregas'), com abas internas —
+//   segue o padrão do módulo Mudanças, sem criar uma segunda
+//   barra lateral dentro da tela.
 // ============================================================
 
 const ABAS = [
-  { k: 'motoboys', label: 'Motoboys' },
-  { k: 'lojistas', label: 'Lojistas', breve: true },
-  { k: 'bases', label: 'Bases', breve: true },
-  { k: 'coletas', label: 'Coletas', breve: true },
-  { k: 'fechamentos', label: 'Fechamentos', breve: true },
+  { k: 'coletas', label: 'Coletas', icon: Package },
+  { k: 'lojistas', label: 'Lojistas', icon: Store },
+  { k: 'motoboys', label: 'Motoboys', icon: Bike },
+  { k: 'bases', label: 'Bases', icon: Warehouse },
+  { k: 'config', label: 'Configurações', icon: Settings },
 ];
-
-const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-const STATUS_MOTOBOY = ['ativo', 'inativo'];
-
-// ------------------------------------------------------------
-//   Barreira de erro
-// ------------------------------------------------------------
-//   Sem isto, qualquer exceção dentro do módulo derruba o React
-//   inteiro e o usuário vê uma tela branca, sem pista nenhuma.
-//   Aqui o erro fica contido no módulo e a mensagem aparece na
-//   tela — o resto do sistema continua navegável.
-// ------------------------------------------------------------
-class BarreiraErro extends Component {
-  constructor(props) {
-    super(props);
-    this.state = { erro: null };
-  }
-  static getDerivedStateFromError(erro) {
-    return { erro };
-  }
-  componentDidCatch(erro, info) {
-    console.error('[Entregas] erro no módulo:', erro, info);
-  }
-  render() {
-    if (this.state.erro) {
-      const msg = this.state.erro?.message || String(this.state.erro);
-      return (
-        <div className="p-4 sm:p-6">
-          <style>{ENT_CSS}</style>
-          <div className="ent-crash">
-            <AlertTriangle size={30} />
-            <h3>O módulo Entregas não conseguiu abrir</h3>
-            <p>O restante do sistema continua funcionando normalmente.</p>
-            <pre className="ent-crash-msg">{msg}</pre>
-            <p className="ent-crash-dica">
-              Copie a mensagem acima e envie ao suporte — ela diz exatamente o que falhou.
-            </p>
-          </div>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
 
 export default function Entregas(props) {
   return (
@@ -77,25 +43,25 @@ export default function Entregas(props) {
 }
 
 function EntregasConteudo({ data, setData }) {
-  const [aba, setAba] = useState('motoboys');
+  const [aba, setAba] = useState('coletas');
+  const d = data || {};
+
   return (
     <div className="p-4 sm:p-6 space-y-4">
+      <style>{ENT_CSS}</style>
       <div className="ent-tabs">
         {ABAS.map((a) => (
-          <button
-            key={a.k}
-            className={`ent-tab${aba === a.k ? ' on' : ''}`}
-            onClick={() => !a.breve && setAba(a.k)}
-            disabled={a.breve}
-            title={a.breve ? 'Em breve' : undefined}
-          >
-            {a.label}
-            {a.breve && <span className="ent-breve">em breve</span>}
+          <button key={a.k} className={`ent-tab${aba === a.k ? ' on' : ''}`} onClick={() => setAba(a.k)}>
+            <a.icon size={14} /> {a.label}
           </button>
         ))}
       </div>
-      <style>{ENT_CSS}</style>
-      {aba === 'motoboys' && <Motoboys data={data || {}} setData={setData} />}
+
+      {aba === 'coletas' && <Coletas data={d} setData={setData} />}
+      {aba === 'lojistas' && <Lojistas data={d} setData={setData} />}
+      {aba === 'motoboys' && <Motoboys data={d} setData={setData} />}
+      {aba === 'bases' && <Bases data={d} setData={setData} />}
+      {aba === 'config' && <ConfigEntregas data={d} setData={setData} />}
     </div>
   );
 }
@@ -104,14 +70,20 @@ function EntregasConteudo({ data, setData }) {
 //   Motoboys
 // ------------------------------------------------------------
 function Motoboys({ data, setData }) {
-  // useAuth() pode devolver null se o provider ainda não montou.
-  // Sem o `|| {}` o destructuring abaixo estoura e a tela fica branca.
+  // useAuth() pode devolver null antes do provider montar; sem o `|| {}`
+  // o destructuring estoura e a tela fica branca.
   const auth = useAuth() || {};
   const { company, isOwner } = auth;
+
   const lista = Array.isArray(data?.entMotoboys) ? data.entMotoboys : [];
+  const tarifas = Array.isArray(data?.entTarifas) ? data.entTarifas : [];
+  const bases = Array.isArray(data?.entBases) ? data.entBases : [];
+  const cfg = getConfigEntregas(data?.entConfig).comercial;
+
   const [busca, setBusca] = useState('');
-  const [form, setForm] = useState(null);      // motoboy sendo editado (ou {} p/ novo)
-  const [convite, setConvite] = useState(null); // { codigo, nome }
+  const [form, setForm] = useState(null);
+  const [convite, setConvite] = useState(null);
+  const [tarifaAlvo, setTarifaAlvo] = useState(null);
   const [delAlvo, setDelAlvo] = useState(null);
   const [erro, setErro] = useState('');
 
@@ -128,36 +100,69 @@ function Motoboys({ data, setData }) {
 
   function salvar(item) {
     const novo = !item.id;
-    const registro = {
+    const reg = {
       ...item,
-      id: item.id || uid(),
+      id: item.id || uidLocal(),
       status: item.status || 'ativo',
       criadoEm: item.criadoEm || new Date().toISOString(),
     };
     setData((d) => ({
       ...d,
       entMotoboys: novo
-        ? [...(d.entMotoboys || []), registro]
-        : (d.entMotoboys || []).map((m) => (m.id === registro.id ? registro : m)),
+        ? [...(d.entMotoboys || []), reg]
+        : (d.entMotoboys || []).map((m) => (m.id === reg.id ? reg : m)),
     }));
     setForm(null);
   }
 
   function excluir(m) {
-    setData((d) => ({ ...d, entMotoboys: (d.entMotoboys || []).filter((x) => x.id !== m.id) }));
+    setData((d) => ({
+      ...d,
+      entMotoboys: (d.entMotoboys || []).filter((x) => x.id !== m.id),
+      entTarifas: (d.entTarifas || []).filter((t) => !(t.tipo === 'motoboy' && t.refId === m.id)),
+    }));
     setDelAlvo(null);
+  }
+
+  function salvarTarifa(motoboyId, valores) {
+    setData((d) => {
+      const arr = d.entTarifas || [];
+      const atual = arr.find((t) => t.tipo === 'motoboy' && t.refId === motoboyId);
+      const anterior = atual
+        ? { valorEntrega: atual.valorEntrega, valorColeta: atual.valorColeta }
+        : null;
+      const comHist = registrarHistorico(atual || {}, {
+        acao: atual ? 'tarifa alterada' : 'tarifa definida',
+        campo: 'tarifa',
+        de: anterior,
+        para: { valorEntrega: valores.valorEntrega, valorColeta: valores.valorColeta },
+        motivo: valores.motivo,
+      });
+      const novo = {
+        ...comHist,
+        id: atual?.id || uidLocal(),
+        tipo: 'motoboy',
+        refId: motoboyId,
+        valorEntrega: valores.valorEntrega,
+        valorColeta: valores.valorColeta,
+        modoPagamento: valores.modoPagamento,
+        vigenciaInicio: todayISO(),
+      };
+      return { ...d, entTarifas: atual ? arr.map((t) => (t.id === novo.id ? novo : t)) : [...arr, novo] };
+    });
+    setTarifaAlvo(null);
   }
 
   // ----------------------------------------------------------
   //   Convite pessoal
   // ----------------------------------------------------------
   //   Grava em convites/{codigo} na RAIZ do banco — precisa ficar
-  //   fora de companies/ para o motoboy conseguir validar o código
-  //   antes de ser membro da empresa. O doc não guarda nada
-  //   sensível: só amarra código → empresa → cadastro.
+  //   fora de companies/ para o motoboy validar o código antes de
+  //   ser membro da empresa. Não guarda nada sensível: só amarra
+  //   código → empresa → cadastro.
   async function gerarConvite(m) {
     setErro('');
-    if (!company?.id) { setErro('Empresa não identificada. Recarregue a página e tente de novo.'); return; }
+    if (!company?.id) { setErro('Empresa não identificada. Recarregue a página.'); return; }
     try {
       const codigo = gerarCodigoConvite();
       await setDoc(doc(fdb, 'convites', codigo), {
@@ -167,12 +172,10 @@ function Motoboys({ data, setData }) {
         usado: false,
         criadoEm: serverTimestamp(),
       });
-      // Guarda o último código no cadastro para o dono reconsultar.
       setData((d) => ({
         ...d,
         entMotoboys: (d.entMotoboys || []).map((x) =>
-          x.id === m.id ? { ...x, conviteCodigo: codigo, conviteEm: new Date().toISOString() } : x
-        ),
+          x.id === m.id ? { ...x, conviteCodigo: codigo, conviteEm: new Date().toISOString() } : x),
       }));
       setConvite({ codigo, nome: m.nome });
     } catch (e) {
@@ -187,8 +190,7 @@ function Motoboys({ data, setData }) {
     setData((d) => ({
       ...d,
       entMotoboys: (d.entMotoboys || []).map((x) =>
-        x.id === m.id ? { ...x, conviteCodigo: '', conviteEm: '' } : x
-      ),
+        x.id === m.id ? { ...x, conviteCodigo: '', conviteEm: '' } : x),
     }));
   }
 
@@ -202,71 +204,67 @@ function Motoboys({ data, setData }) {
               Cadastre a equipe e gere o convite de acesso ao app
             </p>
           </div>
-          <button className="btn btn-primary" onClick={() => setForm({})}>
-            <Plus size={15} /> Novo motoboy
-          </button>
+          <button className="btn btn-primary" onClick={() => setForm({})}><Plus size={15} /> Novo motoboy</button>
         </div>
 
         <div className="ent-busca">
           <Search size={15} />
-          <input
-            className="inp"
-            style={{ border: 0, padding: '6px 0' }}
-            placeholder="Buscar por nome, telefone ou região"
-            value={busca}
-            onChange={(e) => setBusca(e.target.value)}
-          />
+          <input className="inp" placeholder="Buscar por nome, telefone ou região"
+            value={busca} onChange={(e) => setBusca(e.target.value)} />
         </div>
 
         {erro && <div className="ent-erro"><AlertTriangle size={14} /> {erro}</div>}
 
         {!filtrados.length ? (
-          <div className="ent-vazio">
-            <Bike size={34} />
-            <p>Nenhum motoboy cadastrado ainda.</p>
-          </div>
+          <Vazio icon={Bike} titulo="Nenhum motoboy cadastrado"
+            sub="Cadastre a equipe e envie o convite de acesso." />
         ) : (
           <div className="ent-grid">
             {filtrados.map((m) => (
-              <CardMotoboy
-                key={m.id}
-                m={m}
+              <CardMotoboy key={m.id} m={m}
+                tarifa={tarifaDoMotoboy(m.id, tarifas, cfg)}
+                base={bases.find((b) => b.id === m.baseId)}
                 podeConvidar={isOwner}
                 onEditar={() => setForm(m)}
                 onExcluir={() => setDelAlvo(m)}
+                onTarifa={() => setTarifaAlvo(m)}
                 onConvite={() => gerarConvite(m)}
                 onRevogar={() => revogarConvite(m)}
-                onVerCodigo={() => setConvite({ codigo: m.conviteCodigo, nome: m.nome })}
-              />
+                onVerCodigo={() => setConvite({ codigo: m.conviteCodigo, nome: m.nome })} />
             ))}
           </div>
         )}
       </div>
 
-      {form && <FormMotoboy item={form} onSalvar={salvar} onCancelar={() => setForm(null)} />}
+      {form && <FormMotoboy item={form} bases={bases} onSalvar={salvar} onCancelar={() => setForm(null)} />}
+      {tarifaAlvo && (
+        <FormTarifaMotoboy motoboy={tarifaAlvo} atual={tarifaDoMotoboy(tarifaAlvo.id, tarifas, cfg)} cfg={cfg}
+          onSalvar={(v) => salvarTarifa(tarifaAlvo.id, v)} onCancelar={() => setTarifaAlvo(null)} />
+      )}
       {convite && <ModalConvite convite={convite} onFechar={() => setConvite(null)} />}
       {delAlvo && (
-        <ModalConfirma
-          titulo="Excluir motoboy"
-          mensagem={`Remover ${delAlvo.nome || 'este motoboy'} do cadastro? As coletas e rotas já registradas continuam no histórico.`}
-          onCancelar={() => setDelAlvo(null)}
-          onConfirmar={() => excluir(delAlvo)}
-        />
+        <ModalConfirma titulo="Excluir motoboy"
+          mensagem={`Remover ${delAlvo.nome || 'este motoboy'}? As coletas e rotas já registradas continuam no histórico.`}
+          onCancelar={() => setDelAlvo(null)} onConfirmar={() => excluir(delAlvo)} />
       )}
     </>
   );
 }
 
-function CardMotoboy({ m, podeConvidar, onEditar, onExcluir, onConvite, onRevogar, onVerCodigo }) {
+function CardMotoboy({ m, tarifa, base, podeConvidar, onEditar, onExcluir, onTarifa, onConvite, onRevogar, onVerCodigo }) {
   const iniciais = (m.nome || '?').trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
   const temConvite = !!m.conviteCodigo;
+  const duplo = tarifa.modoPagamento === MODO_PAGAMENTO.COLETA_ENTREGA;
+
   return (
     <div className="ent-card-mb">
       <div className="ent-mb-head">
         <div className="ent-mb-av">{iniciais}</div>
         <div className="min-w-0 flex-1">
-          <div className="ent-mb-nome">{m.nome || 'Sem nome'}</div>
-          <div className="ent-mb-sub">{m.regiao || 'Sem região'}{m.telefone ? ` · ${m.telefone}` : ''}</div>
+          <div className="ent-mb-nome" title={m.nome}>{m.nome || 'Sem nome'}</div>
+          <div className="ent-mb-sub">
+            {[m.regiao, base?.nome, m.telefone].filter(Boolean).join(' · ') || 'Sem região'}
+          </div>
         </div>
         <span className={`ent-status ${m.status === 'inativo' ? 'off' : 'on'}`}>
           {m.status === 'inativo' ? 'Inativo' : 'Ativo'}
@@ -274,6 +272,13 @@ function CardMotoboy({ m, podeConvidar, onEditar, onExcluir, onConvite, onRevoga
       </div>
 
       {m.pix && <div className="ent-mb-pix">PIX: {m.pix}</div>}
+
+      <div className="ent-tarifa">
+        <Coins size={14} />
+        <span><b>{fmtBRL(tarifa.valorEntrega)}</b> por entrega</span>
+        {duplo && <span>· <b>{fmtBRL(tarifa.valorColeta)}</b> por coleta</span>}
+        {!tarifa.personalizada && <span className="ent-tag-pad">padrão</span>}
+      </div>
 
       <div className="ent-mb-acesso">
         {temConvite ? (
@@ -286,15 +291,11 @@ function CardMotoboy({ m, podeConvidar, onEditar, onExcluir, onConvite, onRevoga
       </div>
 
       <div className="ent-mb-acoes">
-        {podeConvidar && (
-          temConvite ? (
-            <button className="btn btn-ghost ent-b-sm" onClick={onRevogar}>Revogar</button>
-          ) : (
-            <button className="btn btn-primary ent-b-sm" onClick={onConvite}>
-              <KeyRound size={13} /> Gerar convite
-            </button>
-          )
+        {podeConvidar && (temConvite
+          ? <button className="btn btn-ghost ent-b-sm" onClick={onRevogar}>Revogar</button>
+          : <button className="btn btn-primary ent-b-sm" onClick={onConvite}><KeyRound size={13} /> Convite</button>
         )}
+        <button className="btn btn-ghost ent-b-sm" onClick={onTarifa}><Coins size={13} /> Tarifa</button>
         <button className="btn btn-ghost ent-b-sm" onClick={onEditar}><Pencil size={13} /></button>
         <button className="btn btn-ghost ent-b-sm ent-b-del" onClick={onExcluir}><Trash2 size={13} /></button>
       </div>
@@ -302,7 +303,7 @@ function CardMotoboy({ m, podeConvidar, onEditar, onExcluir, onConvite, onRevoga
   );
 }
 
-function FormMotoboy({ item, onSalvar, onCancelar }) {
+function FormMotoboy({ item, bases, onSalvar, onCancelar }) {
   const [f, setF] = useState({
     nome: item.nome || '',
     telefone: item.telefone || '',
@@ -332,25 +333,29 @@ function FormMotoboy({ item, onSalvar, onCancelar }) {
         <Campo label="Documento">
           <input className="inp" value={f.documento} onChange={(e) => setF({ ...f, documento: e.target.value })} placeholder="CPF ou RG" />
         </Campo>
-        <Campo label="Chave PIX">
-          <input className="inp" value={f.pix} onChange={(e) => setF({ ...f, pix: e.target.value })} placeholder="Usada nos repasses" />
+        <Campo label="Chave PIX" dica="Usada nos repasses.">
+          <input className="inp" value={f.pix} onChange={(e) => setF({ ...f, pix: e.target.value })} />
         </Campo>
         <Campo label="Região">
           <input className="inp" value={f.regiao} onChange={(e) => setF({ ...f, regiao: e.target.value })} placeholder="Ex.: Osasco" />
         </Campo>
+        <Campo label="Base">
+          <select className="inp" value={f.baseId} onChange={(e) => setF({ ...f, baseId: e.target.value })}>
+            <option value="">Sem base fixa</option>
+            {bases.map((b) => <option key={b.id} value={b.id}>{b.nome}</option>)}
+          </select>
+        </Campo>
         <Campo label="Status">
           <select className="inp" value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}>
-            {STATUS_MOTOBOY.map((s) => <option key={s} value={s}>{s === 'ativo' ? 'Ativo' : 'Inativo'}</option>)}
+            <option value="ativo">Ativo</option>
+            <option value="inativo">Inativo</option>
           </select>
         </Campo>
         <Campo label="Observações" span={2}>
           <textarea className="inp" rows={2} value={f.obs} onChange={(e) => setF({ ...f, obs: e.target.value })} />
         </Campo>
       </div>
-      <p className="ent-nota">
-        A tarifa deste motoboy é definida em Configurações → Entregas. Deixando em branco, vale a tarifa padrão da empresa.
-      </p>
-      {err && <div className="ent-erro"><AlertTriangle size={14} /> {err}</div>}
+      {err && <div className="ent-erro">{err}</div>}
       <div className="flex gap-2 justify-end mt-4">
         <button className="btn btn-ghost" onClick={onCancelar}>Cancelar</button>
         <button className="btn btn-primary" onClick={submit}>Salvar</button>
@@ -359,10 +364,64 @@ function FormMotoboy({ item, onSalvar, onCancelar }) {
   );
 }
 
+function FormTarifaMotoboy({ motoboy, atual, cfg, onSalvar, onCancelar }) {
+  const [modo, setModo] = useState(atual.modoPagamento);
+  const [entrega, setEntrega] = useState(String(atual.valorEntrega ?? ''));
+  const [coleta, setColeta] = useState(String(atual.valorColeta ?? ''));
+  const [motivo, setMotivo] = useState('');
+  const [err, setErr] = useState('');
+  const duplo = modo === MODO_PAGAMENTO.COLETA_ENTREGA;
+
+  function submit() {
+    const ve = Number(String(entrega).replace(',', '.'));
+    const vc = Number(String(coleta).replace(',', '.')) || 0;
+    if (!Number.isFinite(ve) || ve <= 0) { setErr('Informe o valor por entrega.'); return; }
+    if (duplo && vc <= 0) { setErr('No modelo coleta + entrega, informe também o valor da coleta.'); return; }
+    if (cfg.exigirJustificativaTarifa && atual.personalizada && !motivo.trim()) {
+      setErr('Descreva o motivo da alteração. Fica registrado no histórico.'); return;
+    }
+    onSalvar({ valorEntrega: ve, valorColeta: duplo ? vc : 0, modoPagamento: modo, motivo: motivo.trim() });
+  }
+
+  return (
+    <ModalBase titulo={`Tarifa — ${motoboy.nome}`} onFechar={onCancelar}>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Campo label="Modelo de pagamento" span={2}
+          dica="Deixe igual ao padrão da empresa, a menos que este motoboy tenha acordo diferente.">
+          <select className="inp" value={modo} onChange={(e) => setModo(e.target.value)}>
+            <option value={MODO_PAGAMENTO.ENTREGA}>Somente por entrega</option>
+            <option value={MODO_PAGAMENTO.COLETA_ENTREGA}>Por coleta + por entrega</option>
+          </select>
+        </Campo>
+        <Campo label="Valor por entrega (R$) *">
+          <input className="inp" inputMode="decimal" value={entrega} onChange={(e) => setEntrega(e.target.value)} placeholder="6,50" />
+        </Campo>
+        {duplo && (
+          <Campo label="Valor por coleta (R$) *">
+            <input className="inp" inputMode="decimal" value={coleta} onChange={(e) => setColeta(e.target.value)} placeholder="2,00" />
+          </Campo>
+        )}
+        <Campo label="Motivo da alteração" span={2}>
+          <input className="inp" value={motivo} onChange={(e) => setMotivo(e.target.value)}
+            placeholder="Ex.: aumento combinado por tempo de casa" />
+        </Campo>
+      </div>
+      <p className="ent-nota">
+        Fechamentos já emitidos não mudam: cada coleta e cada rota carrega a tarifa da época.
+      </p>
+      {err && <div className="ent-erro">{err}</div>}
+      <div className="flex gap-2 justify-end mt-4">
+        <button className="btn btn-ghost" onClick={onCancelar}>Cancelar</button>
+        <button className="btn btn-primary" onClick={submit}>Salvar tarifa</button>
+      </div>
+    </ModalBase>
+  );
+}
+
 function ModalConvite({ convite, onFechar }) {
   const [copiado, setCopiado] = useState(false);
   const texto =
-    `Oi${convite.nome ? ` ${convite.nome.split(' ')[0]}` : ''}! Seu acesso ao app está pronto.\n\n` +
+    `Oi${convite.nome ? ` ${String(convite.nome).split(' ')[0]}` : ''}! Seu acesso ao app está pronto.\n\n` +
     `1. Abra o app\n2. Toque em "Criar conta" e depois em "Cadastro de motoboy"\n` +
     `3. Use o código: ${convite.codigo}\n\nO código só funciona uma vez.`;
 
@@ -392,95 +451,3 @@ function ModalConvite({ convite, onFechar }) {
     </ModalBase>
   );
 }
-
-// ---- primitivos locais (o módulo não depende de exports do App.jsx) ----
-function ModalBase({ titulo, children, onFechar }) {
-  return (
-    <div className="ent-ov" onClick={onFechar}>
-      <div className="ent-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="ent-modal-h">
-          <h3>{titulo}</h3>
-          <button className="ent-x" onClick={onFechar}><X size={17} /></button>
-        </div>
-        <div className="ent-modal-b">{children}</div>
-      </div>
-    </div>
-  );
-}
-
-function Campo({ label, children, span = 1 }) {
-  return (
-    <label className={span === 2 ? 'sm:col-span-2' : ''}>
-      <span className="ent-lbl">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function ModalConfirma({ titulo, mensagem, onCancelar, onConfirmar }) {
-  return (
-    <ModalBase titulo={titulo} onFechar={onCancelar}>
-      <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{mensagem}</p>
-      <div className="flex gap-2 justify-end mt-4">
-        <button className="btn btn-ghost" onClick={onCancelar}>Cancelar</button>
-        <button className="btn btn-danger" onClick={onConfirmar}>Excluir</button>
-      </div>
-    </ModalBase>
-  );
-}
-
-const ENT_CSS = `
-.ent-tabs{ display:flex; gap:6px; overflow-x:auto; padding-bottom:2px; }
-.ent-tab{ flex-shrink:0; padding:8px 14px; border-radius:11px; border:1px solid #E5E7EB; background:#fff; font-size:13px; font-weight:500; color:#6B7280; cursor:pointer; display:inline-flex; align-items:center; gap:6px; }
-.ent-tab.on{ background:var(--color-primary,#0B1533); border-color:var(--color-primary,#0B1533); color:#fff; }
-.ent-tab:disabled{ opacity:.5; cursor:default; }
-.ent-breve{ font-size:9.5px; text-transform:uppercase; letter-spacing:.04em; background:#F3F4F6; color:#9CA3AF; padding:2px 5px; border-radius:5px; }
-
-.ent-busca{ display:flex; align-items:center; gap:8px; border:1px solid #D1D5DB; border-radius:12px; padding:2px 12px; color:#9CA3AF; margin-bottom:14px; }
-.ent-busca .inp:focus{ outline:none; box-shadow:none; }
-
-.ent-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(270px,1fr)); gap:12px; }
-.ent-card-mb{ border:1px solid #E5E7EB; border-radius:15px; padding:14px; background:#fff; }
-.ent-mb-head{ display:flex; align-items:center; gap:10px; }
-.ent-mb-av{ width:40px; height:40px; border-radius:11px; background:var(--color-primary,#0B1533); color:#fff; display:flex; align-items:center; justify-content:center; font-size:13.5px; font-weight:650; flex-shrink:0; }
-.ent-mb-nome{ font-size:14.5px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.ent-mb-sub{ font-size:12px; color:#6B7280; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.ent-status{ font-size:10.5px; font-weight:600; padding:3px 8px; border-radius:999px; flex-shrink:0; }
-.ent-status.on{ background:#D1FAE5; color:#047857; }
-.ent-status.off{ background:#F3F4F6; color:#6B7280; }
-.ent-mb-pix{ margin-top:10px; font-size:11.5px; color:#6B7280; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.ent-mb-acesso{ margin-top:10px; }
-.ent-mini{ display:inline-flex; align-items:center; gap:5px; font-size:11.5px; padding:5px 9px; border-radius:8px; border:0; cursor:pointer; font-family:inherit; }
-.ent-mini.ok{ background:#DBEAFE; color:#1D4ED8; font-weight:600; }
-.ent-mini.neutro{ background:#F9FAFB; color:#9CA3AF; }
-.ent-mb-acoes{ display:flex; gap:6px; margin-top:12px; }
-.ent-b-sm{ padding:7px 11px; font-size:12.5px; }
-.ent-b-del{ color:#B91C1C; }
-
-.ent-vazio{ text-align:center; padding:44px 20px; color:#9CA3AF; }
-.ent-vazio p{ margin-top:10px; font-size:13.5px; }
-.ent-erro{ display:flex; align-items:center; gap:7px; background:#FEE2E2; border:1px solid #FECACA; color:#B91C1C; padding:9px 12px; border-radius:10px; font-size:12.5px; margin:10px 0; }
-.ent-nota{ margin-top:12px; font-size:11.5px; color:#6B7280; background:#F9FAFB; border-radius:9px; padding:9px 11px; }
-
-.ent-ov{ position:fixed; inset:0; background:rgba(11,19,36,.45); display:flex; align-items:center; justify-content:center; padding:16px; z-index:60; }
-.ent-modal{ background:#fff; border-radius:17px; width:100%; max-width:520px; max-height:90vh; overflow:auto; }
-.ent-modal-h{ display:flex; align-items:center; justify-content:space-between; padding:16px 18px; border-bottom:1px solid #F1F2F4; position:sticky; top:0; background:#fff; }
-.ent-modal-h h3{ font-size:15.5px; font-weight:650; margin:0; }
-.ent-x{ background:transparent; border:0; cursor:pointer; color:#6B7280; padding:4px; }
-.ent-modal-b{ padding:18px; }
-.ent-lbl{ display:block; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:#6B7280; font-weight:500; margin-bottom:5px; }
-
-.ent-cod-box{ background:#F9FAFB; border:1px dashed #D1D5DB; border-radius:13px; padding:18px; text-align:center; }
-.ent-cod-lbl{ display:block; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:#6B7280; margin-bottom:6px; }
-.ent-cod{ font-size:27px; font-weight:700; letter-spacing:.06em; color:var(--color-primary,#0B1533); font-family:ui-monospace,monospace; }
-.ent-avisos{ list-style:none; padding:0; margin:16px 0 0; display:flex; flex-direction:column; gap:8px; }
-.ent-avisos li{ display:flex; align-items:flex-start; gap:7px; font-size:12.5px; color:#6B7280; }
-.ent-avisos svg{ color:#047857; flex-shrink:0; margin-top:1px; }
-
-.ent-crash{ background:#fff; border:1px solid #FECACA; border-radius:16px; padding:26px 22px; text-align:center; color:#6B7280; }
-.ent-crash svg{ color:#DC2626; }
-.ent-crash h3{ font-size:15.5px; font-weight:650; color:#0B1324; margin:12px 0 4px; }
-.ent-crash p{ font-size:13px; margin:0; }
-.ent-crash-msg{ margin:16px auto 0; max-width:560px; text-align:left; background:#FEF2F2; border:1px solid #FECACA; color:#991B1B; padding:12px 14px; border-radius:10px; font-size:12px; font-family:ui-monospace,monospace; white-space:pre-wrap; word-break:break-word; }
-.ent-crash-dica{ margin-top:12px !important; font-size:12px; }
-`;

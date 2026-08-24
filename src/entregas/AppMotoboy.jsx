@@ -1,38 +1,33 @@
 import { useMemo, useState } from 'react';
 import {
-  Package, Bike, User, LogOut, Loader2, AlertTriangle, CheckCircle2, Clock, Inbox,
+  Package, Bike, User, LogOut, Loader2, AlertTriangle, CheckCircle2,
+  Clock, Inbox, Plus, Minus, Check,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { useMotoboySync } from './useMotoboySync';
 import { COLETA_STATUS, ROTA_STATUS } from './constants';
 import { statusConciliacao } from './engine';
+import { criarColetaMotoboy } from './dados';
+import { SeletorGrande, Vazio, Chip, ENT_CSS, fmtData, hojeISO } from './ui';
 
 // ============================================================
 //   APP DO MOTOBOY
 // ------------------------------------------------------------
 //   Aplicativo separado, não uma versão escondida do painel.
-//   O Sidebar, o Dashboard e os módulos de gestão nem chegam a
-//   ser montados quando o papel é 'motoboy'.
+//   AppInner (sidebar, dashboard, financeiro) nem chega a ser
+//   montado quando o papel é 'motoboy'.
 //
-//   Desenho mobile-first: alvos grandes, pouca informação por
-//   tela, sem tabela larga. Ele usa isso na rua, com uma mão,
-//   às vezes de capacete.
-//
-//   Registrar coleta e enviar comprovante entram no Bloco 3.
+//   Mobile-first de verdade: alvos altos, pouca informação por
+//   tela, listas em folha que sobem de baixo. Ele usa isso na
+//   rua, com uma mão só.
 // ============================================================
-
-const fmtData = (iso) => {
-  if (!iso) return '—';
-  const [a, m, d] = iso.split('-');
-  return `${d}/${m}/${a}`;
-};
-
-const hojeISO = () => new Date().toISOString().slice(0, 10);
 
 export default function AppMotoboy() {
   const { user, company, logout, motoboyId, erroAcesso } = useAuth();
   const { dados, pronto, erro } = useMotoboySync(company?.id, user?.uid, motoboyId);
   const [aba, setAba] = useState('coletas');
+  const [registrando, setRegistrando] = useState(false);
+  const [toast, setToast] = useState('');
 
   const nome = dados.perfil?.nome || user?.displayName || 'Motoboy';
 
@@ -42,18 +37,21 @@ export default function AppMotoboy() {
     const rotasAbertas = dados.rotas.filter((r) => r.status === 'atribuida' || r.status === 'andamento');
     return {
       volumesHoje: coletasHoje.reduce((s, c) => s + (Number(c.qtdInformada) || 0), 0),
-      coletasHoje: coletasHoje.length,
-      rotasAbertas: rotasAbertas.length,
       aEntregar: rotasAbertas.reduce(
         (s, r) => s + Math.max(0, (Number(r.qtdAtribuida) || 0) - (Number(r.qtdConcluida) || 0)), 0
       ),
     };
   }, [dados]);
 
+  function avisar(msg) {
+    setToast(msg);
+    setTimeout(() => setToast(''), 3200);
+  }
+
   if (erroAcesso) {
     return (
       <div className="mb-wrap">
-        <style>{MB_CSS}</style>
+        <style>{ENT_CSS}{MB_CSS}</style>
         <div className="mb-center">
           <AlertTriangle size={34} color="#F59E0B" />
           <p className="mb-msg">{erroAcesso}</p>
@@ -65,16 +63,14 @@ export default function AppMotoboy() {
 
   return (
     <div className="mb-wrap">
-      <style>{MB_CSS}</style>
+      <style>{ENT_CSS}{MB_CSS}</style>
 
       <header className="mb-top">
         <div>
-          <div className="mb-hello">Olá, {nome.split(' ')[0]}</div>
+          <div className="mb-hello">Olá, {String(nome).split(' ')[0]}</div>
           <div className="mb-emp">{company?.nome || 'Empresa'}</div>
         </div>
-        <button className="mb-sair" onClick={logout} aria-label="Sair">
-          <LogOut size={18} />
-        </button>
+        <button className="mb-sair" onClick={logout} aria-label="Sair"><LogOut size={18} /></button>
       </header>
 
       <section className="mb-cards">
@@ -98,9 +94,30 @@ export default function AppMotoboy() {
         ) : aba === 'entregas' ? (
           <ListaRotas rotas={dados.rotas} bases={dados.bases} />
         ) : (
-          <Perfil perfil={dados.perfil} user={user} coletas={dados.coletas} rotas={dados.rotas} />
+          <Perfil perfil={dados.perfil} user={user} bases={dados.bases}
+            coletas={dados.coletas} rotas={dados.rotas} />
         )}
       </main>
+
+      {aba === 'coletas' && pronto && (
+        <button className="mb-fab" onClick={() => setRegistrando(true)}>
+          <Plus size={20} /> Registrar coleta
+        </button>
+      )}
+
+      {registrando && (
+        <RegistrarColeta
+          dados={dados}
+          companyId={company?.id}
+          motoboyUid={user?.uid}
+          motoboyId={motoboyId}
+          motoboyNome={nome}
+          onFechar={() => setRegistrando(false)}
+          onSalvo={(qtd) => { setRegistrando(false); avisar(`${qtd} volumes registrados`); }}
+        />
+      )}
+
+      {toast && <div className="mb-toast"><CheckCircle2 size={16} /> {toast}</div>}
 
       <nav className="mb-nav">
         <BotaoNav ativo={aba === 'coletas'} onClick={() => setAba('coletas')} icon={Package} label="Coletas" />
@@ -120,27 +137,149 @@ function BotaoNav({ ativo, onClick, icon: Icon, label }) {
   );
 }
 
-function Vazio({ icon: Icon, titulo, sub }) {
+// ------------------------------------------------------------
+//   Registrar coleta
+// ------------------------------------------------------------
+//   Fluxo de três toques: escolhe a loja, ajusta a quantidade,
+//   confirma. A base vem preenchida pela loja e continua
+//   trocável — o motoboy às vezes precisa desviar para outra.
+// ------------------------------------------------------------
+function RegistrarColeta({ dados, companyId, motoboyUid, motoboyId, motoboyNome, onFechar, onSalvo }) {
+  const ativos = (dados.lojistas || []).filter((l) => l.status !== 'inativo');
+  const basesAtivas = (dados.bases || []).filter((b) => b.status !== 'inativa');
+
+  const [lojistaId, setLojistaId] = useState('');
+  const [baseId, setBaseId] = useState('');
+  const [plataforma, setPlataforma] = useState('');
+  const [qtd, setQtd] = useState(0);
+  const [obs, setObs] = useState('');
+  const [erro, setErro] = useState('');
+  const [salvando, setSalvando] = useState(false);
+
+  const lojista = ativos.find((l) => l.id === lojistaId);
+  const base = basesAtivas.find((b) => b.id === baseId);
+
+  function escolherLoja(id) {
+    const l = ativos.find((x) => x.id === id);
+    setLojistaId(id);
+    // Base pré-preenchida pela loja, mas continua editável: às vezes
+    // o motoboy precisa desviar para outra base num dia atípico.
+    if (l?.baseId) setBaseId(l.baseId);
+    if (l?.plataforma) setPlataforma(l.plataforma);
+    setErro('');
+  }
+
+  async function salvar() {
+    setErro('');
+    setSalvando(true);
+    try {
+      await criarColetaMotoboy(companyId, {
+        motoboyUid, motoboyId, motoboyNome,
+        lojistaId, lojistaNome: lojista?.nome || '',
+        plataforma, baseId, baseNome: base?.nome || '',
+        quantidade: qtd, obs,
+      });
+      onSalvo(qtd);
+    } catch (e) {
+      console.error('[coleta]', e);
+      setErro(e?.message || 'Não foi possível registrar. Tente de novo.');
+      setSalvando(false);
+    }
+  }
+
+  const plataformas = dados.config?.plataformas || [];
+
   return (
-    <div className="mb-vazio">
-      <Icon size={34} />
-      <p className="mb-vazio-t">{titulo}</p>
-      {sub && <p className="mb-vazio-s">{sub}</p>}
+    <div className="mb-full">
+      <header className="mb-full-h">
+        <button onClick={onFechar}>Cancelar</button>
+        <span>Registrar coleta</span>
+        <span style={{ width: 62 }} />
+      </header>
+
+      <div className="mb-full-b">
+        <SeletorGrande
+          label="Loja"
+          valor={lojistaId}
+          onChange={escolherLoja}
+          placeholder="Escolher a loja"
+          vazioMsg="Nenhuma loja cadastrada. Fale com o responsável."
+          opcoes={ativos.map((l) => ({ valor: l.id, rotulo: l.nome, sub: l.regiao || l.plataforma }))}
+        />
+
+        <SeletorGrande
+          label="Base de destino"
+          valor={baseId}
+          onChange={setBaseId}
+          placeholder="Escolher a base"
+          vazioMsg="Nenhuma base cadastrada. Fale com o responsável."
+          opcoes={basesAtivas.map((b) => ({
+            valor: b.id, rotulo: b.nome,
+            sub: b.tipo === 'parceira' ? 'Parceira' : 'Própria',
+          }))}
+        />
+
+        {plataformas.length > 1 && (
+          <SeletorGrande
+            label="Plataforma"
+            valor={plataforma}
+            onChange={setPlataforma}
+            placeholder="Escolher"
+            opcoes={plataformas.map((p) => ({ valor: p, rotulo: p }))}
+          />
+        )}
+
+        <div className="mb-qtd-box">
+          <span className="sg-lbl">Quantidade de volumes</span>
+          <div className="mb-contador">
+            <button onClick={() => setQtd((q) => Math.max(0, q - 1))} aria-label="Menos"><Minus size={22} /></button>
+            <input
+              className="mb-qtd-in"
+              inputMode="numeric"
+              value={qtd}
+              onChange={(e) => setQtd(Math.max(0, Math.round(Number(e.target.value.replace(/\D/g, '')) || 0)))}
+            />
+            <button onClick={() => setQtd((q) => q + 1)} aria-label="Mais"><Plus size={22} /></button>
+          </div>
+          <div className="mb-atalhos">
+            {[10, 20, 50].map((n) => (
+              <button key={n} onClick={() => setQtd((q) => q + n)}>+{n}</button>
+            ))}
+            {qtd > 0 && <button className="limpar" onClick={() => setQtd(0)}>Zerar</button>}
+          </div>
+        </div>
+
+        <label className="sg">
+          <span className="sg-lbl">Observação (opcional)</span>
+          <input className="mb-inp" value={obs} onChange={(e) => setObs(e.target.value)}
+            placeholder="Ex.: dois pacotes danificados" />
+        </label>
+
+        {erro && <div className="mb-alerta" style={{ margin: '4px 0 0' }}><AlertTriangle size={15} /> {erro}</div>}
+
+        <p className="mb-aviso-conf">
+          O responsável vai confirmar essa quantidade com a loja. Registre o que você realmente retirou.
+        </p>
+      </div>
+
+      <div className="mb-full-f">
+        <button className="mb-btn-grande" disabled={salvando || !lojistaId || !baseId || qtd <= 0} onClick={salvar}>
+          {salvando ? <Loader2 size={19} className="mb-spin" /> : <><Check size={19} /> Confirmar coleta</>}
+        </button>
+      </div>
     </div>
   );
 }
 
-function Chip({ lista, k }) {
-  const s = lista.find((x) => x.k === k) || lista[0];
-  return <span className="mb-chip" style={{ color: s.cor, background: s.bg }}>{s.label}</span>;
-}
-
+// ------------------------------------------------------------
 function ListaColetas({ coletas, lojistas }) {
-  const nomeLojista = (id) => lojistas.find((l) => l.id === id)?.nome || 'Lojista';
-  const ordenadas = [...coletas].sort((a, b) => String(b.data).localeCompare(String(a.data)));
+  const nomeLojista = (c) => lojistas.find((l) => l.id === c.lojistaId)?.nome || c.lojistaNome || 'Loja';
+  const ordenadas = [...coletas].sort((a, b) =>
+    `${b.data} ${b.hora || ''}`.localeCompare(`${a.data} ${a.hora || ''}`));
 
   if (!ordenadas.length) {
-    return <Vazio icon={Inbox} titulo="Nenhuma coleta registrada" sub="Suas retiradas aparecem aqui assim que forem lançadas." />;
+    return <Vazio icon={Inbox} titulo="Nenhuma coleta registrada"
+      sub="Toque em Registrar coleta assim que retirar os pacotes." />;
   }
 
   return (
@@ -148,15 +287,20 @@ function ListaColetas({ coletas, lojistas }) {
       {ordenadas.map((c) => (
         <article key={c.id} className="mb-item">
           <div className="mb-item-top">
-            <span className="mb-item-nome">{nomeLojista(c.lojistaId)}</span>
+            <span className="mb-item-nome">{nomeLojista(c)}</span>
             <Chip lista={COLETA_STATUS} k={statusConciliacao(c)} />
           </div>
           <div className="mb-item-linha">
             <strong className="mb-qtd">{c.qtdInformada || 0}</strong>
             <span className="mb-un">volumes</span>
-            <span className="mb-data"><Clock size={13} /> {fmtData(c.data)}</span>
+            <span className="mb-data"><Clock size={13} /> {fmtData(c.data)} {c.hora}</span>
           </div>
-          {c.plataforma && <div className="mb-item-sub">{c.plataforma}</div>}
+          {c.baseNome && <div className="mb-item-sub">Base: {c.baseNome}</div>}
+          {c.qtdConfirmada != null && c.qtdConfirmada !== c.qtdInformada && (
+            <div className="mb-item-sub" style={{ color: '#B91C1C' }}>
+              Loja confirmou {c.qtdConfirmada}
+            </div>
+          )}
         </article>
       ))}
     </div>
@@ -168,7 +312,8 @@ function ListaRotas({ rotas, bases }) {
   const ordenadas = [...rotas].sort((a, b) => String(b.data).localeCompare(String(a.data)));
 
   if (!ordenadas.length) {
-    return <Vazio icon={Bike} titulo="Nenhuma rota atribuída" sub="Quando a base separar os pacotes, sua rota aparece aqui." />;
+    return <Vazio icon={Bike} titulo="Nenhuma rota atribuída"
+      sub="Quando a base separar os pacotes, sua rota aparece aqui." />;
   }
 
   return (
@@ -197,9 +342,16 @@ function ListaRotas({ rotas, bases }) {
   );
 }
 
-function Perfil({ perfil, user, coletas, rotas }) {
+function Perfil({ perfil, user, bases, coletas, rotas }) {
   const totalColetado = coletas.reduce((s, c) => s + (Number(c.qtdInformada) || 0), 0);
   const totalEntregue = rotas.reduce((s, r) => s + (Number(r.qtdConcluida) || 0), 0);
+  const base = bases.find((b) => b.id === perfil?.baseId);
+  const infos = [
+    perfil?.regiao && `Região: ${perfil.regiao}`,
+    base?.nome && `Base: ${base.nome}`,
+    perfil?.telefone,
+  ].filter(Boolean);
+
   return (
     <div className="mb-perfil">
       <div className="mb-avatar"><User size={26} /></div>
@@ -213,11 +365,12 @@ function Perfil({ perfil, user, coletas, rotas }) {
         <div className="mb-mini"><span>{rotas.length}</span><small>Rotas</small></div>
       </div>
 
-      {perfil?.regiao && (
-        <div className="mb-perfil-info"><CheckCircle2 size={14} /> Região: {perfil.regiao}</div>
-      )}
-      {perfil?.telefone && (
-        <div className="mb-perfil-info"><CheckCircle2 size={14} /> {perfil.telefone}</div>
+      {!!infos.length && (
+        <div className="mb-perfil-infos">
+          {infos.map((t, i) => (
+            <div key={i} className="mb-perfil-info"><CheckCircle2 size={14} /> {t}</div>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -229,7 +382,6 @@ const MB_CSS = `
 .mb-hello{ font-size:19px; font-weight:650; letter-spacing:-.01em; }
 .mb-emp{ font-size:12.5px; opacity:.7; margin-top:2px; }
 .mb-sair{ background:rgba(255,255,255,.12); border:0; color:#fff; width:38px; height:38px; border-radius:11px; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; }
-.mb-sair:active{ transform:scale(.95); }
 
 .mb-cards{ display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:0 14px; margin-top:-14px; }
 .mb-card{ background:#fff; border:1px solid #E5E7EB; border-radius:15px; padding:13px 14px; box-shadow:0 4px 14px rgba(11,19,36,.06); display:flex; flex-direction:column; gap:2px; }
@@ -239,7 +391,7 @@ const MB_CSS = `
 .mb-alerta{ margin:12px 14px 0; display:flex; align-items:center; gap:7px; background:#FEF3C7; border:1px solid #FDE68A; color:#92400E; padding:10px 12px; border-radius:11px; font-size:12.5px; }
 
 .mb-main{ flex:1; padding:16px 14px 8px; }
-.mb-lista{ display:flex; flex-direction:column; gap:10px; }
+.mb-lista{ display:flex; flex-direction:column; gap:10px; padding-bottom:64px; }
 .mb-item{ background:#fff; border:1px solid #E5E7EB; border-radius:15px; padding:13px 14px; }
 .mb-item-top{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
 .mb-item-nome{ font-weight:600; font-size:14.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -248,17 +400,12 @@ const MB_CSS = `
 .mb-un{ font-size:12.5px; color:#6B7280; }
 .mb-data{ margin-left:auto; display:inline-flex; align-items:center; gap:4px; font-size:12px; color:#6B7280; }
 .mb-item-sub{ margin-top:7px; font-size:12px; color:#6B7280; }
-.mb-chip{ font-size:11px; font-weight:600; padding:4px 9px; border-radius:999px; white-space:nowrap; flex-shrink:0; }
 .mb-barra{ height:6px; background:#F1F2F4; border-radius:999px; overflow:hidden; margin-top:10px; }
 .mb-barra-in{ height:100%; background:var(--color-accent,#1D4ED8); border-radius:999px; transition:width .3s ease; }
 
-.mb-vazio{ text-align:center; padding:52px 20px; color:#9CA3AF; }
-.mb-vazio-t{ font-size:14.5px; font-weight:600; color:#6B7280; margin:12px 0 4px; }
-.mb-vazio-s{ font-size:12.5px; margin:0; }
-
 .mb-center{ display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:60px 24px; text-align:center; }
 .mb-msg{ font-size:14px; color:#6B7280; margin:0; max-width:280px; }
-.mb-spin{ animation:mb-rot 1s linear infinite; color:#6B7280; }
+.mb-spin{ animation:mb-rot 1s linear infinite; }
 @keyframes mb-rot{ to{ transform:rotate(360deg);} }
 
 .mb-perfil{ background:#fff; border:1px solid #E5E7EB; border-radius:16px; padding:22px 16px; text-align:center; }
@@ -269,13 +416,40 @@ const MB_CSS = `
 .mb-mini{ background:#F9FAFB; border:1px solid #F1F2F4; border-radius:12px; padding:11px 8px; }
 .mb-mini span{ display:block; font-size:19px; font-weight:700; letter-spacing:-.02em; }
 .mb-mini small{ font-size:10.5px; color:#6B7280; }
-.mb-perfil-info{ display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:#6B7280; margin-top:8px; }
+.mb-perfil-infos{ display:flex; flex-direction:column; align-items:center; gap:6px; margin-top:12px; }
+.mb-perfil-info{ display:inline-flex; align-items:center; gap:6px; font-size:12.5px; color:#6B7280; }
 
 .mb-btn{ display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:12px 18px; border-radius:12px; font-size:14px; font-weight:600; border:0; cursor:pointer; }
 .mb-btn-ghost{ background:#E5E7EB; color:#0B1324; }
 
+.mb-fab{ position:fixed; left:14px; right:14px; bottom:calc(84px + env(safe-area-inset-bottom)); display:flex; align-items:center; justify-content:center; gap:8px; padding:16px; border-radius:15px; border:0; background:var(--color-primary,#0B1533); color:#fff; font-size:16px; font-weight:650; cursor:pointer; box-shadow:0 8px 22px rgba(11,19,36,.28); z-index:35; font-family:inherit; }
+.mb-fab:active{ transform:scale(.99); }
+
+.mb-toast{ position:fixed; left:14px; right:14px; bottom:calc(150px + env(safe-area-inset-bottom)); background:#065F46; color:#fff; padding:13px 15px; border-radius:13px; font-size:13.5px; display:flex; align-items:center; gap:8px; z-index:90; }
+
+.mb-full{ position:fixed; inset:0; background:var(--color-background,#F3F4F6); z-index:70; display:flex; flex-direction:column; font-family:'Geist',system-ui,sans-serif; color:#0B1324; }
+.mb-full-h{ display:flex; align-items:center; justify-content:space-between; padding:15px 16px; background:#fff; border-bottom:1px solid #E5E7EB; font-size:15px; font-weight:650; }
+.mb-full-h button{ background:transparent; border:0; color:#6B7280; font-size:14px; cursor:pointer; font-family:inherit; padding:0; width:62px; text-align:left; }
+.mb-full-b{ flex:1; overflow-y:auto; padding:18px 16px 24px; }
+.mb-full-f{ padding:12px 16px calc(14px + env(safe-area-inset-bottom)); background:#fff; border-top:1px solid #E5E7EB; }
+.mb-btn-grande{ width:100%; display:flex; align-items:center; justify-content:center; gap:8px; padding:17px; border-radius:15px; border:0; background:var(--color-primary,#0B1533); color:#fff; font-size:16.5px; font-weight:650; cursor:pointer; font-family:inherit; }
+.mb-btn-grande:disabled{ background:#D1D5DB; color:#9CA3AF; cursor:not-allowed; }
+
+.mb-qtd-box{ margin-bottom:15px; }
+.mb-contador{ display:flex; align-items:center; gap:10px; }
+.mb-contador button{ width:56px; height:56px; border-radius:14px; border:1.5px solid #D1D5DB; background:#fff; color:#0B1324; display:flex; align-items:center; justify-content:center; cursor:pointer; flex-shrink:0; }
+.mb-contador button:active{ background:#F3F4F6; }
+.mb-qtd-in{ flex:1; min-width:0; height:56px; border:1.5px solid #D1D5DB; border-radius:14px; text-align:center; font-size:30px; font-weight:700; letter-spacing:-.02em; color:#0B1324; background:#fff; font-family:inherit; }
+.mb-qtd-in:focus{ outline:none; border-color:var(--color-primary,#0B1533); }
+.mb-atalhos{ display:flex; gap:7px; margin-top:9px; flex-wrap:wrap; }
+.mb-atalhos button{ padding:9px 15px; border-radius:11px; border:1px solid #D1D5DB; background:#fff; font-size:14px; font-weight:600; color:#374151; cursor:pointer; font-family:inherit; }
+.mb-atalhos .limpar{ color:#B91C1C; border-color:#FECACA; margin-left:auto; font-weight:500; }
+
+.mb-inp{ width:100%; padding:14px 15px; border-radius:14px; border:1.5px solid #D1D5DB; font-size:15.5px; background:#fff; color:#0B1324; font-family:inherit; }
+.mb-inp:focus{ outline:none; border-color:var(--color-primary,#0B1533); }
+.mb-aviso-conf{ margin-top:14px; font-size:12.5px; color:#6B7280; background:#fff; border:1px solid #E5E7EB; border-radius:12px; padding:12px 13px; }
+
 .mb-nav{ position:fixed; left:0; right:0; bottom:0; background:#fff; border-top:1px solid #E5E7EB; display:grid; grid-template-columns:repeat(3,1fr); padding:6px 4px calc(6px + env(safe-area-inset-bottom)); z-index:40; }
-.mb-nav-b{ background:transparent; border:0; display:flex; flex-direction:column; align-items:center; gap:3px; padding:9px 4px; color:#9CA3AF; font-size:11px; font-weight:500; cursor:pointer; border-radius:12px; }
+.mb-nav-b{ background:transparent; border:0; display:flex; flex-direction:column; align-items:center; gap:3px; padding:9px 4px; color:#9CA3AF; font-size:11px; font-weight:500; cursor:pointer; border-radius:12px; font-family:inherit; }
 .mb-nav-b.on{ color:var(--color-primary,#0B1533); }
-.mb-nav-b:active{ background:#F3F4F6; }
 `;
