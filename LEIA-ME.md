@@ -1,117 +1,82 @@
-# Bloco 11 — Conta corrente de lojistas e motoboys
+# Módulo Entregas — pacote COMPLETO (v11)
+
+Este ZIP tem **a pasta `src/entregas` inteira** (16 arquivos) mais os dois
+geradores de PDF. Não é um remendo: substituindo essas pastas, o módulo fica
+na versão mais recente por completo, sem chance de ficar pela metade.
+
+Nada de Firebase. Nada de App.jsx, AuthContext, AuthGate ou useFirestoreSync.
+
+---
 
 ## Como subir
 
-Seis arquivos. Nada de Firebase, nada de App.jsx.
-
-`src/entregas/` — engine.js, ContaCorrente.jsx (novo), Lojistas.jsx,
-Entregas.jsx, Fechamentos.jsx
-`src/pdf/` — extrato.js (novo)
-
-Arraste a **pasta `src`** no GitHub.
+1. Descompacte o ZIP
+2. GitHub → **Add file → Upload files**
+3. Arraste a **pasta `src`** (o ícone da pasta, não os arquivos de dentro)
+4. Commit e aguarde o deploy
 
 ---
 
-## O levantamento, antes de codar
+## Como conferir se subiu certo
 
-**Já existia e foi reaproveitado, não recriado:**
+Abra Entregas. No canto direito da barra de abas aparece um selo cinza
+escrito **"Entregas v11"**.
 
-- Snapshot de tarifas (item 4 do seu prompt) — já estava completo. Cada coleta
-  guarda a tarifa de cada marketplace e cada rota guarda a tarifa por entrega,
-  congeladas no momento em que nasceram.
-- Aba Repasses (item 5) — total gerado, pago, saldo, status, pagamentos.
-  O Histórico do motoboy usa **a mesma função** de apuração.
-- PDF de cobrança do lojista — integrado ao histórico, não refeito.
-
-**Foi criado:**
-
-- Histórico Financeiro do lojista
-- Histórico de Repasses do motoboy
-- Extrato de Repasse em PDF
-- Registro de recebimento do lojista (não existia)
+Se o selo não aparecer, o deploy não pegou — não adianta testar o resto.
 
 ---
 
-## 1. Histórico Financeiro do lojista
+## Por que isso foi necessário
 
-Lojistas → botão **Histórico** no card.
+Pelos prints, os Blocos 10 e 11 não chegaram a entrar no ar. O card do
+lojista mostrava a tarifa antiga sem as etiquetas por marketplace, e faltava
+o botão Histórico. Sem esses dois blocos, nada do que você procurou existia:
 
-Linha do tempo de todos os fechamentos, do mais recente ao mais antigo, com
-período, volumes, tarifa média, total, recebido, saldo, vencimento, data do
-pagamento e situação. No topo, três cards: faturado, recebido, em aberto.
-
-Cada fechamento tem **PDF** e **Compartilhar** (WhatsApp) usando o gerador de
-cobrança que já existia.
-
-### Registro de recebimento
-
-Botão **Registrar recebimento**, com valor parcial permitido.
-
-A regra: o total do fechamento **nunca** é reduzido. O saldo é derivado.
-A conta a receber no Financeiro Empresa é baixada apenas quando o fechamento
-é quitado por completo — enquanto houver saldo, ela continua em aberto lá,
-porque é ela que responde "quanto ainda tenho a receber".
-
-> Efeito colateral honesto: um recebimento parcial só aparece no caixa quando
-> o lojista quitar. Se isso incomodar no uso real, a gente inverte.
-
-Um fechamento com recebimento registrado **não pode mais ser reaberto** —
-seria apagar histórico de caixa. Estorne o recebimento primeiro.
+- multi-marketplace na coleta (Bloco 10)
+- data retroativa (Bloco 10)
+- tarifa por marketplace (Bloco 10)
+- histórico financeiro do lojista (Bloco 11)
+- histórico e extrato do motoboy (Bloco 11)
 
 ---
 
-## 2. Histórico de Repasses do motoboy
+## Onde encontrar cada coisa
 
-Motoboys → botão **Histórico** no card.
+**Tarifa por marketplace** — Entregas → Lojistas → botão **Tarifa**.
+Tem o valor geral em cima e uma linha por marketplace embaixo. O que ficar
+em branco usa o valor geral. No card aparecem etiquetas azuis com cada valor.
 
-Quinzenas dos últimos 3, 6 ou 12 meses, com entregas, tarifa praticada,
-total gerado, pago, saldo, pagamentos realizados e situação.
+**Extrato de pagamento do motoboy** — Entregas → **Motoboys** → botão
+**Histórico** no card do motoboy → cada quinzena tem **Extrato PDF** e
+**Enviar**.
 
-**Fonte única:** esta tela lê os mesmos documentos da aba Repasses. Registrar
-um pagamento lá muda o histórico aqui no mesmo instante — não há segunda
-apuração nem dado duplicado.
+**Histórico financeiro do lojista** — Entregas → Lojistas → botão
+**Histórico** → linha do tempo com Registrar recebimento, PDF e Compartilhar.
 
----
-
-## 3. Extrato de Repasse em PDF
-
-Botão **Extrato PDF** em cada período.
-
-Mesmo padrão dos outros documentos: logo, marca d'água, timbrado, cor da
-paleta. Contém dados da empresa, dados do motoboy (nome, telefone, PIX,
-região, base), período, três cards de resumo, detalhamento com uma linha por
-rota (data, código, região, entregas, tarifa, valor), pagamentos já
-realizados, saldo em destaque, situação, data e hora de emissão e número
-único do documento.
-
-O botão **Enviar** abre o WhatsApp com o resumo pronto.
+**Multi-marketplace e data retroativa** — no app do motoboy, botão
+**Registrar coleta**. A tela agora tem um contador por marketplace e, abaixo,
+uma faixa com os últimos 7 dias (Hoje, Sáb 23, Sex 22...) mais um campo de
+data.
 
 ---
 
-## 4. Tarifa histórica — verificado
+## Sobre as Configurações travadas
 
-Testado com um motoboy que recebia R$ 6,50 na primeira quinzena de agosto e
-passou a R$ 7,00 na segunda:
+Lembre que a tela de Configurações do módulo **só grava ao clicar em
+"Salvar configurações"**, no fim da página. Adicionar uma plataforma ou
+região com o botão **+** apenas monta a lista na tela; sair sem salvar
+descarta.
 
-```
-16–31/08 | gerado 287,00 | tarifa 7,00
-01–15/08 | gerado 208,00 | tarifa 6,50
-```
-
-Cada período mantém a tarifa da época. O extrato de agosto emitido em
-dezembro continua saindo com os valores de agosto.
+Se depois de salvar continuar não gravando, abra o console (F12) e me mande
+o erro — aí é outra coisa.
 
 ---
 
-## Como testar
+## O erro do PDF
 
-1. Feche uma quinzena de um lojista na aba Fechamentos
-2. Lojistas → Histórico → registre um recebimento **parcial**
-3. Confira: status vira "Parcialmente pago", saldo aparece, e no Financeiro
-   Empresa a conta a receber continua pendente
-4. Registre o restante → status "Quitado" e a conta a receber é baixada
-5. Motoboys → Histórico → gere o Extrato PDF de um período
-6. Registre um pagamento na aba Repasses e volte ao Histórico: o valor já
-   está lá, sem precisar recarregar
+Este pacote já traz a versão que mostra a **causa real** na mensagem, em vez
+de "não foi possível". Se ainda falhar, o print da faixa vermelha agora diz
+exatamente o que houve.
 
-Build sem erro.
+O gerador foi testado isolado com os dados do A&G Imports (18 volumes,
+R$ 162, Shopee) e produziu o PDF corretamente.

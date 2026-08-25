@@ -192,6 +192,9 @@ export default function Fechamentos({ data, setData }) {
     });
   }
 
+  // O logo é a peça mais frágil aqui: se estiver corrompido ou num formato
+  // que o jsPDF não aceita, o documento inteiro falha. Melhor sair sem
+  // marca d'água do que não sair.
   const empresaPDF = () => ({
     nome: data?.config?.nomeEmpresa || company?.nome || 'Gestão GSO',
     logoUrl: data?.config?.logoUrl || '',
@@ -216,7 +219,9 @@ export default function Fechamentos({ data, setData }) {
       await gerarCobrancaPDF(f, item.lojista || {}, empresaPDF());
     } catch (e) {
       console.error('[pdf cobranca]', e);
-      setErro('Não foi possível gerar o PDF.');
+      // Mensagem técnica na tela de propósito: sem ela, "não foi possível"
+      // não diz nada e o diagnóstico vira adivinhação.
+      setErro(`Não foi possível gerar o PDF — ${e?.message || e}`);
     }
   }
 

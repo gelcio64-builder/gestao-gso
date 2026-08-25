@@ -7,7 +7,7 @@ import {
 } from './ui';
 import {
   getConfigEntregas, snapshotColeta, statusConciliacao, divergenciaColeta,
-  cobrancaDeUmaColeta, registrarHistorico,
+  cobrancaDeUmaColeta, registrarHistorico, itensColeta, totalInformado, totalConfirmado,
 } from './engine';
 import { COLETA_STATUS } from './constants';
 
@@ -66,7 +66,7 @@ export default function Coletas({ data, setData }) {
 
       {vista === 'conferencia'
         ? <Conferencia {...{ data, setData, coletas, lojistas, motoboys, tarifas, cfg }} />
-        : <Historico {...{ coletas, lojistas, motoboys, bases, cfg, setData }} />}
+        : <Historico {...{ coletas, lojistas, motoboys, bases, cfg, tarifas, setData }} />}
 
       {novo && (
         <FormColetaManual
@@ -100,53 +100,50 @@ function Conferencia({ data, setData, coletas, lojistas, motoboys, tarifas, cfg 
     return [...mapa.values()].sort((a, b) => String(b.data).localeCompare(String(a.data)));
   }, [pendentes]);
 
-  function aprovar(grupo, qtdConfirmadaTotal, motivo) {
-    const total = grupo.itens.reduce((s, c) => s + (Number(c.qtdInformada) || 0), 0);
-    const confirmado = Math.round(Number(qtdConfirmadaTotal) || 0);
+  // A confirmação vem por coleta e por marketplace: o lojista costuma
+  // conferir separado ("saiu 30 do Mercado Livre e 12 da Amazon"), porque
+  // os painéis dele são diferentes. E cada marketplace tem tarifa própria,
+  // então o total sozinho não permitiria calcular a cobrança certa.
+  function aprovar(grupo, confirmacoes, motivo) {
+    const ids = grupo.itens.map((x) => x.id);
 
-    setData((d) => {
-      const lista = d.entColetas || [];
-      // Distribui o total confirmado entre as coletas do grupo, na
-      // proporção do que cada motoboy informou. Sobras vão para a
-      // última coleta, para o somatório fechar exato.
-      let restante = confirmado;
-      const ids = grupo.itens.map((x) => x.id);
-      const ajustes = new Map();
-      grupo.itens.forEach((c, i) => {
-        const inf = Number(c.qtdInformada) || 0;
-        let parte;
-        if (i === grupo.itens.length - 1) parte = restante;
-        else {
-          parte = total > 0 ? Math.round((inf / total) * confirmado) : 0;
-          restante -= parte;
-        }
-        ajustes.set(c.id, Math.max(0, parte));
-      });
-
-      return {
-        ...d,
-        entColetas: lista.map((c) => {
-          if (!ids.includes(c.id)) return c;
-          const qtdConfirmada = ajustes.get(c.id);
-          const comHist = registrarHistorico(c, {
-            acao: 'conferência com o lojista',
-            campo: 'qtdConfirmada',
-            de: c.qtdConfirmada,
-            para: qtdConfirmada,
-            motivo: motivo || '',
-          });
+    setData((d) => ({
+      ...d,
+      entColetas: (d.entColetas || []).map((c) => {
+        if (!ids.includes(c.id)) return c;
+        const conf = confirmacoes[c.id] || {};
+        const itens = itensColeta(c).map((i) => {
+          const v = conf[i.plataforma];
           return {
-            ...comHist,
-            qtdConfirmada,
-            conciliacaoStatus: qtdConfirmada === (Number(c.qtdInformada) || 0) ? 'conciliada' : 'divergente',
-            // Carimba a tarifa vigente agora. A partir daqui, mudar a
-            // tabela não altera mais o valor desta coleta.
-            snapshot: c.snapshot || snapshotColeta(c.lojistaId, c.motoboyId, tarifas, cfg),
-            conferidoEm: new Date().toISOString(),
+            plataforma: i.plataforma,
+            qtd: i.qtd,
+            qtdConfirmada: v === '' || v == null ? i.qtd : Math.max(0, Math.round(Number(v) || 0)),
+            tarifa: i.tarifa,
           };
-        }),
-      };
-    });
+        });
+        const totalConf = itens.reduce((s, i) => s + i.qtdConfirmada, 0);
+        const totalInf = itens.reduce((s, i) => s + i.qtd, 0);
+
+        const comHist = registrarHistorico(c, {
+          acao: 'conferência com o lojista',
+          campo: 'quantidades',
+          de: itensColeta(c).map((i) => ({ p: i.plataforma, q: i.qtd })),
+          para: itens.map((i) => ({ p: i.plataforma, q: i.qtdConfirmada })),
+          motivo: motivo || '',
+        });
+
+        const comItens = { ...comHist, itens };
+        return {
+          ...comItens,
+          qtdConfirmada: totalConf,
+          conciliacaoStatus: totalConf === totalInf ? 'conciliada' : 'divergente',
+          // Carimba as tarifas vigentes agora, uma por marketplace. A partir
+          // daqui, mexer na tabela não altera mais o valor desta coleta.
+          snapshot: c.snapshot || snapshotColeta(comItens, tarifas, cfg),
+          conferidoEm: new Date().toISOString(),
+        };
+      }),
+    }));
   }
 
   if (!grupos.length) {
@@ -175,12 +172,42 @@ function Conferencia({ data, setData, coletas, lojistas, motoboys, tarifas, cfg 
 }
 
 function CardConferencia({ grupo, lojista, motoboys, onAprovar }) {
-  const total = grupo.itens.reduce((s, c) => s + (Number(c.qtdInformada) || 0), 0);
-  const [valor, setValor] = useState(String(total));
+  const nomeMotoboy = (id, fb) => motoboys.find((m) => m.id === id)?.nome || fb || 'Motoboy';
+
+  // Estado inicial: assume que o lojista vai confirmar o que o motoboy disse.
+  const [conf, setConf] = useState(() => {
+    const base = {};
+    grupo.itens.forEach((c) => {
+      base[c.id] = {};
+      itensColeta(c).forEach((i) => {
+        base[c.id][i.plataforma] = String(i.qtdConfirmada == null ? i.qtd : i.qtdConfirmada);
+      });
+    });
+    return base;
+  });
   const [motivo, setMotivo] = useState('');
-  const confirmado = Math.round(Number(valor) || 0);
-  const dif = confirmado - total;
-  const nomeMotoboy = (id, fallback) => motoboys.find((m) => m.id === id)?.nome || fallback || 'Motoboy';
+
+  const totalInf = grupo.itens.reduce((s, c) => s + totalInformado(c), 0);
+  const totalConf = grupo.itens.reduce((s, c) => {
+    const m = conf[c.id] || {};
+    return s + itensColeta(c).reduce((t, i) => {
+      const v = m[i.plataforma];
+      return t + (v === '' || v == null ? i.qtd : Math.max(0, Math.round(Number(v) || 0)));
+    }, 0);
+  }, 0);
+  const dif = totalConf - totalInf;
+
+  // Soma por marketplace no dia, para o telefonema ficar simples.
+  const porPlataforma = new Map();
+  grupo.itens.forEach((c) => {
+    itensColeta(c).forEach((i) => {
+      porPlataforma.set(i.plataforma, (porPlataforma.get(i.plataforma) || 0) + i.qtd);
+    });
+  });
+
+  function setQtd(coletaId, plataforma, valor) {
+    setConf((p) => ({ ...p, [coletaId]: { ...(p[coletaId] || {}), [plataforma]: valor } }));
+  }
 
   return (
     <div className="ent-conf">
@@ -189,6 +216,7 @@ function CardConferencia({ grupo, lojista, motoboys, onAprovar }) {
           <div className="ent-conf-nome">{lojista?.nome || 'Lojista removido'}</div>
           <div className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
             {fmtData(grupo.data)}{lojista?.telefone ? ` · ${lojista.telefone}` : ''}
+            {grupo.itens.some((c) => c.retroativa) && ' · contém retirada retroativa'}
           </div>
         </div>
         {lojista?.telefone && (
@@ -198,33 +226,42 @@ function CardConferencia({ grupo, lojista, motoboys, onAprovar }) {
         )}
       </div>
 
-      <div className="ent-conf-linhas">
-        {grupo.itens.map((c) => (
-          <div key={c.id} className="ent-conf-l">
-            <span>{nomeMotoboy(c.motoboyId, c.motoboyNome)}</span>
-            <b>{c.qtdInformada}</b>
-            <span style={{ color: '#9CA3AF' }}>volumes · {c.hora || '—'}</span>
-          </div>
+      <div className="cf-resumo">
+        <span className="cf-resumo-t">O que os motoboys informaram neste dia</span>
+        {[...porPlataforma.entries()].map(([plat, qtd]) => (
+          <span key={plat} className="cf-plat">{plat || 'Sem plataforma'} <b>{qtd}</b></span>
         ))}
       </div>
 
-      <div className="ent-conf-tot">
-        <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>Informado pelos motoboys</span>
-        <strong>{total}</strong>
-      </div>
+      {grupo.itens.map((c) => (
+        <div key={c.id} className="cf-coleta">
+          <div className="cf-coleta-h">
+            <span>{nomeMotoboy(c.motoboyId, c.motoboyNome)}</span>
+            <small>{c.hora || '—'}{c.retroativa ? ' · retroativa' : ''}</small>
+          </div>
+          {itensColeta(c).map((i) => {
+            const v = (conf[c.id] || {})[i.plataforma];
+            const num = v === '' || v == null ? i.qtd : Math.round(Number(v) || 0);
+            const d = num - i.qtd;
+            return (
+              <div key={i.plataforma} className="cf-item">
+                <span className="cf-item-p">{i.plataforma || 'Sem plataforma'}</span>
+                <span className="cf-item-inf">informado <b>{i.qtd}</b></span>
+                <input className="cf-item-in" inputMode="numeric" value={v}
+                  onChange={(e) => setQtd(c.id, i.plataforma, e.target.value.replace(/\D/g, ''))} />
+                {d !== 0 && <span className={`ent-dif ruim`}>{d > 0 ? `+${d}` : d}</span>}
+              </div>
+            );
+          })}
+        </div>
+      ))}
 
-      <div className="ent-conf-form">
-        <Campo label="Confirmado pelo lojista">
-          <input className="inp" inputMode="numeric" value={valor} onChange={(e) => setValor(e.target.value)} />
-        </Campo>
-        {dif !== 0 && (
-          <span className={`ent-dif ${dif === 0 ? 'ok' : 'ruim'}`}>
-            {dif > 0 ? `+${dif}` : dif} de diferença
-          </span>
-        )}
-        <button className="btn btn-primary" onClick={() => onAprovar(grupo, valor, motivo)}>
-          <Check size={14} /> Aprovar
-        </button>
+      <div className="ent-conf-tot">
+        <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+          Informado {totalInf} · confirmado
+        </span>
+        <strong>{totalConf}</strong>
+        {dif !== 0 && <span className="ent-dif ruim">{dif > 0 ? `+${dif}` : dif}</span>}
       </div>
 
       {dif !== 0 && (
@@ -235,14 +272,39 @@ function CardConferencia({ grupo, lojista, motoboys, onAprovar }) {
           </Campo>
         </div>
       )}
+
+      <div className="ent-mb-acoes" style={{ marginTop: 12 }}>
+        <button className="btn btn-primary ent-b-sm" onClick={() => onAprovar(grupo, conf, motivo)}>
+          <Check size={14} /> Aprovar conferência
+        </button>
+      </div>
+
+      <style>{CF_CSS}</style>
     </div>
   );
 }
 
+const CF_CSS = `
+.cf-resumo{ display:flex; flex-wrap:wrap; align-items:center; gap:7px; background:#F9FAFB; border-radius:11px; padding:10px 12px; margin:12px 0; }
+.cf-resumo-t{ width:100%; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:#9CA3AF; font-weight:600; }
+.cf-plat{ font-size:12.5px; background:#fff; border:1px solid #E5E7EB; padding:4px 9px; border-radius:8px; color:#374151; }
+.cf-plat b{ color:#0B1324; }
+.cf-coleta{ border:1px solid #F1F2F4; border-radius:12px; padding:11px 12px; margin-bottom:9px; }
+.cf-coleta-h{ display:flex; align-items:baseline; justify-content:space-between; gap:8px; margin-bottom:8px; }
+.cf-coleta-h span{ font-size:13.5px; font-weight:600; }
+.cf-coleta-h small{ font-size:11.5px; color:#9CA3AF; }
+.cf-item{ display:flex; align-items:center; gap:9px; padding:6px 0; flex-wrap:wrap; }
+.cf-item-p{ flex:1; min-width:120px; font-size:13px; color:#374151; }
+.cf-item-inf{ font-size:12px; color:#9CA3AF; }
+.cf-item-inf b{ color:#6B7280; }
+.cf-item-in{ width:72px; padding:7px 9px; border:1px solid #D1D5DB; border-radius:9px; text-align:center; font-size:14.5px; font-weight:600; font-family:inherit; color:#0B1324; }
+.cf-item-in:focus{ outline:none; border-color:var(--color-primary); }
+`;
+
 // ------------------------------------------------------------
 //   Histórico
 // ------------------------------------------------------------
-function Historico({ coletas, lojistas, motoboys, bases, cfg, setData }) {
+function Historico({ coletas, lojistas, motoboys, bases, cfg, tarifas, setData }) {
   const [filtro, setFiltro] = useState('todas');
 
   const lista = useMemo(() => {
@@ -295,17 +357,27 @@ function Historico({ coletas, lojistas, motoboys, bases, cfg, setData }) {
             {lista.map((c) => {
               const st = statusConciliacao(c);
               const dif = divergenciaColeta(c);
-              const cob = cobrancaDeUmaColeta(c, cfg);
+              const cob = cobrancaDeUmaColeta(c, cfg, tarifas);
               return (
                 <tr key={c.id}>
                   <td style={{ whiteSpace: 'nowrap' }}>{fmtData(c.data)}<br />
-                    <span style={{ fontSize: 11, color: '#9CA3AF' }}>{c.hora}</span></td>
+                    <span style={{ fontSize: 11, color: '#9CA3AF' }}>
+                      {c.hora}{c.retroativa ? ' · retro' : ''}
+                    </span></td>
                   <td>{nome(lojistas, c.lojistaId, c.lojistaNome)}</td>
                   <td>{nome(motoboys, c.motoboyId, c.motoboyNome)}</td>
                   <td>{nome(bases, c.baseId, c.baseNome)}</td>
-                  <td><b>{c.qtdInformada ?? '—'}</b></td>
                   <td>
-                    {c.qtdConfirmada == null ? <span style={{ color: '#9CA3AF' }}>—</span> : <b>{c.qtdConfirmada}</b>}
+                    <b>{totalInformado(c)}</b>
+                    {Array.isArray(c.itens) && c.itens.length > 1 && (
+                      <div style={{ fontSize: 10.5, color: '#9CA3AF', marginTop: 2 }}>
+                        {c.itens.filter((i) => i.qtd > 0)
+                          .map((i) => `${String(i.plataforma).split('—')[0].trim()} ${i.qtd}`).join(' · ')}
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    {totalConfirmado(c) == null ? <span style={{ color: '#9CA3AF' }}>—</span> : <b>{totalConfirmado(c)}</b>}
                     {dif != null && dif !== 0 && (
                       <span className="ent-dif ruim" style={{ marginLeft: 6 }}>{dif > 0 ? `+${dif}` : dif}</span>
                     )}
@@ -337,53 +409,56 @@ function Historico({ coletas, lojistas, motoboys, bases, cfg, setData }) {
 function FormColetaManual({ lojistas, motoboys, bases, plataformas, onSalvar, onCancelar }) {
   const [f, setF] = useState({
     data: hojeISO(), hora: agoraHora(),
-    lojistaId: '', motoboyId: '', baseId: '', plataforma: '', quantidade: '', obs: '',
+    lojistaId: '', motoboyId: '', baseId: '', obs: '',
   });
+  const [qtds, setQtds] = useState({});
   const [err, setErr] = useState('');
 
-  // Escolher a loja já traz a base e a plataforma dela — o operador
-  // pode trocar, mas na maioria das vezes não precisa mexer.
+  const total = Object.values(qtds).reduce((s, v) => s + (Number(v) || 0), 0);
+
   function escolherLojista(id) {
     const l = lojistas.find((x) => x.id === id);
-    setF((p) => ({
-      ...p,
-      lojistaId: id,
-      baseId: l?.baseId || p.baseId,
-      plataforma: l?.plataforma || p.plataforma,
-    }));
+    setF((p) => ({ ...p, lojistaId: id, baseId: l?.baseId || p.baseId }));
   }
 
   function submit() {
     if (!f.lojistaId) { setErr('Escolha o lojista.'); return; }
     if (!f.motoboyId) { setErr('Escolha o motoboy.'); return; }
     if (!f.baseId) { setErr('Escolha a base de destino.'); return; }
-    const qtd = Math.round(Number(f.quantidade) || 0);
-    if (qtd <= 0) { setErr('Informe a quantidade de volumes.'); return; }
+    const itens = Object.entries(qtds)
+      .map(([plataforma, qtd]) => ({ plataforma, qtd: Math.round(Number(qtd) || 0), qtdConfirmada: null, tarifa: null }))
+      .filter((i) => i.qtd > 0);
+    if (!itens.length) { setErr('Informe a quantidade de ao menos um marketplace.'); return; }
 
     const l = lojistas.find((x) => x.id === f.lojistaId);
     const m = motoboys.find((x) => x.id === f.motoboyId);
     const b = bases.find((x) => x.id === f.baseId);
+    const hoje = hojeISO();
 
     onSalvar({
       id: uidLocal(),
       data: f.data, hora: f.hora,
+      retroativa: f.data !== hoje,
+      registradaEm: hoje,
       lojistaId: f.lojistaId, lojistaNome: l?.nome || '',
-      plataforma: f.plataforma || l?.plataforma || '',
-      motoboyId: f.motoboyId, motoboyNome: m?.nome || '', motoboyUid: m?.uid || '',
+      itens,
+      plataforma: itens.length === 1 ? itens[0].plataforma : 'Vários',
+      qtdInformada: itens.reduce((s, i) => s + i.qtd, 0),
+      motoboyId: f.motoboyId, motoboyNome: m?.nome || '', motoboyUid: '',
       baseId: f.baseId, baseNome: b?.nome || '',
       recebidoNaBase: false,
-      qtdInformada: qtd, qtdConfirmada: null,
+      qtdConfirmada: null,
       conciliacaoStatus: 'pendente',
       snapshot: null,
       fechamentoLojistaId: null, fechamentoMotoboyId: null,
       obs: f.obs, origem: 'painel',
-      historico: [{ acao: 'criada no painel', qtd, em: new Date().toISOString() }],
+      historico: [{ acao: 'criada no painel', qtd: total, itens, em: new Date().toISOString() }],
       criadoEm: new Date().toISOString(),
     });
   }
 
   return (
-    <ModalBase titulo="Lançar coleta" onFechar={onCancelar}>
+    <ModalBase largo titulo="Lançar coleta" onFechar={onCancelar}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <Campo label="Lojista *" span={2}>
           <select className="inp" value={f.lojistaId} onChange={(e) => escolherLojista(e.target.value)}>
@@ -403,26 +478,53 @@ function FormColetaManual({ lojistas, motoboys, bases, plataformas, onSalvar, on
             {bases.map((b) => <option key={b.id} value={b.id}>{b.nome}</option>)}
           </select>
         </Campo>
-        <Campo label="Plataforma">
-          <select className="inp" value={f.plataforma} onChange={(e) => setF({ ...f, plataforma: e.target.value })}>
-            <option value="">—</option>
-            {plataformas.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
-        </Campo>
-        <Campo label="Volumes *">
-          <input className="inp" inputMode="numeric" value={f.quantidade}
-            onChange={(e) => setF({ ...f, quantidade: e.target.value })} placeholder="40" />
-        </Campo>
-        <Campo label="Data">
-          <input className="inp" type="date" value={f.data} onChange={(e) => setF({ ...f, data: e.target.value })} />
+        <Campo label="Data da retirada *" dica="Use a data real da retirada, mesmo que o lançamento seja hoje.">
+          <input className="inp" type="date" value={f.data} max={hojeISO()}
+            onChange={(e) => setF({ ...f, data: e.target.value })} />
         </Campo>
         <Campo label="Hora">
           <input className="inp" type="time" value={f.hora} onChange={(e) => setF({ ...f, hora: e.target.value })} />
         </Campo>
-        <Campo label="Observações" span={2}>
-          <input className="inp" value={f.obs} onChange={(e) => setF({ ...f, obs: e.target.value })} />
-        </Campo>
       </div>
+
+      <div className="lj-sec" style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid #F1F2F4' }}>
+        <h4 style={{ fontSize: 13, fontWeight: 650, margin: '0 0 3px' }}>Volumes por marketplace</h4>
+        <p style={{ fontSize: 12, color: 'var(--color-text-muted)', margin: '0 0 11px' }}>
+          Cada marketplace tem tarifa própria, por isso a quebra é obrigatória.
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+          {plataformas.map((plat) => (
+            <label key={plat} className="lj-plat-row" style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '9px 12px',
+              border: '1px solid #E5E7EB', borderRadius: 11,
+            }}>
+              <span style={{ flex: 1, minWidth: 0, fontSize: 13.5 }}>{plat}</span>
+              <input className="inp" inputMode="numeric" style={{ width: 90, textAlign: 'center' }}
+                value={qtds[plat] || ''} placeholder="0"
+                onChange={(e) => setQtds({ ...qtds, [plat]: e.target.value.replace(/\D/g, '') })} />
+            </label>
+          ))}
+          {!plataformas.length && (
+            <p style={{ fontSize: 12.5, color: '#9CA3AF' }}>
+              Nenhum marketplace cadastrado. Adicione em Configurações → Plataformas.
+            </p>
+          )}
+        </div>
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          marginTop: 11, padding: '11px 13px', borderRadius: 11,
+          background: total > 0 ? 'var(--color-primary)' : '#F3F4F6',
+          color: total > 0 ? '#fff' : '#6B7280', fontSize: 13.5,
+        }}>
+          <span>Total da coleta</span>
+          <strong style={{ fontSize: 20 }}>{total}</strong>
+        </div>
+      </div>
+
+      <Campo label="Observações" span={2}>
+        <input className="inp" value={f.obs} onChange={(e) => setF({ ...f, obs: e.target.value })} />
+      </Campo>
+
       {err && <div className="ent-erro"><AlertTriangle size={14} /> {err}</div>}
       <div className="flex gap-2 justify-end mt-4">
         <button className="btn btn-ghost" onClick={onCancelar}>Cancelar</button>

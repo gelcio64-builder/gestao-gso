@@ -31,6 +31,8 @@ import { HistoricoMotoboy } from './ContaCorrente';
 //   barra lateral dentro da tela.
 // ============================================================
 
+export const VERSAO_ENTREGAS = 'Entregas v11';
+
 const ABAS = [
   { k: 'painel', label: 'Painel', icon: LayoutDashboard },
   { k: 'coletas', label: 'Coletas', icon: Package },
@@ -57,13 +59,23 @@ function EntregasConteudo({ data, setData }) {
 
   return (
     <div className="p-4 sm:p-6 space-y-4">
-      <style>{ENT_CSS}</style>
-      <div className="ent-tabs">
-        {ABAS.map((a) => (
-          <button key={a.k} className={`ent-tab${aba === a.k ? ' on' : ''}`} onClick={() => setAba(a.k)}>
-            <a.icon size={14} /> {a.label}
-          </button>
-        ))}
+      <style>{ENT_CSS}{`
+        .ent-topo{ display:flex; align-items:center; gap:10px; }
+        .ent-topo .ent-tabs{ flex:1; min-width:0; }
+        .ent-versao{ flex-shrink:0; font-size:10.5px; font-weight:600; letter-spacing:.03em;
+          color:#9CA3AF; background:#F3F4F6; padding:4px 9px; border-radius:7px; white-space:nowrap; }
+      `}</style>
+      <div className="ent-topo">
+        <div className="ent-tabs">
+          {ABAS.map((a) => (
+            <button key={a.k} className={`ent-tab${aba === a.k ? ' on' : ''}`} onClick={() => setAba(a.k)}>
+              <a.icon size={14} /> {a.label}
+            </button>
+          ))}
+        </div>
+        {/* Selo de versão: serve para confirmar de olho qual build está no ar
+            sem precisar abrir o GitHub. */}
+        <span className="ent-versao" title="Versão do módulo Entregas">{VERSAO_ENTREGAS}</span>
       </div>
 
       {aba === 'painel' && <PainelEntregas data={d} setData={setData} onIrPara={setAba} />}

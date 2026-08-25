@@ -3,7 +3,7 @@ import {
   Warehouse, Bike, Check, Plus, Trash2, AlertTriangle, Package, ArrowRight,
 } from 'lucide-react';
 import { ModalBase, Campo, Vazio, Chip, Aviso, uidLocal, hojeISO, fmtData } from './ui';
-import { getConfigEntregas, snapshotRota, qtdCobravelColeta } from './engine';
+import { getConfigEntregas, snapshotRota, qtdCobravelColeta, totalInformado } from './engine';
 import { ROTA_STATUS } from './constants';
 
 // ============================================================
@@ -112,7 +112,7 @@ export default function Triagem({ data, setData }) {
 
         <div className="ent-fluxo">
           <div className="ent-fx">
-            <span className="ent-fx-n">{aReceber.reduce((s, c) => s + (Number(c.qtdInformada) || 0), 0)}</span>
+            <span className="ent-fx-n">{aReceber.reduce((s, c) => s + totalInformado(c), 0)}</span>
             <span className="ent-fx-l">A receber</span>
           </div>
           <ArrowRight size={16} style={{ color: '#D1D5DB' }} />
@@ -165,7 +165,7 @@ export default function Triagem({ data, setData }) {
                     <td>{nomeLojista(c)}</td>
                     <td>{c.motoboyNome || '—'}</td>
                     <td>{c.baseNome || '—'}</td>
-                    <td><b>{c.qtdInformada}</b></td>
+                    <td><b>{totalInformado(c)}</b></td>
                     <td>
                       <button className="ent-mini ok" onClick={() => receber(c)}>
                         <Warehouse size={12} /> Receber

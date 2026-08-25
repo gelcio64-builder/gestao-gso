@@ -17,26 +17,45 @@ import { fdb } from '../firebase';
 
 export async function criarColetaMotoboy(companyId, {
   motoboyUid, motoboyId, motoboyNome,
-  lojistaId, lojistaNome, plataforma, baseId, baseNome,
-  quantidade, obs,
+  lojistaId, lojistaNome, baseId, baseNome,
+  itens, data, obs,
 }) {
   if (!companyId) throw new Error('Empresa não identificada.');
   if (!motoboyUid || !motoboyId) throw new Error('Seu cadastro não está vinculado. Fale com o responsável.');
   if (!lojistaId) throw new Error('Escolha a loja.');
   if (!baseId) throw new Error('Escolha a base de destino.');
-  const qtd = Math.round(Number(quantidade) || 0);
-  if (qtd <= 0) throw new Error('Informe a quantidade de volumes.');
 
+  // Uma retirada pode trazer pacotes de vários marketplaces. Guardamos a
+  // quebra por plataforma, porque cada uma tem tarifa própria.
+  const limpos = (itens || [])
+    .map((i) => ({ plataforma: i.plataforma || '', qtd: Math.max(0, Math.round(Number(i.qtd) || 0)) }))
+    .filter((i) => i.qtd > 0);
+  if (!limpos.length) throw new Error('Informe a quantidade de ao menos um marketplace.');
+
+  const total = limpos.reduce((s, i) => s + i.qtd, 0);
+
+  // Data da retirada. Pode ser retroativa: às vezes a loja separa pacotes no
+  // sábado e o motoboy só passa na segunda — aqueles volumes pertencem ao
+  // sábado, e é isso que faz o fechamento do período sair certo.
   const agora = new Date();
+  const hoje = agora.toISOString().slice(0, 10);
+  const dataColeta = data || hoje;
+  if (dataColeta > hoje) throw new Error('A data da coleta não pode ser no futuro.');
+
   const ref = doc(collection(fdb, 'companies', companyId, 'entColetas'));
 
   await setDoc(ref, {
-    data: agora.toISOString().slice(0, 10),
+    data: dataColeta,
     hora: agora.toTimeString().slice(0, 5),
+    retroativa: dataColeta !== hoje,
+    registradaEm: hoje,
 
     lojistaId,
     lojistaNome: lojistaNome || '',
-    plataforma: plataforma || '',
+    itens: limpos.map((i) => ({ ...i, qtdConfirmada: null, tarifa: null })),
+    // Campos-resumo mantidos para as telas e relatórios que leem uma linha só.
+    plataforma: limpos.length === 1 ? limpos[0].plataforma : 'Vários',
+    qtdInformada: total,
 
     motoboyUid,
     motoboyId,
@@ -46,15 +65,13 @@ export async function criarColetaMotoboy(companyId, {
     baseNome: baseNome || '',
     recebidoNaBase: false,
 
-    qtdInformada: qtd,
-    // Só o painel preenche a quantidade confirmada, na conferência
-    // com o lojista. As regras recusam a gravação se o motoboy
-    // tentar mandar qualquer coisa diferente de null aqui.
+    // Só o painel preenche a quantidade confirmada, na conferência com o
+    // lojista. As regras recusam a gravação se vier diferente de null.
     qtdConfirmada: null,
     conciliacaoStatus: 'pendente',
 
-    // A tarifa é carimbada na conferência: o motoboy não tem (e não
-    // pode ter) acesso de leitura à tabela de tarifas.
+    // A tarifa é carimbada na conferência: o motoboy não tem (e não pode ter)
+    // acesso de leitura à tabela de preços.
     snapshot: null,
 
     fechamentoLojistaId: null,
@@ -66,7 +83,9 @@ export async function criarColetaMotoboy(companyId, {
       acao: 'criada',
       por: motoboyNome || '',
       uid: motoboyUid,
-      qtd,
+      qtd: total,
+      itens: limpos,
+      dataColeta,
       em: agora.toISOString(),
     }],
     criadoEm: serverTimestamp(),

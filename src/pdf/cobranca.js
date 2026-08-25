@@ -24,10 +24,14 @@ function hexToRgbArr(hex) {
 
 function imgSize(dataUrl) {
   return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve({ w: img.width, h: img.height });
-    img.onerror = () => resolve(null);
-    img.src = dataUrl;
+    try {
+      const img = new Image();
+      img.onload = () => resolve({ w: img.width, h: img.height });
+      img.onerror = () => resolve(null);
+      // Trava de segurança: logo que nunca carrega não pode travar o PDF.
+      setTimeout(() => resolve(null), 4000);
+      img.src = dataUrl;
+    } catch (e) { resolve(null); }
   });
 }
 
@@ -139,7 +143,7 @@ export async function gerarCobrancaPDF(fech, lojista = {}, empresa = {}, opts = 
   const cabecalhoTabela = () => {
     doc.setFont('helvetica', 'bold'); doc.setFontSize(7.5); doc.setTextColor(...GRAY);
     doc.text('DATA', M, y);
-    doc.text('VOLUMES', M + 74, y, { align: 'right' });
+    doc.text('MARKETPLACE / VOLUMES', M + 74, y, { align: 'right' });
     doc.text('VALOR UNIT.', M + 122, y, { align: 'right' });
     doc.text('SUBTOTAL', PW - M, y, { align: 'right' });
     y += 4;
@@ -149,21 +153,54 @@ export async function gerarCobrancaPDF(fech, lojista = {}, empresa = {}, opts = 
   };
   cabecalhoTabela();
 
+  // Uma coleta pode trazer pacotes de vários marketplaces, cada um com sua
+  // tarifa. Por isso a data aparece uma vez e as linhas abaixo detalham a
+  // quebra — é assim que o lojista consegue conferir contra o painel dele.
   (fech.linhas || []).forEach((l) => {
-    if (novaPagina(38)) { cabecalhoTabela(); }
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...INK);
+    const det = (l.detalhe && l.detalhe.length)
+      ? l.detalhe
+      : [{ plataforma: '', qtd: l.qtd, tarifa: l.tarifa, subtotal: l.bruto != null ? l.bruto : l.total }];
+    const varios = det.length > 1;
+
+    if (novaPagina(38 + det.length * 5)) { cabecalhoTabela(); }
+
+    doc.setFont('helvetica', varios ? 'bold' : 'normal');
+    doc.setFontSize(9); doc.setTextColor(...INK);
     doc.text(fmtData(l.data), M, y);
-    doc.setTextColor(...INK);
-    doc.text(String(l.qtd), M + 74, y, { align: 'right' });
-    doc.setTextColor(...GRAY);
-    doc.text(BRL(l.tarifa), M + 122, y, { align: 'right' });
-    doc.setTextColor(...INK);
-    doc.text(BRL(l.total), PW - M, y, { align: 'right' });
-    y += 5.4;
+
+    if (!varios) {
+      const d = det[0];
+      if (d.plataforma) {
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(...GRAY);
+        doc.text(String(d.plataforma), M + 26, y);
+      }
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9); doc.setTextColor(...INK);
+      doc.text(String(d.qtd), M + 74, y, { align: 'right' });
+      doc.setTextColor(...GRAY);
+      doc.text(BRL(d.tarifa), M + 122, y, { align: 'right' });
+      doc.setTextColor(...INK);
+      doc.text(BRL(l.total), PW - M, y, { align: 'right' });
+      y += 5.4;
+    } else {
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(...INK);
+      doc.text(String(l.qtd), M + 74, y, { align: 'right' });
+      doc.text(BRL(l.total), PW - M, y, { align: 'right' });
+      y += 5;
+      det.forEach((d) => {
+        doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(...GRAY);
+        doc.text(String(d.plataforma || '—'), M + 6, y);
+        doc.text(String(d.qtd), M + 74, y, { align: 'right' });
+        doc.text(BRL(d.tarifa), M + 122, y, { align: 'right' });
+        doc.text(BRL(d.subtotal), PW - M, y, { align: 'right' });
+        y += 4.6;
+      });
+      y += 1;
+    }
+
     if (l.usouMinimo) {
       doc.setFont('helvetica', 'italic'); doc.setFontSize(7.5); doc.setTextColor(...GRAY);
-      doc.text('valor mínimo de coleta aplicado', M + 4, y);
-      y += 4.2;
+      doc.text('valor mínimo de coleta aplicado', M + 6, y);
+      y += 4.4;
     }
   });
 

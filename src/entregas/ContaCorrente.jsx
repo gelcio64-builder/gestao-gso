@@ -115,7 +115,10 @@ export function HistoricoLojista({ lojista, data, setData, onFechar }) {
         lojista,
         dadosEmpresaPDF(data, auth.company)
       );
-    } catch (e) { console.error('[pdf]', e); setErro('Não foi possível gerar o PDF.'); }
+    } catch (e) {
+      console.error('[pdf]', e);
+      setErro(`Não foi possível gerar o PDF — ${e?.message || e}`);
+    }
   }
 
   function compartilhar(f) {
@@ -313,7 +316,7 @@ export function HistoricoMotoboy({ motoboy, data, onFechar }) {
       );
     } catch (e) {
       console.error('[extrato]', e);
-      setErro('Não foi possível gerar o extrato.');
+      setErro(`Não foi possível gerar o extrato — ${e?.message || e}`);
     }
   }
 

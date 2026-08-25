@@ -173,39 +173,49 @@ function BotaoNav({ ativo, onClick, icon: Icon, label }) {
 function RegistrarColeta({ dados, companyId, motoboyUid, motoboyId, motoboyNome, onFechar, onSalvo }) {
   const ativos = (dados.lojistas || []).filter((l) => l.status !== 'inativo');
   const basesAtivas = (dados.bases || []).filter((b) => b.status !== 'inativa');
+  const plataformas = dados.config?.plataformas || [];
 
   const [lojistaId, setLojistaId] = useState('');
   const [baseId, setBaseId] = useState('');
-  const [plataforma, setPlataforma] = useState('');
-  const [qtd, setQtd] = useState(0);
+  const [quantidades, setQuantidades] = useState({});   // { plataforma: número }
+  const [data, setData] = useState(hojeISO());
   const [obs, setObs] = useState('');
   const [erro, setErro] = useState('');
   const [salvando, setSalvando] = useState(false);
 
   const lojista = ativos.find((l) => l.id === lojistaId);
   const base = basesAtivas.find((b) => b.id === baseId);
+  const total = Object.values(quantidades).reduce((s, v) => s + (Number(v) || 0), 0);
+  const hoje = hojeISO();
+  const retroativa = data !== hoje;
 
   function escolherLoja(id) {
     const l = ativos.find((x) => x.id === id);
     setLojistaId(id);
-    // Base pré-preenchida pela loja, mas continua editável: às vezes
-    // o motoboy precisa desviar para outra base num dia atípico.
+    // Base pré-preenchida pela loja, mas continua editável: às vezes o
+    // motoboy precisa desviar para outra base num dia atípico.
     if (l?.baseId) setBaseId(l.baseId);
-    if (l?.plataforma) setPlataforma(l.plataforma);
     setErro('');
+  }
+
+  function mudarQtd(plat, valor) {
+    setQuantidades((p) => ({ ...p, [plat]: Math.max(0, Math.round(Number(valor) || 0)) }));
   }
 
   async function salvar() {
     setErro('');
     setSalvando(true);
     try {
+      const itens = Object.entries(quantidades)
+        .map(([plataforma, qtd]) => ({ plataforma, qtd }))
+        .filter((i) => i.qtd > 0);
       await criarColetaMotoboy(companyId, {
         motoboyUid, motoboyId, motoboyNome,
         lojistaId, lojistaNome: lojista?.nome || '',
-        plataforma, baseId, baseNome: base?.nome || '',
-        quantidade: qtd, obs,
+        baseId, baseNome: base?.nome || '',
+        itens, data, obs,
       });
-      onSalvo(qtd);
+      onSalvo(total);
     } catch (e) {
       console.error('[coleta]', e);
       setErro(e?.message || 'Não foi possível registrar. Tente de novo.');
@@ -213,7 +223,19 @@ function RegistrarColeta({ dados, companyId, motoboyUid, motoboyId, motoboyNome,
     }
   }
 
-  const plataformas = dados.config?.plataformas || [];
+  // Últimos 7 dias, para o caso de pacotes que ficaram para trás.
+  const diasRecentes = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    diasRecentes.push(d.toISOString().slice(0, 10));
+  }
+  const rotuloDia = (iso) => {
+    if (iso === hoje) return 'Hoje';
+    const d = new Date(`${iso}T12:00:00`);
+    const nomes = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+    return `${nomes[d.getDay()]} ${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
+  };
 
   return (
     <div className="mb-full">
@@ -245,34 +267,61 @@ function RegistrarColeta({ dados, companyId, motoboyUid, motoboyId, motoboyNome,
           }))}
         />
 
-        {plataformas.length > 1 && (
-          <SeletorGrande
-            label="Plataforma"
-            valor={plataforma}
-            onChange={setPlataforma}
-            placeholder="Escolher"
-            opcoes={plataformas.map((p) => ({ valor: p, rotulo: p }))}
-          />
-        )}
+        {/* ----------------------------------------------------------
+            Quantidade por marketplace.
+            Uma retirada na mesma loja costuma trazer pacotes de vários
+            marketplaces, e cada um tem tarifa diferente — por isso a
+            quebra precisa acontecer aqui, na mão de quem viu os pacotes.
+        ---------------------------------------------------------- */}
+        <div className="mb-mkt">
+          <span className="sg-lbl">Volumes por marketplace</span>
+          {!plataformas.length ? (
+            <p className="mb-mkt-vazio">
+              Nenhum marketplace cadastrado. Fale com o responsável.
+            </p>
+          ) : plataformas.map((plat) => {
+            const v = Number(quantidades[plat]) || 0;
+            return (
+              <div key={plat} className={`mb-mkt-row${v > 0 ? ' on' : ''}`}>
+                <span className="mb-mkt-nome">{plat}</span>
+                <div className="mb-mkt-ctrl">
+                  <button onClick={() => mudarQtd(plat, v - 1)} aria-label="Menos"><Minus size={18} /></button>
+                  <input inputMode="numeric" value={v}
+                    onChange={(e) => mudarQtd(plat, e.target.value.replace(/\D/g, ''))} />
+                  <button onClick={() => mudarQtd(plat, v + 1)} aria-label="Mais"><Plus size={18} /></button>
+                </div>
+              </div>
+            );
+          })}
 
-        <div className="mb-qtd-box">
-          <span className="sg-lbl">Quantidade de volumes</span>
-          <div className="mb-contador">
-            <button onClick={() => setQtd((q) => Math.max(0, q - 1))} aria-label="Menos"><Minus size={22} /></button>
-            <input
-              className="mb-qtd-in"
-              inputMode="numeric"
-              value={qtd}
-              onChange={(e) => setQtd(Math.max(0, Math.round(Number(e.target.value.replace(/\D/g, '')) || 0)))}
-            />
-            <button onClick={() => setQtd((q) => q + 1)} aria-label="Mais"><Plus size={22} /></button>
+          <div className={`mb-mkt-total${total > 0 ? ' on' : ''}`}>
+            <span>Total da coleta</span>
+            <strong>{total}</strong>
           </div>
-          <div className="mb-atalhos">
-            {[10, 20, 50].map((n) => (
-              <button key={n} onClick={() => setQtd((q) => q + n)}>+{n}</button>
+        </div>
+
+        {/* ----------------------------------------------------------
+            Data da retirada.
+            Pacotes que a loja separou no sábado e o motoboy só buscou
+            na segunda pertencem ao SÁBADO. Sem isso, o fechamento da
+            quinzena sai errado e o lojista contesta a cobrança.
+        ---------------------------------------------------------- */}
+        <div className="mb-data-box">
+          <span className="sg-lbl">Data da retirada</span>
+          <div className="mb-dias">
+            {diasRecentes.map((d) => (
+              <button key={d} className={`mb-dia${d === data ? ' on' : ''}`} onClick={() => setData(d)}>
+                {rotuloDia(d)}
+              </button>
             ))}
-            {qtd > 0 && <button className="limpar" onClick={() => setQtd(0)}>Zerar</button>}
           </div>
+          <input className="mb-inp" type="date" value={data} max={hoje}
+            onChange={(e) => setData(e.target.value)} style={{ marginTop: 9 }} />
+          {retroativa && (
+            <div className="mb-retro">
+              Estes volumes vão entrar como retirados em <b>{fmtData(data)}</b>, não hoje.
+            </div>
+          )}
         </div>
 
         <label className="sg">
@@ -284,13 +333,14 @@ function RegistrarColeta({ dados, companyId, motoboyUid, motoboyId, motoboyNome,
         {erro && <div className="mb-alerta" style={{ margin: '4px 0 0' }}><AlertTriangle size={15} /> {erro}</div>}
 
         <p className="mb-aviso-conf">
-          O responsável vai confirmar essa quantidade com a loja. Registre o que você realmente retirou.
+          O responsável vai confirmar essas quantidades com a loja. Registre o que você
+          realmente retirou.
         </p>
       </div>
 
       <div className="mb-full-f">
-        <button className="mb-btn-grande" disabled={salvando || !lojistaId || !baseId || qtd <= 0} onClick={salvar}>
-          {salvando ? <Loader2 size={19} className="mb-spin" /> : <><Check size={19} /> Confirmar coleta</>}
+        <button className="mb-btn-grande" disabled={salvando || !lojistaId || !baseId || total <= 0} onClick={salvar}>
+          {salvando ? <Loader2 size={19} className="mb-spin" /> : <><Check size={19} /> Confirmar {total > 0 ? `${total} volumes` : 'coleta'}</>}
         </button>
       </div>
     </div>
@@ -321,6 +371,14 @@ function ListaColetas({ coletas, lojistas }) {
             <span className="mb-un">volumes</span>
             <span className="mb-data"><Clock size={13} /> {fmtData(c.data)} {c.hora}</span>
           </div>
+          {Array.isArray(c.itens) && c.itens.length > 1 && (
+            <div className="mb-item-plats">
+              {c.itens.filter((i) => i.qtd > 0).map((i) => (
+                <span key={i.plataforma}>{i.plataforma.split('—')[0].trim()} <b>{i.qtd}</b></span>
+              ))}
+            </div>
+          )}
+          {c.retroativa && <div className="mb-item-sub" style={{ color: '#92400E' }}>Retirada retroativa</div>}
           {c.baseNome && <div className="mb-item-sub">Base: {c.baseNome}</div>}
           {c.qtdConfirmada != null && c.qtdConfirmada !== c.qtdInformada && (
             <div className="mb-item-sub" style={{ color: '#B91C1C' }}>
@@ -700,6 +758,30 @@ const MB_CSS = `
 .mb-preview{ text-align:center; }
 .mb-preview img{ width:100%; border-radius:15px; border:1px solid #E5E7EB; }
 .mb-trocar{ margin-top:10px; background:transparent; border:0; color:#1D4ED8; font-size:13.5px; cursor:pointer; font-family:inherit; text-decoration:underline; }
+
+.mb-mkt{ margin-bottom:15px; }
+.mb-mkt-vazio{ font-size:13px; color:#9CA3AF; background:#fff; border:1px solid #E5E7EB; border-radius:13px; padding:16px; text-align:center; }
+.mb-mkt-row{ display:flex; align-items:center; gap:10px; background:#fff; border:1.5px solid #E5E7EB; border-radius:13px; padding:10px 12px; margin-bottom:8px; }
+.mb-mkt-row.on{ border-color:var(--color-primary,#0B1533); }
+.mb-mkt-nome{ flex:1; min-width:0; font-size:14px; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mb-mkt-ctrl{ display:flex; align-items:center; gap:5px; flex-shrink:0; }
+.mb-mkt-ctrl button{ width:38px; height:38px; border-radius:10px; border:1px solid #D1D5DB; background:#fff; color:#0B1324; display:flex; align-items:center; justify-content:center; cursor:pointer; }
+.mb-mkt-ctrl button:active{ background:#F3F4F6; }
+.mb-mkt-ctrl input{ width:52px; height:38px; border:1px solid #D1D5DB; border-radius:10px; text-align:center; font-size:17px; font-weight:700; color:#0B1324; font-family:inherit; background:#fff; }
+.mb-mkt-ctrl input:focus{ outline:none; border-color:var(--color-primary,#0B1533); }
+.mb-mkt-total{ display:flex; align-items:center; justify-content:space-between; padding:13px 14px; border-radius:13px; background:#F3F4F6; color:#6B7280; font-size:13.5px; }
+.mb-mkt-total.on{ background:var(--color-primary,#0B1533); color:#fff; }
+.mb-mkt-total strong{ font-size:22px; letter-spacing:-.02em; }
+
+.mb-data-box{ margin-bottom:15px; }
+.mb-dias{ display:flex; gap:7px; overflow-x:auto; padding-bottom:2px; }
+.mb-dia{ flex-shrink:0; padding:11px 14px; border-radius:12px; border:1.5px solid #D1D5DB; background:#fff; font-size:13.5px; font-weight:600; color:#374151; cursor:pointer; font-family:inherit; white-space:nowrap; }
+.mb-dia.on{ background:var(--color-primary,#0B1533); border-color:var(--color-primary,#0B1533); color:#fff; }
+.mb-retro{ margin-top:9px; padding:11px 13px; border-radius:12px; background:#FEF3C7; border:1px solid #FDE68A; color:#92400E; font-size:12.5px; }
+
+.mb-item-plats{ display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.mb-item-plats span{ font-size:11px; background:#F3F4F6; color:#6B7280; padding:3px 7px; border-radius:6px; }
+.mb-item-plats b{ color:#0B1324; }
 
 .mb-nav{ position:fixed; left:0; right:0; bottom:0; background:#fff; border-top:1px solid #E5E7EB; display:grid; grid-template-columns:repeat(3,1fr); padding:6px 4px calc(6px + env(safe-area-inset-bottom)); z-index:40; }
 .mb-nav-b{ background:transparent; border:0; display:flex; flex-direction:column; align-items:center; gap:3px; padding:9px 4px; color:#9CA3AF; font-size:11px; font-weight:500; cursor:pointer; border-radius:12px; font-family:inherit; }

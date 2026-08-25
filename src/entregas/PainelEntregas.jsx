@@ -10,7 +10,7 @@ import {
 import { Vazio, Aviso, fmtBRL, fmtData } from './ui';
 import {
   getConfigEntregas, periodosDoMes, indicadoresOperacao, resultadoOperacao,
-  dentroDoPeriodo, statusConciliacao, qtdCobravelColeta, cobrancaDoLojista,
+  dentroDoPeriodo, statusConciliacao, qtdCobravelColeta, cobrancaDoLojista, totalInformado,
   repasseDoMotoboy, somaPagamentos, saldoRepasse,
 } from './engine';
 
@@ -40,6 +40,7 @@ export default function PainelEntregas({ data, setData, onIrPara }) {
   const lojistas = Array.isArray(data?.entLojistas) ? data.entLojistas : [];
   const motoboys = Array.isArray(data?.entMotoboys) ? data.entMotoboys : [];
   const pagamentos = Array.isArray(data?.entPagamentos) ? data.entPagamentos : [];
+  const tarifas = Array.isArray(data?.entTarifas) ? data.entTarifas : [];
 
   const hoje = new Date();
   const [{ ano, mes }] = useState({ ano: hoje.getFullYear(), mes: hoje.getMonth() + 1 });
@@ -54,8 +55,8 @@ export default function PainelEntregas({ data, setData, onIrPara }) {
     [coletas, rotas, periodo, cfg]
   );
   const res = useMemo(
-    () => resultadoOperacao({ coletas, rotas, periodo, cfgComercial: cfg }),
-    [coletas, rotas, periodo, cfg]
+    () => resultadoOperacao({ coletas, rotas, periodo, cfgComercial: cfg, entTarifas: tarifas }),
+    [coletas, rotas, periodo, cfg, tarifas]
   );
 
   // Repasses em aberto no período
@@ -87,11 +88,11 @@ export default function PainelEntregas({ data, setData, onIrPara }) {
       .map((x) => ({
         ...x,
         nome: lojistas.find((l) => l.id === x.id)?.nome || 'Lojista',
-        valor: cobrancaDoLojista(x.itens, cfg).total,
+        valor: cobrancaDoLojista(x.itens, cfg, tarifas).total,
       }))
       .sort((a, b) => b.volumes - a.volumes)
       .slice(0, 5);
-  }, [coletas, lojistas, periodo, cfg]);
+  }, [coletas, lojistas, periodo, cfg, tarifas]);
 
   const topMotoboys = useMemo(() => {
     const mapa = new Map();
@@ -113,7 +114,7 @@ export default function PainelEntregas({ data, setData, onIrPara }) {
     const mapa = new Map();
     coletas.filter((c) => dentroDoPeriodo(c.data, periodo)).forEach((c) => {
       const k = c.data;
-      mapa.set(k, (mapa.get(k) || 0) + (Number(c.qtdInformada) || 0));
+      mapa.set(k, (mapa.get(k) || 0) + totalInformado(c));
     });
     return [...mapa.entries()]
       .sort((a, b) => a[0].localeCompare(b[0]))

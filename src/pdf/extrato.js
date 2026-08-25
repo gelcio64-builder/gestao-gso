@@ -31,10 +31,13 @@ function hexToRgbArr(hex) {
 
 function imgSize(dataUrl) {
   return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve({ w: img.width, h: img.height });
-    img.onerror = () => resolve(null);
-    img.src = dataUrl;
+    try {
+      const img = new Image();
+      img.onload = () => resolve({ w: img.width, h: img.height });
+      img.onerror = () => resolve(null);
+      setTimeout(() => resolve(null), 4000);
+      img.src = dataUrl;
+    } catch (e) { resolve(null); }
   });
 }
 
