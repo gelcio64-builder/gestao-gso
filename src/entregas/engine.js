@@ -45,13 +45,65 @@ export function getConfigEntregas(entConfig = []) {
 //   { id, tipo: 'lojista'|'motoboy', refId, ...valores, vigenciaInicio, historico[] }
 // Quando não existe doc, vale o padrão da empresa.
 
-export function tarifaDoLojista(lojistaId, entTarifas = [], cfgComercial = {}) {
+/**
+ * Tarifa de um lojista para uma plataforma específica.
+ *
+ * A loja é uma só, mas cada marketplace dentro dela paga um valor diferente:
+ * a Alexs Shops pode pagar R$ 10 no Mercado Livre e R$ 8 na Amazon. Por isso
+ * a busca é em três degraus:
+ *   1. valor daquela plataforma naquele lojista
+ *   2. valor geral daquele lojista (plataforma sem preço próprio)
+ *   3. padrão da empresa
+ */
+export function tarifaDoLojista(lojistaId, plataforma, entTarifas = [], cfgComercial = {}) {
   const t = (entTarifas || []).find((x) => x.tipo === 'lojista' && x.refId === lojistaId);
+  const porPlat = t?.porPlataforma || {};
+  const daPlat = plataforma != null && porPlat[plataforma] != null ? n(porPlat[plataforma]) : null;
+  const geral = t && t.valorPacote != null ? n(t.valorPacote) : null;
+
   return {
-    valorPacote: t && t.valorPacote != null ? n(t.valorPacote) : n(cfgComercial.tarifaLojistaPadrao),
+    valorPacote: daPlat != null ? daPlat : (geral != null ? geral : n(cfgComercial.tarifaLojistaPadrao)),
     valorMinimo: t && t.valorMinimo != null ? n(t.valorMinimo) : n(cfgComercial.valorMinimoPadrao),
     personalizada: !!t,
+    especificaDaPlataforma: daPlat != null,
+    porPlataforma: porPlat,
+    geral,
   };
+}
+
+/**
+ * Normaliza os itens de uma coleta.
+ *
+ * Coletas novas trazem `itens: [{ plataforma, qtd, qtdConfirmada }]` — uma
+ * mesma retirada pode ter pacotes de vários marketplaces. Coletas antigas
+ * têm um único `plataforma` + `qtdInformada`; aqui elas viram um item só,
+ * para que todo o resto do sistema enxergue um formato único.
+ */
+export function itensColeta(coleta = {}) {
+  if (Array.isArray(coleta.itens) && coleta.itens.length) {
+    return coleta.itens.map((i) => ({
+      plataforma: i.plataforma || '',
+      qtd: int(i.qtd),
+      qtdConfirmada: i.qtdConfirmada == null ? null : int(i.qtdConfirmada),
+      tarifa: i.tarifa == null ? null : n(i.tarifa),
+    }));
+  }
+  return [{
+    plataforma: coleta.plataforma || '',
+    qtd: int(coleta.qtdInformada),
+    qtdConfirmada: coleta.qtdConfirmada == null ? null : int(coleta.qtdConfirmada),
+    tarifa: coleta.snapshot?.tarifaLojista == null ? null : n(coleta.snapshot.tarifaLojista),
+  }];
+}
+
+export function totalInformado(coleta = {}) {
+  return itensColeta(coleta).reduce((s, i) => s + i.qtd, 0);
+}
+
+export function totalConfirmado(coleta = {}) {
+  const itens = itensColeta(coleta);
+  if (itens.every((i) => i.qtdConfirmada == null)) return null;
+  return itens.reduce((s, i) => s + (i.qtdConfirmada == null ? i.qtd : i.qtdConfirmada), 0);
 }
 
 export function tarifaDoMotoboy(motoboyId, entTarifas = [], cfgComercial = {}) {
@@ -65,12 +117,26 @@ export function tarifaDoMotoboy(motoboyId, entTarifas = [], cfgComercial = {}) {
 }
 
 /** Carimbo gravado numa COLETA no instante da criação. */
-export function snapshotColeta(lojistaId, motoboyId, entTarifas, cfgComercial) {
-  const tl = tarifaDoLojista(lojistaId, entTarifas, cfgComercial);
+export function snapshotColeta(coleta, entTarifas, cfgComercial) {
+  const lojistaId = coleta?.lojistaId;
+  const motoboyId = coleta?.motoboyId;
   const tm = tarifaDoMotoboy(motoboyId, entTarifas, cfgComercial);
+  const itens = itensColeta(coleta);
+
+  // Uma tarifa por marketplace, congelada agora.
+  const tarifasPorItem = {};
+  itens.forEach((i) => {
+    tarifasPorItem[i.plataforma || '—'] =
+      tarifaDoLojista(lojistaId, i.plataforma, entTarifas, cfgComercial).valorPacote;
+  });
+
+  const primeira = tarifaDoLojista(lojistaId, itens[0]?.plataforma, entTarifas, cfgComercial);
+
   return {
-    tarifaLojista: tl.valorPacote,
-    valorMinimoLojista: tl.valorMinimo,
+    tarifasPorItem,
+    // Mantido para compatibilidade com coletas de plataforma única.
+    tarifaLojista: primeira.valorPacote,
+    valorMinimoLojista: primeira.valorMinimo,
     tarifaColetaMotoboy: tm.modoPagamento === MODO_PAGAMENTO.COLETA_ENTREGA ? tm.valorColeta : 0,
     modoPagamento: tm.modoPagamento,
     baseColeta: cfgComercial.baseColeta || BASE_COLETA.CONFIRMADA,
@@ -99,9 +165,10 @@ export function snapshotRota(motoboyId, entTarifas, cfgComercial) {
 
 export function qtdCobravelColeta(coleta = {}, cfgComercial = {}) {
   const base = coleta.snapshot?.baseColeta || cfgComercial.baseColeta || BASE_COLETA.CONFIRMADA;
-  if (base === BASE_COLETA.INFORMADA) return int(coleta.qtdInformada);
-  // Confirmada: enquanto o lojista não confirmar, cai na informada (previsão).
-  return coleta.qtdConfirmada == null ? int(coleta.qtdInformada) : int(coleta.qtdConfirmada);
+  const itens = itensColeta(coleta);
+  if (base === BASE_COLETA.INFORMADA) return itens.reduce((s, i) => s + i.qtd, 0);
+  // Confirmada: enquanto o lojista não confirmar, vale a informada (previsão).
+  return itens.reduce((s, i) => s + (i.qtdConfirmada == null ? i.qtd : i.qtdConfirmada), 0);
 }
 
 export function qtdPagavelColeta(coleta = {}, cfgComercial = {}) {
@@ -116,13 +183,14 @@ export function qtdPagavelRota(rota = {}, cfgComercial = {}) {
 
 /** Diferença entre o que o motoboy disse e o que o lojista confirmou. */
 export function divergenciaColeta(coleta = {}) {
-  if (coleta.qtdConfirmada == null) return null;
-  return int(coleta.qtdConfirmada) - int(coleta.qtdInformada);
+  const conf = totalConfirmado(coleta);
+  if (conf == null) return null;
+  return conf - totalInformado(coleta);
 }
 
 export function statusConciliacao(coleta = {}) {
   if (coleta.conciliacaoStatus === 'corrigida') return 'corrigida';
-  if (coleta.qtdConfirmada == null) return 'pendente';
+  if (totalConfirmado(coleta) == null) return 'pendente';
   return divergenciaColeta(coleta) === 0 ? 'conciliada' : 'divergente';
 }
 
@@ -134,21 +202,49 @@ export function statusConciliacao(coleta = {}) {
  * O mínimo é por COLETA, não por período — um lojista pequeno e distante não
  * pode sair por R$ 30 só porque mandou 3 pacotes naquele dia.
  */
-export function cobrancaDeUmaColeta(coleta = {}, cfgComercial = {}) {
-  const qtd = qtdCobravelColeta(coleta, cfgComercial);
-  const tarifa = coleta.snapshot?.tarifaLojista != null
-    ? n(coleta.snapshot.tarifaLojista)
-    : n(cfgComercial.tarifaLojistaPadrao);
+export function cobrancaDeUmaColeta(coleta = {}, cfgComercial = {}, entTarifas = []) {
+  const base = coleta.snapshot?.baseColeta || cfgComercial.baseColeta || BASE_COLETA.CONFIRMADA;
+  const usarConfirmada = base !== BASE_COLETA.INFORMADA;
+  const snapTar = coleta.snapshot?.tarifasPorItem || null;
+
+  const detalhe = itensColeta(coleta).map((i) => {
+    const qtd = usarConfirmada && i.qtdConfirmada != null ? i.qtdConfirmada : i.qtd;
+    // Ordem de preferência da tarifa: o que está carimbado no item, o que
+    // ficou no snapshot da coleta, e só então a tabela de hoje.
+    let tarifa = i.tarifa;
+    if (tarifa == null && snapTar && snapTar[i.plataforma || '—'] != null) {
+      tarifa = n(snapTar[i.plataforma || '—']);
+    }
+    if (tarifa == null) {
+      tarifa = tarifaDoLojista(coleta.lojistaId, i.plataforma, entTarifas, cfgComercial).valorPacote;
+    }
+    return { plataforma: i.plataforma, qtd, tarifa: n(tarifa), subtotal: r2(qtd * n(tarifa)) };
+  });
+
+  const qtd = detalhe.reduce((s, d) => s + d.qtd, 0);
+  const bruto = r2(detalhe.reduce((s, d) => s + d.subtotal, 0));
+
   const minimo = coleta.snapshot?.valorMinimoLojista != null
     ? n(coleta.snapshot.valorMinimoLojista)
     : n(cfgComercial.valorMinimoPadrao);
-  const bruto = r2(qtd * tarifa);
+
+  // O mínimo vale por VIAGEM, não por marketplace: 3 pacotes do Mercado Livre
+  // mais 2 da Shopee é uma coleta só, e cobra um mínimo só.
   const usouMinimo = minimo > bruto;
-  return { qtd, tarifa, bruto, minimo, total: r2(usouMinimo ? minimo : bruto), usouMinimo };
+
+  // Tarifa média, usada só para exibição em telas de uma linha por coleta.
+  const tarifaMedia = qtd > 0 ? r2(bruto / qtd) : 0;
+
+  return {
+    qtd, detalhe, tarifa: tarifaMedia, bruto, minimo,
+    total: r2(usouMinimo ? minimo : bruto), usouMinimo,
+  };
 }
 
-export function cobrancaDoLojista(coletas = [], cfgComercial = {}) {
-  const linhas = coletas.map((c) => ({ coletaId: c.id, data: c.data, ...cobrancaDeUmaColeta(c, cfgComercial) }));
+export function cobrancaDoLojista(coletas = [], cfgComercial = {}, entTarifas = []) {
+  const linhas = coletas.map((c) => ({
+    coletaId: c.id, data: c.data, ...cobrancaDeUmaColeta(c, cfgComercial, entTarifas),
+  }));
   return {
     linhas,
     qtdTotal: linhas.reduce((s, l) => s + l.qtd, 0),
@@ -296,7 +392,7 @@ export function indicadoresOperacao({ coletas = [], rotas = [], periodo = null, 
   const cs = periodo ? coletas.filter((c) => dentroDoPeriodo(c.data, periodo)) : coletas;
   const rs = periodo ? rotas.filter((r) => dentroDoPeriodo(r.data, periodo)) : rotas;
 
-  const coletados = cs.reduce((s, c) => s + int(c.qtdInformada), 0);
+  const coletados = cs.reduce((s, c) => s + totalInformado(c), 0);
   const recebidos = cs.filter((c) => c.recebidoNaBase).reduce((s, c) => s + qtdCobravelColeta(c, cfgComercial), 0);
   const atribuidos = rs.reduce((s, r) => s + int(r.qtdAtribuida), 0);
   const entregues = rs.reduce((s, r) => s + int(r.qtdConcluida), 0);
@@ -324,10 +420,10 @@ export function indicadoresOperacao({ coletas = [], rotas = [], periodo = null, 
  * impostos e salários continuam no Financeiro Empresa. A UI precisa deixar
  * isso explícito para o dono não se enganar.
  */
-export function resultadoOperacao({ coletas = [], rotas = [], periodo = null, cfgComercial = {} } = {}) {
+export function resultadoOperacao({ coletas = [], rotas = [], periodo = null, cfgComercial = {}, entTarifas = [] } = {}) {
   const cs = periodo ? coletas.filter((c) => dentroDoPeriodo(c.data, periodo)) : coletas;
   const rs = periodo ? rotas.filter((r) => dentroDoPeriodo(r.data, periodo)) : rotas;
-  const receita = cobrancaDoLojista(cs, cfgComercial).total;
+  const receita = cobrancaDoLojista(cs, cfgComercial, entTarifas).total;
   const repasse = repasseDoMotoboy({ coletas: cs, rotas: rs, cfgComercial }).total;
   return {
     receita,
@@ -366,4 +462,135 @@ export function registrarHistorico(doc = {}, { acao, campo, de, para, motivo, ui
     em: new Date().toISOString(),
   };
   return { ...doc, historico: [...(doc.historico || []), entrada] };
+}
+
+// ------------------------------------------------------------
+// Conta corrente do LOJISTA
+// ------------------------------------------------------------
+// Os recebimentos ficam num array dentro do próprio fechamento —
+// não numa coleção nova. Assim o valor devido e o que já entrou
+// vivem juntos, e continua valendo a regra de ouro: o total do
+// fechamento NUNCA é reduzido pelo pagamento. O saldo é derivado.
+
+export function somaRecebimentos(fechamento = {}) {
+  return r2((fechamento.recebimentos || []).reduce((s, x) => s + n(x.valor), 0));
+}
+
+export function saldoFechamento(fechamento = {}) {
+  return r2(n(fechamento.total) - somaRecebimentos(fechamento));
+}
+
+export function statusFechamentoLojista(fechamento = {}) {
+  if (!fechamento || !fechamento.id) return 'aberto';
+  const total = n(fechamento.total);
+  const pago = somaRecebimentos(fechamento);
+  if (total > 0 && pago >= total - 0.009) return 'quitado';
+  const vencido = fechamento.vencimento && fechamento.vencimento < todayISO();
+  if (pago > 0) return vencido ? 'vencido' : 'parcial';
+  return vencido ? 'vencido' : 'cobrado';
+}
+
+/** Data em que o fechamento foi quitado (último recebimento que fechou a conta). */
+export function dataQuitacao(fechamento = {}) {
+  if (statusFechamentoLojista(fechamento) !== 'quitado') return null;
+  const recs = [...(fechamento.recebimentos || [])].sort((a, b) =>
+    String(a.data).localeCompare(String(b.data)));
+  return recs.length ? recs[recs.length - 1].data : null;
+}
+
+/** Linha do tempo de fechamentos de um lojista, do mais recente ao mais antigo. */
+export function historicoLojista(lojistaId, entFechamentos = []) {
+  return (entFechamentos || [])
+    .filter((f) => f.tipo === 'lojista' && f.refId === lojistaId)
+    .map((f) => ({
+      ...f,
+      pago: somaRecebimentos(f),
+      saldo: saldoFechamento(f),
+      situacao: statusFechamentoLojista(f),
+      quitadoEm: dataQuitacao(f),
+      // Tarifa média efetivamente aplicada no período, para exibição.
+      tarifaMedia: f.qtdTotal > 0 ? r2(n(f.total) / int(f.qtdTotal)) : 0,
+    }))
+    .sort((a, b) => String(b.inicio).localeCompare(String(a.inicio)));
+}
+
+// ------------------------------------------------------------
+// Conta corrente do MOTOBOY
+// ------------------------------------------------------------
+// Não é uma segunda fonte de dados: é a MESMA apuração da aba
+// Repasses, recortada por motoboy e estendida por vários meses.
+// Qualquer pagamento registrado lá aparece aqui automaticamente.
+
+/**
+ * @param {number} mesesParaTras quantos meses retroceder a partir de hoje
+ */
+export function historicoRepasses({
+  motoboyId, coletas = [], rotas = [], pagamentos = [],
+  cfgComercial = {}, mesesParaTras = 6,
+} = {}) {
+  const hoje = new Date();
+  const linhas = [];
+
+  for (let k = 0; k < mesesParaTras; k++) {
+    const d = new Date(hoje.getFullYear(), hoje.getMonth() - k, 1);
+    const ano = d.getFullYear();
+    const mes = d.getMonth() + 1;
+
+    periodosDoMes(ano, mes, cfgComercial).forEach((p) => {
+      const cs = coletas.filter((c) => c.motoboyId === motoboyId && dentroDoPeriodo(c.data, p));
+      const rs = rotas.filter((r) => r.motoboyId === motoboyId && dentroDoPeriodo(r.data, p));
+      const calc = repasseDoMotoboy({ coletas: cs, rotas: rs, cfgComercial });
+      const pags = pagamentos.filter((x) => x.motoboyId === motoboyId && x.periodoChave === p.chave);
+      const pago = somaPagamentos(pags);
+
+      // Períodos sem movimento e sem pagamento não entram na linha do tempo.
+      if (calc.total <= 0 && pago <= 0) return;
+
+      const venc = vencimentoCobranca(p, cfgComercial);
+      linhas.push({
+        periodo: p,
+        ano, mes,
+        calc,
+        rotas: rs,
+        coletas: cs,
+        pagamentos: pags,
+        pago,
+        saldo: saldoRepasse(calc.total, pago),
+        situacao: statusRepasse(calc.total, pago, venc),
+        vencimento: venc,
+        // Tarifa efetivamente praticada no período (média ponderada).
+        tarifaMedia: calc.qtdEntregas > 0 ? r2(calc.valorEntregas / calc.qtdEntregas) : 0,
+      });
+    });
+  }
+
+  return linhas.sort((a, b) => String(b.periodo.inicio).localeCompare(String(a.periodo.inicio)));
+}
+
+/** Linhas do detalhamento do extrato: uma por rota, com a tarifa da época. */
+export function detalheRotasExtrato(rotas = [], cfgComercial = {}) {
+  return [...rotas]
+    .sort((a, b) => String(a.data).localeCompare(String(b.data)))
+    .map((r) => {
+      const qtd = qtdPagavelRota(r, cfgComercial);
+      const tarifa = r.snapshot?.tarifaEntregaMotoboy != null
+        ? n(r.snapshot.tarifaEntregaMotoboy)
+        : n(cfgComercial.tarifaEntregaPadrao);
+      return {
+        data: r.data,
+        rotaId: r.id,
+        codigo: `R-${String(r.id).slice(-4).toUpperCase()}`,
+        regiao: r.regiao || '—',
+        base: r.baseNome || '',
+        qtd,
+        tarifa,
+        valor: r2(qtd * tarifa),
+      };
+    });
+}
+
+/** Identificador legível de documento, estável para o mesmo período. */
+export function idDocumento(prefixo, refId, periodoChave) {
+  const base = `${String(refId || '').slice(-4)}${String(periodoChave || '').replace(/-/g, '')}`;
+  return `${prefixo}-${base.toUpperCase()}`;
 }

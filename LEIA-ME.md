@@ -1,59 +1,117 @@
-# Bloco 6 — Painel da operação
+# Bloco 11 — Conta corrente de lojistas e motoboys
 
 ## Como subir
 
-Dois arquivos em `src/entregas/`:
+Seis arquivos. Nada de Firebase, nada de App.jsx.
 
-- `PainelEntregas.jsx` (novo)
-- `Entregas.jsx` (substitui — ganhou a aba Painel, que passa a ser a inicial)
-
-Nada de Firebase. Nada de App.jsx.
+`src/entregas/` — engine.js, ContaCorrente.jsx (novo), Lojistas.jsx,
+Entregas.jsx, Fechamentos.jsx
+`src/pdf/` — extrato.js (novo)
 
 Arraste a **pasta `src`** no GitHub.
 
 ---
 
-## O que aparece
+## O levantamento, antes de codar
 
-Ao abrir Entregas, o Painel é a primeira aba.
+**Já existia e foi reaproveitado, não recriado:**
 
-**Alertas no topo** — coletas aguardando conferência (clicável, leva direto
-para a tela de conferência) e divergências encontradas.
+- Snapshot de tarifas (item 4 do seu prompt) — já estava completo. Cada coleta
+  guarda a tarifa de cada marketplace e cada rota guarda a tarifa por entrega,
+  congeladas no momento em que nasceram.
+- Aba Repasses (item 5) — total gerado, pago, saldo, status, pagamentos.
+  O Histórico do motoboy usa **a mesma função** de apuração.
+- PDF de cobrança do lojista — integrado ao histórico, não refeito.
 
-**Seis indicadores** — coletados, na base, atribuídos, entregues, pendentes
-e ocorrências.
+**Foi criado:**
 
-**Resultado da operação** — receita dos lojistas, repasse aos motoboys e
-margem operacional com o percentual.
-
-**Card de repasses** — clicável, abre a tela completa de Repasses.
-
-**Dois gráficos** — rosca de volumes por etapa (com a taxa de sucesso) e
-barras de coletas por dia.
-
-**Rankings** — top 5 lojistas por volume e valor, top 5 motoboys por
-entregas concluídas e percentual de conclusão.
-
-**Fluxo da operação** — os cinco passos, cada um clicando direto na tela
-correspondente.
-
-Tudo respeita o período selecionado (quinzena ou o ciclo configurado).
+- Histórico Financeiro do lojista
+- Histórico de Repasses do motoboy
+- Extrato de Repasse em PDF
+- Registro de recebimento do lojista (não existia)
 
 ---
 
-## Uma observação sobre a margem
+## 1. Histórico Financeiro do lojista
 
-O card diz, em texto, que aquilo é **margem operacional e não lucro**.
+Lojistas → botão **Histórico** no card.
 
-É proposital. Receita dos lojistas menos repasse aos motoboys não desconta
-combustível, aluguel, impostos, manutenção nem salários. Esse número passa
-uma impressão boa demais se for lido como lucro, e é o tipo de conta em que
-o dono decide contratar mais gente achando que sobra dinheiro. O lucro real
-continua sendo o do Financeiro Empresa.
+Linha do tempo de todos os fechamentos, do mais recente ao mais antigo, com
+período, volumes, tarifa média, total, recebido, saldo, vencimento, data do
+pagamento e situação. No topo, três cards: faturado, recebido, em aberto.
+
+Cada fechamento tem **PDF** e **Compartilhar** (WhatsApp) usando o gerador de
+cobrança que já existia.
+
+### Registro de recebimento
+
+Botão **Registrar recebimento**, com valor parcial permitido.
+
+A regra: o total do fechamento **nunca** é reduzido. O saldo é derivado.
+A conta a receber no Financeiro Empresa é baixada apenas quando o fechamento
+é quitado por completo — enquanto houver saldo, ela continua em aberto lá,
+porque é ela que responde "quanto ainda tenho a receber".
+
+> Efeito colateral honesto: um recebimento parcial só aparece no caixa quando
+> o lojista quitar. Se isso incomodar no uso real, a gente inverte.
+
+Um fechamento com recebimento registrado **não pode mais ser reaberto** —
+seria apagar histórico de caixa. Estorne o recebimento primeiro.
 
 ---
 
-## Com isso o módulo está completo
+## 2. Histórico de Repasses do motoboy
 
-Lojista → coleta → conferência → base → triagem → entrega → comprovante →
-fechamento → cobrança em PDF → repasse → financeiro → indicadores.
+Motoboys → botão **Histórico** no card.
+
+Quinzenas dos últimos 3, 6 ou 12 meses, com entregas, tarifa praticada,
+total gerado, pago, saldo, pagamentos realizados e situação.
+
+**Fonte única:** esta tela lê os mesmos documentos da aba Repasses. Registrar
+um pagamento lá muda o histórico aqui no mesmo instante — não há segunda
+apuração nem dado duplicado.
+
+---
+
+## 3. Extrato de Repasse em PDF
+
+Botão **Extrato PDF** em cada período.
+
+Mesmo padrão dos outros documentos: logo, marca d'água, timbrado, cor da
+paleta. Contém dados da empresa, dados do motoboy (nome, telefone, PIX,
+região, base), período, três cards de resumo, detalhamento com uma linha por
+rota (data, código, região, entregas, tarifa, valor), pagamentos já
+realizados, saldo em destaque, situação, data e hora de emissão e número
+único do documento.
+
+O botão **Enviar** abre o WhatsApp com o resumo pronto.
+
+---
+
+## 4. Tarifa histórica — verificado
+
+Testado com um motoboy que recebia R$ 6,50 na primeira quinzena de agosto e
+passou a R$ 7,00 na segunda:
+
+```
+16–31/08 | gerado 287,00 | tarifa 7,00
+01–15/08 | gerado 208,00 | tarifa 6,50
+```
+
+Cada período mantém a tarifa da época. O extrato de agosto emitido em
+dezembro continua saindo com os valores de agosto.
+
+---
+
+## Como testar
+
+1. Feche uma quinzena de um lojista na aba Fechamentos
+2. Lojistas → Histórico → registre um recebimento **parcial**
+3. Confira: status vira "Parcialmente pago", saldo aparece, e no Financeiro
+   Empresa a conta a receber continua pendente
+4. Registre o restante → status "Quitado" e a conta a receber é baixada
+5. Motoboys → Histórico → gere o Extrato PDF de um período
+6. Registre um pagamento na aba Repasses e volte ao Histórico: o valor já
+   está lá, sem precisar recarregar
+
+Build sem erro.

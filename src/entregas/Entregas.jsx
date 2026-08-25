@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { doc, setDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import {
   Bike, Plus, Pencil, Trash2, KeyRound, Copy, Check, Search,
-  CheckCircle2, AlertTriangle, Link2, Coins, Settings, Store, Warehouse, Package, FileText, Wallet, LayoutDashboard,
+  CheckCircle2, AlertTriangle, Link2, Coins, Settings, Store, Warehouse, Package, FileText, Wallet, LayoutDashboard, History,
 } from 'lucide-react';
 import { fdb } from '../firebase';
 import { useAuth } from '../auth/AuthContext';
@@ -21,6 +21,7 @@ import Triagem from './Triagem';
 import Repasses from './Repasses';
 import Fechamentos from './Fechamentos';
 import ConfigEntregas from './ConfigEntregas';
+import { HistoricoMotoboy } from './ContaCorrente';
 
 // ============================================================
 //   MÓDULO ENTREGAS — painel de gestão
@@ -97,6 +98,7 @@ function Motoboys({ data, setData }) {
   const [convite, setConvite] = useState(null);
   const [tarifaAlvo, setTarifaAlvo] = useState(null);
   const [delAlvo, setDelAlvo] = useState(null);
+  const [histAlvo, setHistAlvo] = useState(null);
   const [erro, setErro] = useState('');
 
   const filtrados = useMemo(() => {
@@ -240,6 +242,7 @@ function Motoboys({ data, setData }) {
                 onEditar={() => setForm(m)}
                 onExcluir={() => setDelAlvo(m)}
                 onTarifa={() => setTarifaAlvo(m)}
+                onHistorico={() => setHistAlvo(m)}
                 onConvite={() => gerarConvite(m)}
                 onRevogar={() => revogarConvite(m)}
                 onVerCodigo={() => setConvite({ codigo: m.conviteCodigo, nome: m.nome })} />
@@ -253,6 +256,9 @@ function Motoboys({ data, setData }) {
         <FormTarifaMotoboy motoboy={tarifaAlvo} atual={tarifaDoMotoboy(tarifaAlvo.id, tarifas, cfg)} cfg={cfg}
           onSalvar={(v) => salvarTarifa(tarifaAlvo.id, v)} onCancelar={() => setTarifaAlvo(null)} />
       )}
+      {histAlvo && (
+        <HistoricoMotoboy motoboy={histAlvo} data={data} onFechar={() => setHistAlvo(null)} />
+      )}
       {convite && <ModalConvite convite={convite} onFechar={() => setConvite(null)} />}
       {delAlvo && (
         <ModalConfirma titulo="Excluir motoboy"
@@ -263,7 +269,7 @@ function Motoboys({ data, setData }) {
   );
 }
 
-function CardMotoboy({ m, tarifa, base, podeConvidar, onEditar, onExcluir, onTarifa, onConvite, onRevogar, onVerCodigo }) {
+function CardMotoboy({ m, tarifa, base, podeConvidar, onEditar, onExcluir, onTarifa, onHistorico, onConvite, onRevogar, onVerCodigo }) {
   const iniciais = (m.nome || '?').trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
   const temConvite = !!m.conviteCodigo;
   const duplo = tarifa.modoPagamento === MODO_PAGAMENTO.COLETA_ENTREGA;
@@ -307,6 +313,7 @@ function CardMotoboy({ m, tarifa, base, podeConvidar, onEditar, onExcluir, onTar
           ? <button className="btn btn-ghost ent-b-sm" onClick={onRevogar}>Revogar</button>
           : <button className="btn btn-primary ent-b-sm" onClick={onConvite}><KeyRound size={13} /> Convite</button>
         )}
+        <button className="btn btn-ghost ent-b-sm" onClick={onHistorico}><History size={13} /> Histórico</button>
         <button className="btn btn-ghost ent-b-sm" onClick={onTarifa}><Coins size={13} /> Tarifa</button>
         <button className="btn btn-ghost ent-b-sm" onClick={onEditar}><Pencil size={13} /></button>
         <button className="btn btn-ghost ent-b-sm ent-b-del" onClick={onExcluir}><Trash2 size={13} /></button>

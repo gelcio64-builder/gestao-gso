@@ -4,10 +4,12 @@ import {
   ChevronRight, Lock, Coins,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
-import { ModalBase, Campo, Vazio, Aviso, uidLocal, fmtData, fmtBRL } from './ui';
+import { ModalBase, Campo, Vazio, Aviso, Chip, uidLocal, fmtData, fmtBRL } from './ui';
+import { FECHAMENTO_STATUS } from './constants';
 import {
   getConfigEntregas, periodosDoMes, cobrancaDoLojista, statusConciliacao,
-  vencimentoCobranca, dentroDoPeriodo,
+  vencimentoCobranca, dentroDoPeriodo, statusFechamentoLojista, somaRecebimentos,
+  saldoFechamento,
 } from './engine';
 import { CAT_RECEITA_ENTREGAS } from './constants';
 import { gerarCobrancaPDF } from '../pdf/cobranca';
@@ -49,6 +51,7 @@ export default function Fechamentos({ data, setData }) {
   const coletas = Array.isArray(data?.entColetas) ? data.entColetas : [];
   const lojistas = Array.isArray(data?.entLojistas) ? data.entLojistas : [];
   const fechamentos = Array.isArray(data?.entFechamentos) ? data.entFechamentos : [];
+  const tarifas = Array.isArray(data?.entTarifas) ? data.entTarifas : [];
 
   const [{ ano, mes }, setMesRef] = useState(mesAtual());
   const [periodoIdx, setPeriodoIdx] = useState(0);
@@ -74,7 +77,7 @@ export default function Fechamentos({ data, setData }) {
     });
 
     return [...mapa.values()].map((g) => {
-      const calc = cobrancaDoLojista(g.conferidas, cfg);
+      const calc = cobrancaDoLojista(g.conferidas, cfg, tarifas);
       const fech = fechamentos.find(
         (f) => f.tipo === 'lojista' && f.refId === g.lojistaId && f.periodoChave === periodo.chave
       );
@@ -85,7 +88,7 @@ export default function Fechamentos({ data, setData }) {
         fechamento: fech || null,
       };
     }).sort((a, b) => (a.lojista?.nome || '').localeCompare(b.lojista?.nome || ''));
-  }, [coletas, lojistas, fechamentos, periodo, cfg]);
+  }, [coletas, lojistas, fechamentos, periodo, cfg, tarifas]);
 
   const totalPeriodo = resumo.reduce((s, r) => s + (r.fechamento?.total ?? r.calc.total), 0);
   const pendentesTotal = resumo.reduce((s, r) => s + r.pendentes, 0);
@@ -132,6 +135,7 @@ export default function Fechamentos({ data, setData }) {
       linhas: item.calc.linhas,
       coletaIds: item.conferidas.map((c) => c.id),
       status: 'cobrado',
+      recebimentos: [],
       numero: `${periodo.chave}-${String(nome).slice(0, 3).toUpperCase()}`,
       criadoEm: new Date().toISOString(),
     };
@@ -168,9 +172,15 @@ export default function Fechamentos({ data, setData }) {
   }
 
   function reabrir(fech) {
+    // Fechamento com dinheiro já recebido não é desfeito: seria apagar
+    // histórico de caixa. Estorne os recebimentos primeiro, no Histórico
+    // financeiro do lojista.
+    if (somaRecebimentos(fech) > 0) {
+      setErro('Este fechamento já tem recebimento registrado. Estorne no Histórico financeiro do lojista antes de reabrir.');
+      return;
+    }
     setData((d) => {
       const lanc = (d.finEmpresa || []).find((x) => x.fechamentoId === fech.id);
-      // Recebimento já baixado nunca é desfeito automaticamente.
       if (lanc && lanc.status === 'pago') return d;
       return {
         ...d,
@@ -295,20 +305,26 @@ export default function Fechamentos({ data, setData }) {
           <div className="ent-scroll">
             <table className="ent-tabela">
               <thead>
-                <tr><th>Data</th><th>Volumes</th><th>Unitário</th><th>Subtotal</th></tr>
+                <tr><th>Data</th><th>Marketplace</th><th>Volumes</th><th>Unitário</th><th>Subtotal</th></tr>
               </thead>
               <tbody>
-                {(detalhe.fechamento?.linhas || detalhe.calc.linhas).map((l, i) => (
-                  <tr key={i}>
-                    <td>{fmtData(l.data)}</td>
-                    <td><b>{l.qtd}</b></td>
-                    <td>{fmtBRL(l.tarifa)}</td>
-                    <td>
-                      {fmtBRL(l.total)}
-                      {l.usouMinimo && <span className="ent-tag-pad" style={{ marginLeft: 5 }}>mínimo</span>}
-                    </td>
-                  </tr>
-                ))}
+                {(detalhe.fechamento?.linhas || detalhe.calc.linhas).flatMap((l, i) => {
+                  const det = l.detalhe && l.detalhe.length ? l.detalhe : [{ plataforma: '—', qtd: l.qtd, tarifa: l.tarifa, subtotal: l.bruto }];
+                  return det.map((d, j) => (
+                    <tr key={`${i}-${j}`}>
+                      <td>{j === 0 ? fmtData(l.data) : ''}</td>
+                      <td>{d.plataforma || '—'}</td>
+                      <td><b>{d.qtd}</b></td>
+                      <td>{fmtBRL(d.tarifa)}</td>
+                      <td>
+                        {fmtBRL(d.subtotal)}
+                        {j === det.length - 1 && l.usouMinimo && (
+                          <span className="ent-tag-pad" style={{ marginLeft: 5 }}>mínimo {fmtBRL(l.total)}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ));
+                })}
               </tbody>
             </table>
           </div>
@@ -343,11 +359,7 @@ function CardFechamento({ item, onFechar, onReabrir, onPDF, onWhats, onDetalhe }
             </div>
           </div>
         </div>
-        {fechado && (
-          <span className="ent-status on" style={{ background: '#EDE9FE', color: '#7C3AED' }}>
-            <Lock size={10} style={{ display: 'inline', marginRight: 3 }} /> Cobrado
-          </span>
-        )}
+        {fechado && <Chip lista={FECHAMENTO_STATUS} k={statusFechamentoLojista(f)} />}
       </div>
 
       <div className="ent-conf-tot" style={{ marginTop: 12 }}>
@@ -359,6 +371,15 @@ function CardFechamento({ item, onFechar, onReabrir, onPDF, onWhats, onDetalhe }
           </span>
         )}
       </div>
+
+      {fechado && somaRecebimentos(f) > 0 && (
+        <div className="text-xs" style={{ marginTop: 6, color: 'var(--color-text-muted)' }}>
+          Recebido {fmtBRL(somaRecebimentos(f))} · saldo{' '}
+          <b style={{ color: saldoFechamento(f) > 0 ? '#B91C1C' : '#047857' }}>
+            {fmtBRL(saldoFechamento(f))}
+          </b>
+        </div>
+      )}
 
       <div className="ent-mb-acoes" style={{ marginTop: 12 }}>
         {!fechado ? (
