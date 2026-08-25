@@ -4,10 +4,10 @@ import {
   ChevronRight, Lock, Coins,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
-import { ModalBase, Campo, Vazio, Aviso, Chip, uidLocal, fmtData, fmtBRL } from './ui';
+import { ModalBase, Campo, Vazio, Aviso, Chip, ModalConfirma, uidLocal, fmtData, fmtBRL } from './ui';
 import { FECHAMENTO_STATUS } from './constants';
 import {
-  getConfigEntregas, periodosDoMes, cobrancaDoLojista, statusConciliacao,
+  getConfigEntregas, periodosComMes, cobrancaDoLojista, statusConciliacao,
   vencimentoCobranca, dentroDoPeriodo, statusFechamentoLojista, somaRecebimentos,
   saldoFechamento,
 } from './engine';
@@ -56,15 +56,23 @@ export default function Fechamentos({ data, setData }) {
   const [{ ano, mes }, setMesRef] = useState(mesAtual());
   const [periodoIdx, setPeriodoIdx] = useState(0);
   const [detalhe, setDetalhe] = useState(null);
+  const [reabrirAlvo, setReabrirAlvo] = useState(null);
   const [erro, setErro] = useState('');
 
-  const periodos = useMemo(() => periodosDoMes(ano, mes, cfg), [ano, mes, cfg]);
+  const periodos = useMemo(() => periodosComMes(ano, mes, cfg), [ano, mes, cfg]);
   const periodo = periodos[Math.min(periodoIdx, periodos.length - 1)] || periodos[0];
 
   // Agrupa por lojista as coletas conferidas dentro do período.
   const resumo = useMemo(() => {
     if (!periodo) return [];
-    const doPeriodo = coletas.filter((c) => dentroDoPeriodo(c.data, periodo));
+    // Coleta já incluída num fechamento não pode entrar de novo. Sem isso, a
+    // opção "Mês inteiro" contaria em dobro o que já foi cobrado na quinzena.
+    const doPeriodo = coletas.filter((c) => {
+      if (!dentroDoPeriodo(c.data, periodo)) return false;
+      if (!c.fechamentoLojistaId) return true;
+      const f = fechamentos.find((x) => x.id === c.fechamentoLojistaId);
+      return !!f && f.periodoChave === periodo.chave;
+    });
     const mapa = new Map();
 
     doPeriodo.forEach((c) => {
@@ -296,7 +304,7 @@ export default function Fechamentos({ data, setData }) {
           {resumo.map((item) => (
             <CardFechamento key={item.lojistaId} item={item}
               onFechar={() => fechar(item)}
-              onReabrir={() => reabrir(item.fechamento)}
+              onReabrir={() => setReabrirAlvo(item)}
               onPDF={() => baixarPDF(item)}
               onWhats={() => enviarWhatsApp(item)}
               onDetalhe={() => setDetalhe(item)} />
@@ -304,6 +312,15 @@ export default function Fechamentos({ data, setData }) {
         </div>
       )}
 
+      {reabrirAlvo && (
+        <ModalConfirma
+          titulo="Reabrir fechamento"
+          rotulo="Reabrir"
+          mensagem={`Reabrir o fechamento de ${reabrirAlvo.lojista?.nome || 'este lojista'}? A cobrança gerada no Financeiro Empresa será removida e as coletas voltam a ficar disponíveis.`}
+          onCancelar={() => setReabrirAlvo(null)}
+          onConfirmar={() => { reabrir(reabrirAlvo.fechamento); setReabrirAlvo(null); }}
+        />
+      )}
       {detalhe && (
         <ModalBase largo titulo={`${detalhe.lojista?.nome || 'Lojista'} — ${periodo.label}`}
           onFechar={() => setDetalhe(null)}>

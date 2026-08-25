@@ -594,3 +594,27 @@ export function idDocumento(prefixo, refId, periodoChave) {
   const base = `${String(refId || '').slice(-4)}${String(periodoChave || '').replace(/-/g, '')}`;
   return `${prefixo}-${base.toUpperCase()}`;
 }
+
+/** Período que cobre o mês inteiro, usado como alternativa às quinzenas. */
+export function periodoMesInteiro(ano, mes) {
+  const fim = ultimoDiaDoMes(ano, mes);
+  const iso = (d) => `${ano}-${pad(mes)}-${pad(d)}`;
+  return {
+    chave: `${ano}-${pad(mes)}-MES`,
+    inicio: iso(1),
+    fim: iso(fim),
+    label: 'Mês inteiro',
+    mensal: true,
+  };
+}
+
+/**
+ * Períodos oferecidos na tela, sempre com a opção de mês inteiro no fim.
+ * O ciclo configurado continua mandando no padrão; o mês é uma alternativa
+ * para quem prefere fechar de uma vez só.
+ */
+export function periodosComMes(ano, mes, cfgComercial = {}) {
+  const base = periodosDoMes(ano, mes, cfgComercial);
+  if (base.length === 1 && base[0].inicio.endsWith('-01')) return base; // ciclo já é mensal
+  return [...base, periodoMesInteiro(ano, mes)];
+}

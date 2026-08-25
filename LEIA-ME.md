@@ -1,82 +1,60 @@
-# Módulo Entregas — pacote COMPLETO (v11)
+# Módulo Entregas — pacote COMPLETO (v12)
 
-Este ZIP tem **a pasta `src/entregas` inteira** (16 arquivos) mais os dois
-geradores de PDF. Não é um remendo: substituindo essas pastas, o módulo fica
-na versão mais recente por completo, sem chance de ficar pela metade.
+Pasta `src/entregas` inteira (16 arquivos) + os dois geradores de PDF.
+Substitua as pastas e o módulo fica completo, sem chance de ficar pela metade.
 
-Nada de Firebase. Nada de App.jsx, AuthContext, AuthGate ou useFirestoreSync.
+Nada de Firebase. Nada de App.jsx.
 
----
-
-## Como subir
-
-1. Descompacte o ZIP
-2. GitHub → **Add file → Upload files**
-3. Arraste a **pasta `src`** (o ícone da pasta, não os arquivos de dentro)
-4. Commit e aguarde o deploy
+Confirme o selo **"Entregas v12"** no canto da barra de abas depois do deploy.
 
 ---
 
-## Como conferir se subiu certo
+## 1. Opção mensal nos períodos
 
-Abra Entregas. No canto direito da barra de abas aparece um selo cinza
-escrito **"Entregas v11"**.
+**Fechamentos e Repasses** ganharam uma terceira aba: além de 01–15 e 16–31,
+agora existe **Mês inteiro**. Serve para o lojista ou motoboy que você prefere
+fechar de uma vez só.
 
-Se o selo não aparecer, o deploy não pegou — não adianta testar o resto.
+**Histórico do motoboy** ganhou o par de botões **Por quinzena / Mensal**.
+No modo mensal, as duas quinzenas viram uma linha só, com entregas, valores e
+tarifa média recalculados sobre o mês.
 
----
+### Uma correção que veio junto
 
-## Por que isso foi necessário
-
-Pelos prints, os Blocos 10 e 11 não chegaram a entrar no ar. O card do
-lojista mostrava a tarifa antiga sem as etiquetas por marketplace, e faltava
-o botão Histórico. Sem esses dois blocos, nada do que você procurou existia:
-
-- multi-marketplace na coleta (Bloco 10)
-- data retroativa (Bloco 10)
-- tarifa por marketplace (Bloco 10)
-- histórico financeiro do lojista (Bloco 11)
-- histórico e extrato do motoboy (Bloco 11)
+A tela de fechamentos não descartava coletas já fechadas em outro período.
+Com quinzena isso nunca aparecia, mas com "Mês inteiro" o que já foi cobrado
+na primeira quinzena seria contado de novo. Agora uma coleta só aparece no
+período do fechamento a que pertence.
 
 ---
 
-## Onde encontrar cada coisa
+## 2. Confirmação em toda ação destrutiva
 
-**Tarifa por marketplace** — Entregas → Lojistas → botão **Tarifa**.
-Tem o valor geral em cima e uma linha por marketplace embaixo. O que ficar
-em branco usa o valor geral. No card aparecem etiquetas azuis com cada valor.
+Auditei o módulo inteiro. Estas oito ações agora pedem confirmação:
 
-**Extrato de pagamento do motoboy** — Entregas → **Motoboys** → botão
-**Histórico** no card do motoboy → cada quinzena tem **Extrato PDF** e
-**Enviar**.
+| Onde | Ação | Já tinha? |
+|---|---|---|
+| Motoboys | Excluir motoboy | sim |
+| Motoboys | **Revogar convite** | não |
+| Lojistas | Excluir lojista | sim |
+| Bases | Excluir base | sim |
+| Base & Triagem | **Excluir rota** | não |
+| Repasses | **Estornar pagamento** | não |
+| Histórico do lojista | **Estornar recebimento** | não |
+| Fechamentos | **Reabrir fechamento** | não |
+| Configurações | **Remover região / marketplace** | não |
 
-**Histórico financeiro do lojista** — Entregas → Lojistas → botão
-**Histórico** → linha do tempo com Registrar recebimento, PDF e Compartilhar.
-
-**Multi-marketplace e data retroativa** — no app do motoboy, botão
-**Registrar coleta**. A tela agora tem um contador por marketplace e, abaixo,
-uma faixa com os últimos 7 dias (Hoje, Sáb 23, Sex 22...) mais um campo de
-data.
-
----
-
-## Sobre as Configurações travadas
-
-Lembre que a tela de Configurações do módulo **só grava ao clicar em
-"Salvar configurações"**, no fim da página. Adicionar uma plataforma ou
-região com o botão **+** apenas monta a lista na tela; sair sem salvar
-descarta.
-
-Se depois de salvar continuar não gravando, abra o console (F12) e me mande
-o erro — aí é outra coisa.
+Cada aviso explica a consequência real, não só "tem certeza?". O de revogar
+convite, por exemplo, esclarece que quem já criou a conta continua com acesso
+— para tirar o acesso é preciso remover a pessoa em Configurações → Equipe.
 
 ---
 
-## O erro do PDF
+## 3. Configurações — aviso de alterações não salvas
 
-Este pacote já traz a versão que mostra a **causa real** na mensagem, em vez
-de "não foi possível". Se ainda falhar, o print da faixa vermelha agora diz
-exatamente o que houve.
+Ao lado do botão Salvar agora aparece **"Alterações só valem depois de
+salvar"**. Era a causa mais provável da impressão de que a tela estava
+travada: o botão **+** monta a lista, mas nada vai para a nuvem sem salvar.
 
-O gerador foi testado isolado com os dados do A&G Imports (18 volumes,
-R$ 162, Shopee) e produziu o PDF corretamente.
+Se depois de clicar em Salvar continuar não gravando, abra o console (F12) e
+me mande o erro.

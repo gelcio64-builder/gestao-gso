@@ -3,9 +3,9 @@ import {
   Bike, Wallet, Plus, ChevronLeft, ChevronRight, AlertTriangle, Check,
   History, Lock, Image as ImgIcon,
 } from 'lucide-react';
-import { ModalBase, Campo, Vazio, Chip, Aviso, uidLocal, fmtData, fmtBRL } from './ui';
+import { ModalBase, Campo, Vazio, Chip, Aviso, ModalConfirma, uidLocal, fmtData, fmtBRL } from './ui';
 import {
-  getConfigEntregas, periodosDoMes, repasseDoMotoboy, somaPagamentos,
+  getConfigEntregas, periodosComMes, repasseDoMotoboy, somaPagamentos,
   saldoRepasse, statusRepasse, dentroDoPeriodo, vencimentoCobranca,
 } from './engine';
 import { REPASSE_STATUS, FORMAS_REPASSE, CAT_REPASSE_MOTOBOYS } from './constants';
@@ -44,9 +44,10 @@ export default function Repasses({ data, setData }) {
   const [periodoIdx, setPeriodoIdx] = useState(0);
   const [pagando, setPagando] = useState(null);
   const [historico, setHistorico] = useState(null);
+  const [estornoAlvo, setEstornoAlvo] = useState(null);
   const [erro, setErro] = useState('');
 
-  const periodos = useMemo(() => periodosDoMes(ano, mes, cfg), [ano, mes, cfg]);
+  const periodos = useMemo(() => periodosComMes(ano, mes, cfg), [ano, mes, cfg]);
   const periodo = periodos[Math.min(periodoIdx, periodos.length - 1)] || periodos[0];
 
   const linhas = useMemo(() => {
@@ -226,7 +227,7 @@ export default function Repasses({ data, setData }) {
                       <td style={{ color: '#6B7280' }}>{p.obs || '—'}</td>
                       <td>
                         <button className="ent-mini neutro" style={{ color: '#B91C1C' }}
-                          onClick={() => { estornar(p); setHistorico(null); }}>
+                          onClick={() => setEstornoAlvo(p)}>
                           Estornar
                         </button>
                       </td>
@@ -244,6 +245,16 @@ export default function Repasses({ data, setData }) {
             <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>de saldo</span>
           </div>
         </ModalBase>
+      )}
+
+      {estornoAlvo && (
+        <ModalConfirma
+          titulo="Estornar pagamento"
+          rotulo="Estornar"
+          mensagem={`Estornar ${fmtBRL(estornoAlvo.valor)} pagos a ${estornoAlvo.motoboyNome} em ${fmtData(estornoAlvo.data)}? A saída correspondente será removida do Financeiro Empresa e o saldo volta a aparecer.`}
+          onCancelar={() => setEstornoAlvo(null)}
+          onConfirmar={() => { estornar(estornoAlvo); setEstornoAlvo(null); setHistorico(null); }}
+        />
       )}
 
       <style>{RP_CSS}</style>

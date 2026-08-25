@@ -3,7 +3,7 @@ import {
   FileText, Download, Send, Check, Wallet, History, TrendingUp, AlertTriangle,
 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
-import { ModalBase, Campo, Vazio, Chip, Aviso, uidLocal, fmtData, fmtBRL } from './ui';
+import { ModalBase, Campo, Vazio, Chip, Aviso, ModalConfirma, uidLocal, fmtData, fmtBRL } from './ui';
 import {
   getConfigEntregas, historicoLojista, historicoRepasses, detalheRotasExtrato,
   somaRecebimentos, saldoFechamento, statusFechamentoLojista, dataQuitacao, idDocumento,
@@ -50,6 +50,7 @@ export function HistoricoLojista({ lojista, data, setData, onFechar }) {
   const fechamentos = Array.isArray(data?.entFechamentos) ? data.entFechamentos : [];
   const linhas = useMemo(() => historicoLojista(lojista.id, fechamentos), [lojista.id, fechamentos]);
   const [recebendo, setRecebendo] = useState(null);
+  const [estornoAlvo, setEstornoAlvo] = useState(null);
   const [erro, setErro] = useState('');
 
   const totais = linhas.reduce((a, l) => ({
@@ -183,7 +184,7 @@ export function HistoricoLojista({ lojista, data, setData, onFechar }) {
                     <div key={r.id} className="cc-rec">
                       <span>{fmtData(r.data)} · {r.forma}</span>
                       <b>{fmtBRL(r.valor)}</b>
-                      <button onClick={() => estornar(f, r)}>Estornar</button>
+                      <button onClick={() => setEstornoAlvo({ fech: f, rec: r })}>Estornar</button>
                     </div>
                   ))}
                 </div>
@@ -207,6 +208,18 @@ export function HistoricoLojista({ lojista, data, setData, onFechar }) {
         </div>
       )}
 
+      {estornoAlvo && (
+        <ModalConfirma
+          titulo="Estornar recebimento"
+          rotulo="Estornar"
+          mensagem={
+            `Estornar ${fmtBRL(estornoAlvo.rec.valor)} recebidos em ${fmtData(estornoAlvo.rec.data)}? `
+            + 'A conta a receber no Financeiro Empresa volta a ficar pendente.'
+          }
+          onCancelar={() => setEstornoAlvo(null)}
+          onConfirmar={() => { estornar(estornoAlvo.fech, estornoAlvo.rec); setEstornoAlvo(null); }}
+        />
+      )}
       {recebendo && (
         <FormRecebimento fech={recebendo} lojista={lojista}
           onSalvar={(d) => registrarRecebimento(recebendo, d)}
@@ -274,12 +287,59 @@ export function HistoricoMotoboy({ motoboy, data, onFechar }) {
   const pagamentos = Array.isArray(data?.entPagamentos) ? data.entPagamentos : [];
   const bases = Array.isArray(data?.entBases) ? data.entBases : [];
   const [meses, setMeses] = useState(6);
+  // 'quinzena' mostra cada período do ciclo; 'mes' junta as quinzenas do
+  // mesmo mês numa linha só, para quem prefere enxergar o fechamento mensal.
+  const [agrupar, setAgrupar] = useState('quinzena');
   const [erro, setErro] = useState('');
 
   // Mesma função que alimenta a aba Repasses — não há segunda apuração.
   const linhas = useMemo(() => historicoRepasses({
     motoboyId: motoboy.id, coletas, rotas, pagamentos, cfgComercial: cfg, mesesParaTras: meses,
   }), [motoboy.id, coletas, rotas, pagamentos, cfg, meses]);
+
+  const exibidas = useMemo(() => {
+    if (agrupar === 'quinzena') return linhas;
+    const mapa = new Map();
+    linhas.forEach((l) => {
+      const k = `${l.ano}-${String(l.mes).padStart(2, '0')}`;
+      if (!mapa.has(k)) {
+        mapa.set(k, {
+          ...l,
+          agrupado: true,
+          periodo: {
+            chave: `${k}-MES`,
+            label: 'Mês inteiro',
+            inicio: `${k}-01`,
+            fim: l.periodo.fim,
+          },
+          calc: { ...l.calc },
+          rotas: [...l.rotas],
+          pagamentos: [...l.pagamentos],
+        });
+        return;
+      }
+      const g = mapa.get(k);
+      g.calc = {
+        ...g.calc,
+        qtdEntregas: g.calc.qtdEntregas + l.calc.qtdEntregas,
+        qtdColetas: g.calc.qtdColetas + l.calc.qtdColetas,
+        valorEntregas: g.calc.valorEntregas + l.calc.valorEntregas,
+        valorColetas: g.calc.valorColetas + l.calc.valorColetas,
+        total: g.calc.total + l.calc.total,
+      };
+      g.rotas = [...g.rotas, ...l.rotas];
+      g.pagamentos = [...g.pagamentos, ...l.pagamentos];
+      g.pago += l.pago;
+      g.saldo += l.saldo;
+      g.periodo.inicio = l.periodo.inicio < g.periodo.inicio ? l.periodo.inicio : g.periodo.inicio;
+      g.periodo.fim = l.periodo.fim > g.periodo.fim ? l.periodo.fim : g.periodo.fim;
+      // Tarifa média recalculada sobre o mês todo.
+      g.tarifaMedia = g.calc.qtdEntregas > 0
+        ? Math.round((g.calc.valorEntregas / g.calc.qtdEntregas) * 100) / 100 : 0;
+      g.situacao = g.saldo <= 0.009 ? 'pago' : (g.pago > 0 ? 'parcial' : 'pendente');
+    });
+    return [...mapa.values()].sort((a, b) => String(b.periodo.inicio).localeCompare(String(a.periodo.inicio)));
+  }, [linhas, agrupar]);
 
   const totais = linhas.reduce((a, l) => ({
     gerado: a.gerado + l.calc.total,
@@ -347,21 +407,28 @@ export function HistoricoMotoboy({ motoboy, data, onFechar }) {
 
       {erro && <div className="ent-erro"><AlertTriangle size={14} /> {erro}</div>}
 
-      <div className="flex gap-2 mb-3 flex-wrap">
+      <div className="flex gap-2 mb-3 flex-wrap items-center">
         {[3, 6, 12].map((m) => (
           <button key={m} className={`ent-tab${meses === m ? ' on' : ''}`} onClick={() => setMeses(m)}
             style={{ padding: '5px 11px', fontSize: 12 }}>
             {m} meses
           </button>
         ))}
+        <span style={{ width: 1, height: 20, background: '#E5E7EB', margin: '0 2px' }} />
+        {[['quinzena', 'Por quinzena'], ['mes', 'Mensal']].map(([k, rot]) => (
+          <button key={k} className={`ent-tab${agrupar === k ? ' on' : ''}`} onClick={() => setAgrupar(k)}
+            style={{ padding: '5px 11px', fontSize: 12 }}>
+            {rot}
+          </button>
+        ))}
       </div>
 
-      {!linhas.length ? (
+      {!exibidas.length ? (
         <Vazio icon={Wallet} titulo="Nenhum período com movimento"
           sub="As quinzenas aparecem aqui conforme as rotas de entrega forem criadas." />
       ) : (
         <div className="cc-linha-lista">
-          {linhas.map((l) => (
+          {exibidas.map((l) => (
             <div key={l.periodo.chave} className="cc-linha">
               <div className="cc-linha-h">
                 <div>

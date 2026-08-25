@@ -31,7 +31,7 @@ import { HistoricoMotoboy } from './ContaCorrente';
 //   barra lateral dentro da tela.
 // ============================================================
 
-export const VERSAO_ENTREGAS = 'Entregas v11';
+export const VERSAO_ENTREGAS = 'Entregas v12';
 
 const ABAS = [
   { k: 'painel', label: 'Painel', icon: LayoutDashboard },
@@ -111,6 +111,7 @@ function Motoboys({ data, setData }) {
   const [tarifaAlvo, setTarifaAlvo] = useState(null);
   const [delAlvo, setDelAlvo] = useState(null);
   const [histAlvo, setHistAlvo] = useState(null);
+  const [revogarAlvo, setRevogarAlvo] = useState(null);
   const [erro, setErro] = useState('');
 
   const filtrados = useMemo(() => {
@@ -256,7 +257,7 @@ function Motoboys({ data, setData }) {
                 onTarifa={() => setTarifaAlvo(m)}
                 onHistorico={() => setHistAlvo(m)}
                 onConvite={() => gerarConvite(m)}
-                onRevogar={() => revogarConvite(m)}
+                onRevogar={() => setRevogarAlvo(m)}
                 onVerCodigo={() => setConvite({ codigo: m.conviteCodigo, nome: m.nome })} />
             ))}
           </div>
@@ -270,6 +271,19 @@ function Motoboys({ data, setData }) {
       )}
       {histAlvo && (
         <HistoricoMotoboy motoboy={histAlvo} data={data} onFechar={() => setHistAlvo(null)} />
+      )}
+      {revogarAlvo && (
+        <ModalConfirma
+          titulo="Revogar convite"
+          rotulo="Revogar"
+          mensagem={
+            `Revogar o convite de ${revogarAlvo.nome || 'este motoboy'} (${revogarAlvo.conviteCodigo})? `
+            + 'O código deixa de funcionar imediatamente. Quem já criou a conta com ele continua com acesso; '
+            + 'para tirar o acesso de alguém, remova a pessoa em Configurações → Equipe.'
+          }
+          onCancelar={() => setRevogarAlvo(null)}
+          onConfirmar={() => { revogarConvite(revogarAlvo); setRevogarAlvo(null); }}
+        />
       )}
       {convite && <ModalConvite convite={convite} onFechar={() => setConvite(null)} />}
       {delAlvo && (

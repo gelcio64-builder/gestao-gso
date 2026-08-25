@@ -33,6 +33,7 @@ export default function Triagem({ data, setData }) {
 
   const [dia, setDia] = useState(hojeISO());
   const [novaRota, setNovaRota] = useState(null);
+  const [delRota, setDelRota] = useState(null);
   const [erro, setErro] = useState('');
 
   const doDia = useMemo(() => coletas.filter((c) => c.data === dia), [coletas, dia]);
@@ -229,7 +230,7 @@ export default function Triagem({ data, setData }) {
 
                   {!r.fechamentoId && (
                     <div className="ent-mb-acoes">
-                      <button className="btn btn-ghost ent-b-sm ent-b-del" onClick={() => excluirRota(r)}>
+                      <button className="btn btn-ghost ent-b-sm ent-b-del" onClick={() => setDelRota(r)}>
                         <Trash2 size={13} /> Excluir
                       </button>
                     </div>
@@ -241,6 +242,18 @@ export default function Triagem({ data, setData }) {
         )}
       </div>
 
+      {delRota && (
+        <ModalConfirma
+          titulo="Excluir rota"
+          mensagem={
+            `Excluir a rota de ${delRota.motoboyNome || 'este motoboy'} (${delRota.qtdAtribuida} volumes`
+            + `${Number(delRota.qtdConcluida) > 0 ? `, ${delRota.qtdConcluida} já entregues` : ''})? `
+            + 'O valor gerado por ela deixa de contar no repasse do período.'
+          }
+          onCancelar={() => setDelRota(null)}
+          onConfirmar={() => { excluirRota(delRota); setDelRota(null); }}
+        />
+      )}
       {novaRota && (
         <FormRota item={novaRota} motoboys={motoboys} bases={bases} regioes={regioes}
           maximo={aDistribuir} onSalvar={criarRota} onCancelar={() => setNovaRota(null)} />

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Plus, X, Save, Info } from 'lucide-react';
-import { Campo, uidLocal } from './ui';
+import { Campo, ModalConfirma, uidLocal } from './ui';
 import { getConfigEntregas } from './engine';
 import {
   MODO_PAGAMENTO, MODO_PAGAMENTO_LABEL,
@@ -28,6 +28,7 @@ export default function ConfigEntregas({ data, setData }) {
   const [novaRegiao, setNovaRegiao] = useState('');
   const [novaPlataforma, setNovaPlataforma] = useState('');
   const [salvo, setSalvo] = useState(false);
+  const [remover, setRemover] = useState(null); // { tipo, valor, rotulo }
 
   function salvar() {
     setData((d) => {
@@ -175,7 +176,7 @@ export default function ConfigEntregas({ data, setData }) {
           {(op.regioes || []).map((r) => (
             <span key={r.id} className="ent-mini ok">
               {r.nome}
-              <button onClick={() => setOp((p) => ({ ...p, regioes: p.regioes.filter((x) => x.id !== r.id) }))}
+              <button onClick={() => setRemover({ tipo: 'regiao', valor: r.id, rotulo: r.nome })}
                 style={{ background: 'transparent', border: 0, cursor: 'pointer', color: 'inherit', padding: 0, marginLeft: 2 }}>
                 <X size={12} />
               </button>
@@ -194,7 +195,7 @@ export default function ConfigEntregas({ data, setData }) {
           {(op.plataformas || []).map((p) => (
             <span key={p} className="ent-mini ok">
               {p}
-              <button onClick={() => setOp((s) => ({ ...s, plataformas: s.plataformas.filter((x) => x !== p) }))}
+              <button onClick={() => setRemover({ tipo: 'plataforma', valor: p, rotulo: p })}
                 style={{ background: 'transparent', border: 0, cursor: 'pointer', color: 'inherit', padding: 0, marginLeft: 2 }}>
                 <X size={12} />
               </button>
@@ -209,8 +210,33 @@ export default function ConfigEntregas({ data, setData }) {
           label="Exigir comprovante para concluir uma rota" />
       </Secao>
 
-      <div className="flex items-center justify-end gap-3">
-        {salvo && <span className="text-sm" style={{ color: '#047857' }}>Configurações salvas</span>}
+      {remover && (
+        <ModalConfirma
+          titulo={remover.tipo === 'regiao' ? 'Remover região' : 'Remover marketplace'}
+          rotulo="Remover"
+          mensagem={
+            remover.tipo === 'regiao'
+              ? `Remover a região "${remover.rotulo}"? Rotas e bases já criadas com ela continuam como estão — a região só deixa de aparecer nas próximas.`
+              : `Remover o marketplace "${remover.rotulo}"? Ele some da lista do motoboy e do formulário de tarifas. Coletas e cobranças já registradas não mudam.`
+          }
+          onCancelar={() => setRemover(null)}
+          onConfirmar={() => {
+            if (remover.tipo === 'regiao') {
+              setOp((p) => ({ ...p, regioes: (p.regioes || []).filter((x) => x.id !== remover.valor) }));
+            } else {
+              setOp((p) => ({ ...p, plataformas: (p.plataformas || []).filter((x) => x !== remover.valor) }));
+            }
+            setRemover(null);
+          }}
+        />
+      )}
+
+      <div className="flex items-center justify-end gap-3 cfg-barra">
+        {salvo
+          ? <span className="text-sm" style={{ color: '#047857' }}>Configurações salvas</span>
+          : <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
+              Alterações só valem depois de salvar
+            </span>}
         <button className="btn btn-primary" onClick={() => {
           salvar();
         }}><Save size={15} /> Salvar configurações</button>
@@ -219,6 +245,7 @@ export default function ConfigEntregas({ data, setData }) {
   );
 
   function Secao({ titulo, sub, children }) {
+    // eslint-disable-next-line
     return (
       <div className="card p-4">
         <h3 className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>{titulo}</h3>
